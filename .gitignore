@@ -37,6 +37,9 @@ yarn-error.log*
 # local credentials handoff (never commit)
 CREDENTIALS.local.md
 
+# local editor / harness config
+.claude/
+
 # vercel
 .vercel
 

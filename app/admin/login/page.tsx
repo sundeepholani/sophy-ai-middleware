@@ -44,9 +44,14 @@ export default function LoginPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
-      <Card className="w-full max-w-sm">
+      <Card className="w-full max-w-sm shadow-lg">
         <CardHeader>
-          <CardTitle>AI Middleware</CardTitle>
+          <div className="mb-2 flex items-center gap-2">
+            <div className="grid h-8 w-8 place-items-center rounded-md bg-primary text-sm font-bold text-primary-foreground">
+              ai
+            </div>
+            <CardTitle className="text-lg">AI Middleware</CardTitle>
+          </div>
           <CardDescription>Operator sign in</CardDescription>
         </CardHeader>
         <CardContent>
