@@ -1,19 +1,19 @@
 /**
  * Client API key issuance and verification.
  *
- * Keys look like `mw_<env>_<48 hex chars>`. We store:
- *   - key_prefix  `mw_<env>_<first 8 hex>`  (non-secret, unique, indexed lookup)
- *   - key_hash    HMAC-SHA256(full_key, KEY_HASH_PEPPER), hex   (fast verify)
- *   - key_last4   last 4 hex                                     (display only)
+ * In the simplified model the key IS the configuration: each key carries its
+ * model, system prompt, params, optional output schema, and quota. verifyKey()
+ * returns all of it, read fresh from Postgres on every request — so admin edits
+ * apply instantly and revocation (status) is authoritative with no cache.
  *
- * HMAC (not bcrypt) is correct here: keys are high-entropy and verified on every
- * request, so we want a fast keyed MAC + a server-side pepper, not a slow KDF.
- * The raw key is shown once at creation and never retrievable.
+ * Keys look like `mw_<env>_<48 hex>`. We store key_prefix (indexed lookup),
+ * key_hash = HMAC-SHA256(full_key, KEY_HASH_PEPPER), and key_last4 (display).
+ * HMAC (not bcrypt) is correct: keys are high-entropy and verified every request.
  */
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { getDb } from '@/db/client';
-import { apiKeys, type KeyScopes, type KeyStatus } from '@/db/schema';
+import { apiKeys, type KeyParams, type KeyStatus } from '@/db/schema';
 import { env } from '@/lib/env';
 
 export interface GeneratedKey {
@@ -23,11 +23,25 @@ export interface GeneratedKey {
   hash: string;
 }
 
+export interface KeyConfigInput {
+  name: string;
+  model: string;
+  systemPrompt?: string | null;
+  params?: KeyParams;
+  outputSchema?: Record<string, unknown> | null;
+  monthlyTokenCap?: number | null;
+  rpmLimit?: number | null;
+}
+
 export interface VerifiedKey {
   id: string;
-  clientId: string;
   name: string;
-  scopes: KeyScopes;
+  model: string;
+  systemPrompt: string | null;
+  params: KeyParams;
+  outputSchema: Record<string, unknown> | null;
+  monthlyTokenCap: number | null;
+  rpmLimit: number | null;
   status: KeyStatus;
 }
 
@@ -56,22 +70,24 @@ export function generateKey(): GeneratedKey {
   };
 }
 
-/** Issue and persist a new key for a client. Returns the raw key (show once). */
-export async function issueKey(input: {
-  clientId: string;
-  name: string;
-  scopes?: KeyScopes;
-}): Promise<{ fullKey: string; id: string; prefix: string; last4: string }> {
+/** Issue and persist a new key with its config. Returns the raw key (show once). */
+export async function issueKey(
+  input: KeyConfigInput,
+): Promise<{ fullKey: string; id: string; prefix: string; last4: string }> {
   const gen = generateKey();
   const [row] = await getDb()
     .insert(apiKeys)
     .values({
-      clientId: input.clientId,
       name: input.name,
       keyPrefix: gen.prefix,
       keyHash: gen.hash,
       keyLast4: gen.last4,
-      scopes: input.scopes ?? {},
+      model: input.model,
+      systemPrompt: input.systemPrompt ?? null,
+      params: input.params ?? {},
+      outputSchema: input.outputSchema ?? null,
+      monthlyTokenCap: input.monthlyTokenCap ?? null,
+      rpmLimit: input.rpmLimit ?? null,
     })
     .returning({ id: apiKeys.id });
   return { fullKey: gen.fullKey, id: row.id, prefix: gen.prefix, last4: gen.last4 };
@@ -87,26 +103,16 @@ function constantTimeEqualHex(a: string, b: string): boolean {
 }
 
 /**
- * Verify a presented bearer token. Returns the key record on success, or null
- * for any failure (malformed, unknown, bad hash, expired, revoked).
- *
- * The key row (incl. `status`) is read fresh from Postgres on every request, so
- * revocation is already instant and authoritative — no separate flag needed.
+ * Verify a presented bearer token and return the key + its config, or null for
+ * any failure (malformed, unknown, bad hash, expired, revoked). `status` is read
+ * fresh from Postgres, so revocation is instant and authoritative.
  */
 export async function verifyKey(presented: string): Promise<VerifiedKey | null> {
   const prefix = keyPrefixOf(presented);
   if (!prefix) return null;
 
   const [row] = await getDb()
-    .select({
-      id: apiKeys.id,
-      clientId: apiKeys.clientId,
-      name: apiKeys.name,
-      keyHash: apiKeys.keyHash,
-      scopes: apiKeys.scopes,
-      status: apiKeys.status,
-      expiresAt: apiKeys.expiresAt,
-    })
+    .select()
     .from(apiKeys)
     .where(eq(apiKeys.keyPrefix, prefix))
     .limit(1);
@@ -118,9 +124,13 @@ export async function verifyKey(presented: string): Promise<VerifiedKey | null> 
 
   return {
     id: row.id,
-    clientId: row.clientId,
     name: row.name,
-    scopes: row.scopes,
+    model: row.model,
+    systemPrompt: row.systemPrompt,
+    params: row.params,
+    outputSchema: row.outputSchema ?? null,
+    monthlyTokenCap: row.monthlyTokenCap,
+    rpmLimit: row.rpmLimit,
     status: row.status,
   };
 }

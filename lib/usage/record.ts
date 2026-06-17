@@ -52,9 +52,6 @@ export function extractGatewayRequestId(pm: ProviderMetadata | undefined): strin
 
 export interface RecordUsageInput {
   keyId: string;
-  clientId: string;
-  routeId?: string | null;
-  routeName?: string | null;
   provider?: string | null;
   model?: string | null;
   usage: NormalizedUsage;
@@ -74,9 +71,6 @@ export async function recordUsage(input: RecordUsageInput): Promise<void> {
       .insert(usageEvents)
       .values({
         apiKeyId: input.keyId,
-        clientId: input.clientId,
-        routeId: input.routeId ?? null,
-        routeName: input.routeName ?? null,
         provider: input.provider ?? null,
         model: input.model ?? null,
         inputTokens: input.usage.inputTokens,

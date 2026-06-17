@@ -1,20 +1,17 @@
 /**
  * The provider call layer. Builds and runs AI SDK v6 calls THROUGH the Vercel
- * AI Gateway (plain "provider/model" string), maps results to the OpenAI wire
- * format, and performs usage/quota accounting.
+ * AI Gateway (plain "provider/model" string) using the config carried on the
+ * API key, maps results to the OpenAI wire format, and does usage accounting.
  *
  * Streaming correctness (critical): we never pass the client's abort signal to
  * the model, and we kick off `result.consumeStream()` under `waitUntil` so the
  * generation always drains to completion and `onFinish` always fires with full
- * token usage — even when the client disconnects mid-stream. This closes the
- * billing/quota-evasion hole where a cancelled stream would otherwise escape
- * accounting.
+ * token usage — even when the client disconnects mid-stream.
  */
 import { randomBytes } from 'node:crypto';
 import { generateText, streamText, Output, jsonSchema } from 'ai';
 import type { ModelMessage, FinishReason } from 'ai';
 import { waitUntil } from '@vercel/functions';
-import type { ResolvedRoute } from '@/lib/routing/resolve';
 import {
   toChatCompletion,
   chunkFrame,
@@ -51,36 +48,32 @@ function chatId(): string {
 
 export interface CallContext {
   keyId: string;
-  clientId: string;
-  resolved: ResolvedRoute;
-  messages: ModelMessage[];
+  /** Full AI Gateway model id, e.g. "anthropic/claude-sonnet-4.6". */
+  model: string;
+  systemPrompt: string | null;
   params: ResolvedParams;
   /** Whether to request structured output. */
   structured: boolean;
-  /** The JSON schema to enforce (route-bound, or client-supplied on overridable). */
+  /** The JSON schema to enforce (from the key's config). */
   schema: Record<string, unknown> | null;
   includeUsage: boolean;
 }
 
-function gatewayProviderOptions(ctx: CallContext) {
-  const tags = [
-    `route:${ctx.resolved.routeName}`.slice(0, 64),
-    `client:${ctx.clientId}`.slice(0, 64),
-  ];
-  const gateway: Record<string, unknown> = { user: ctx.keyId, tags };
-  // Disable failover on schema-critical routes (a fallback model may have lower
-  // structured-output fidelity). Enable it only for plain text routes.
-  if (!ctx.structured && ctx.resolved.fallbackModels.length > 0) {
-    gateway.models = ctx.resolved.fallbackModels;
-  }
-  return { gateway };
+function providerOf(model: string): string {
+  return model.split('/')[0] ?? 'unknown';
 }
 
-function commonCall(ctx: CallContext) {
+function gatewayProviderOptions(ctx: CallContext) {
   return {
-    model: ctx.resolved.model,
-    system: buildSystem(ctx.resolved.systemPrompt),
-    messages: ctx.messages,
+    gateway: { user: ctx.keyId, tags: [`key:${ctx.keyId}`.slice(0, 64)] },
+  };
+}
+
+function commonCall(ctx: CallContext, messages: ModelMessage[]) {
+  return {
+    model: ctx.model,
+    system: buildSystem(ctx.systemPrompt),
+    messages,
     temperature: ctx.params.temperature,
     topP: ctx.params.topP,
     maxOutputTokens: ctx.params.maxOutputTokens,
@@ -90,25 +83,20 @@ function commonCall(ctx: CallContext) {
 
 // ---- Non-streaming ----------------------------------------------------------
 
-export async function handleNonStreaming(ctx: CallContext): Promise<Response> {
+export async function handleNonStreaming(
+  ctx: CallContext,
+  messages: ModelMessage[],
+): Promise<Response> {
   const start = Date.now();
   const id = chatId();
   const created = Math.floor(start / 1000);
-  const publicModel = ctx.resolved.routeName;
-  const base = {
-    keyId: ctx.keyId,
-    clientId: ctx.clientId,
-    routeId: ctx.resolved.routeId,
-    routeName: ctx.resolved.routeName,
-    provider: ctx.resolved.provider,
-    model: ctx.resolved.model,
-  };
+  const base = { keyId: ctx.keyId, provider: providerOf(ctx.model), model: ctx.model };
 
   try {
     if (ctx.structured && ctx.schema) {
       const schema = ctx.schema;
       const result = await generateText({
-        ...commonCall(ctx),
+        ...commonCall(ctx, messages),
         experimental_output: Output.object({ schema: jsonSchema(schema) }),
       });
       const usage = normalizeUsage(result.usage);
@@ -142,7 +130,7 @@ export async function handleNonStreaming(ctx: CallContext): Promise<Response> {
         toChatCompletion({
           id,
           created,
-          model: publicModel,
+          model: ctx.model,
           content: JSON.stringify(obj),
           finishReason: result.finishReason,
           usage,
@@ -151,7 +139,7 @@ export async function handleNonStreaming(ctx: CallContext): Promise<Response> {
       );
     }
 
-    const result = await generateText(commonCall(ctx));
+    const result = await generateText(commonCall(ctx, messages));
     const usage = normalizeUsage(result.usage);
     await recordUsage({
       ...base,
@@ -166,7 +154,7 @@ export async function handleNonStreaming(ctx: CallContext): Promise<Response> {
       toChatCompletion({
         id,
         created,
-        model: publicModel,
+        model: ctx.model,
         content: result.text,
         finishReason: result.finishReason,
         usage,
@@ -197,24 +185,20 @@ const SSE_HEADERS: Record<string, string> = {
   'x-accel-buffering': 'no',
 };
 
-export function handleStreaming(ctx: CallContext): Response {
+export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Response {
   const start = Date.now();
   const id = chatId();
   const created = Math.floor(start / 1000);
-  const publicModel = ctx.resolved.routeName;
   const base = {
     keyId: ctx.keyId,
-    clientId: ctx.clientId,
-    routeId: ctx.resolved.routeId,
-    routeName: ctx.resolved.routeName,
-    provider: ctx.resolved.provider,
-    model: ctx.resolved.model,
+    provider: providerOf(ctx.model),
+    model: ctx.model,
     streamed: true,
     responseKind: (ctx.structured ? 'structured' : 'text') as 'structured' | 'text',
   };
 
   const result = streamText({
-    ...commonCall(ctx),
+    ...commonCall(ctx, messages),
     ...(ctx.structured && ctx.schema
       ? { experimental_output: Output.object({ schema: jsonSchema(ctx.schema) }) }
       : {}),
@@ -239,22 +223,19 @@ export function handleStreaming(ctx: CallContext): Response {
     },
   });
 
-  // CRITICAL: drain to completion regardless of client connection so onFinish
-  // (and thus usage/quota accounting) always fires. We deliberately do NOT pass
-  // the client's abort signal to streamText — an abandoned stream is still
-  // generated and billed.
+  // CRITICAL: drain regardless of client connection so onFinish (and accounting)
+  // always fires. We deliberately do NOT pass the client's abort signal.
   waitUntil(Promise.resolve(result.consumeStream()));
 
   const encoder = new TextEncoder();
+  const model = ctx.model;
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const enqueue = (s: string) => controller.enqueue(encoder.encode(s));
       try {
-        enqueue(sse(chunkFrame({ id, created, model: publicModel, delta: { role: 'assistant' } })));
+        enqueue(sse(chunkFrame({ id, created, model, delta: { role: 'assistant' } })));
         for await (const delta of result.textStream) {
-          if (delta) {
-            enqueue(sse(chunkFrame({ id, created, model: publicModel, delta: { content: delta } })));
-          }
+          if (delta) enqueue(sse(chunkFrame({ id, created, model, delta: { content: delta } })));
         }
         let finishReason: FinishReason | undefined;
         try {
@@ -263,29 +244,19 @@ export function handleStreaming(ctx: CallContext): Response {
           finishReason = undefined;
         }
         enqueue(
-          sse(
-            chunkFrame({
-              id,
-              created,
-              model: publicModel,
-              delta: {},
-              finishReason: mapFinishReason(finishReason),
-            }),
-          ),
+          sse(chunkFrame({ id, created, model, delta: {}, finishReason: mapFinishReason(finishReason) })),
         );
         if (ctx.includeUsage) {
           const usage = normalizeUsage(await result.totalUsage);
-          enqueue(sse(usageChunkFrame({ id, created, model: publicModel, usage })));
+          enqueue(sse(usageChunkFrame({ id, created, model, usage })));
         }
         enqueue(SSE_DONE);
         controller.close();
       } catch {
-        // Upstream/stream error or client disconnect. Accounting is handled by
-        // onFinish/onError via consumeStream(); just end the client stream.
         try {
           enqueue(SSE_DONE);
         } catch {
-          /* controller may already be closed */
+          /* already closed */
         }
         try {
           controller.close();

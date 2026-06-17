@@ -38,12 +38,11 @@ export interface UploadedFile {
 
 export async function uploadClientFile(input: {
   keyId: string;
-  clientId: string;
   filename: string;
   contentType: string;
   data: ArrayBuffer;
 }): Promise<UploadedFile> {
-  const blob = await put(`uploads/${input.clientId}/${input.filename}`, input.data, {
+  const blob = await put(`uploads/${input.keyId}/${input.filename}`, input.data, {
     access: 'public',
     token: env.blobReadWriteToken(),
     contentType: input.contentType,
@@ -54,7 +53,6 @@ export async function uploadClientFile(input: {
     pathname: blob.pathname,
     url: blob.url,
     apiKeyId: input.keyId,
-    clientId: input.clientId,
     contentType: input.contentType,
     size: input.data.byteLength,
   });
@@ -91,22 +89,21 @@ export function extractReferencedUrls(messages: OpenAIMessage[]): string[] {
 }
 
 /**
- * Ensure that any referenced URL which is one of OUR blobs belongs to this
- * client. External/public URLs pass through (a client could reference those
- * anyway). Returns false if a cross-tenant blob reference is detected.
+ * Ensure that any referenced URL which is one of OUR blobs belongs to this key.
+ * External/public URLs pass through (a client could reference those anyway).
+ * Returns false if a cross-key blob reference is detected.
  */
-export async function assertOwnedBlobs(clientId: string, urls: string[]): Promise<boolean> {
+export async function assertOwnedBlobs(keyId: string, urls: string[]): Promise<boolean> {
   const ours = urls.filter(isOurBlobUrl);
   if (ours.length === 0) return true;
   const rows = await getDb()
-    .select({ url: blobUploads.url, clientId: blobUploads.clientId })
+    .select({ url: blobUploads.url, apiKeyId: blobUploads.apiKeyId })
     .from(blobUploads)
     .where(inArray(blobUploads.url, ours));
-  // Every one of our referenced blobs must be owned by this client.
-  const owned = new Map(rows.map((r) => [r.url, r.clientId]));
+  const owned = new Map(rows.map((r) => [r.url, r.apiKeyId]));
   for (const u of ours) {
     const owner = owned.get(u);
-    if (owner && owner !== clientId) return false;
+    if (owner && owner !== keyId) return false;
   }
   return true;
 }

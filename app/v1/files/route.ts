@@ -57,7 +57,6 @@ export async function POST(req: Request): Promise<Response> {
     const data = await file.arrayBuffer();
     const uploaded = await uploadClientFile({
       keyId: key.id,
-      clientId: key.clientId,
       filename: file.name || 'upload',
       contentType,
       data,

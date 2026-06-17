@@ -35,30 +35,19 @@ describe('toModelMessages', () => {
 });
 
 describe('resolveParams', () => {
-  const operator = { temperature: 0.5, maxOutputTokens: 1000 };
-  const bounds = { temperature: { max: 0.8 }, maxOutputTokens: { max: 2000 } };
-
-  it('ignores client params on locked routes', () => {
-    const out = resolveParams(operator, bounds, 'locked', {
-      temperature: 2,
-      max_tokens: 9999,
-    });
+  it('passes through the key params', () => {
+    const out = resolveParams({ temperature: 0.5, maxOutputTokens: 1000, topP: 0.9 });
     expect(out.temperature).toBe(0.5);
     expect(out.maxOutputTokens).toBe(1000);
+    expect(out.topP).toBe(0.9);
   });
 
-  it('clamps client params to bounds on overridable routes', () => {
-    const out = resolveParams(operator, bounds, 'overridable', {
-      temperature: 2,
-      max_tokens: 9999,
+  it('handles empty params', () => {
+    expect(resolveParams({})).toEqual({
+      temperature: undefined,
+      topP: undefined,
+      maxOutputTokens: undefined,
     });
-    expect(out.temperature).toBe(0.8); // clamped to max
-    expect(out.maxOutputTokens).toBe(2000); // clamped to max
-  });
-
-  it('accepts in-range client params on overridable routes', () => {
-    const out = resolveParams(operator, bounds, 'overridable', { temperature: 0.3 });
-    expect(out.temperature).toBe(0.3);
   });
 });
 

@@ -6,9 +6,7 @@ import { cn } from '@/lib/utils';
 
 const ITEMS = [
   { href: '/admin', label: 'Overview' },
-  { href: '/admin/keys', label: 'Clients & Keys' },
-  { href: '/admin/routes', label: 'Routes' },
-  { href: '/admin/prompts', label: 'Prompts' },
+  { href: '/admin/keys', label: 'API Keys' },
   { href: '/admin/usage', label: 'Usage' },
   { href: '/admin/logs', label: 'Logs' },
 ];

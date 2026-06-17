@@ -1,12 +1,8 @@
 /**
- * OpenAI-compatible model listing. Returns the logical ROUTE NAMES the calling
- * key is scoped to — never the underlying provider models.
+ * OpenAI-compatible model listing. Each key maps to exactly one model, so this
+ * returns that single model id.
  */
-import { eq } from 'drizzle-orm';
-import { getDb } from '@/db/client';
-import { routes } from '@/db/schema';
 import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
-import { keyAllowsRoute } from '@/lib/routing/resolve';
 import { openAiError } from '@/lib/http/openai';
 
 export const runtime = 'nodejs';
@@ -23,19 +19,11 @@ export async function GET(req: Request): Promise<Response> {
     return openAiError(401, 'authentication_error', 'Invalid API key.', { code: 'invalid_api_key' });
   }
 
-  const rows = await getDb()
-    .select({ name: routes.name, createdAt: routes.createdAt })
-    .from(routes)
-    .where(eq(routes.clientId, key.clientId));
-
-  const data = rows
-    .filter((r) => keyAllowsRoute(key.scopes, r.name))
-    .map((r) => ({
-      id: r.name,
-      object: 'model' as const,
-      created: Math.floor(r.createdAt.getTime() / 1000),
-      owned_by: 'ai-middleware',
-    }));
-
-  return Response.json({ object: 'list', data }, { headers: { 'cache-control': 'no-store' } });
+  return Response.json(
+    {
+      object: 'list',
+      data: [{ id: key.model, object: 'model', created: 0, owned_by: 'ai-middleware' }],
+    },
+    { headers: { 'cache-control': 'no-store' } },
+  );
 }

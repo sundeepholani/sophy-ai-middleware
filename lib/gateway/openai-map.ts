@@ -12,7 +12,7 @@ import type {
   ChatCompletionChunk,
   OpenAIUsage,
 } from '@/lib/http/openai';
-import type { RouteParams, RouteParamBounds, RouteMode } from '@/db/schema';
+import type { KeyParams } from '@/db/schema';
 import type { NormalizedUsage } from '@/lib/usage/record';
 
 // ---- Message conversion -----------------------------------------------------
@@ -65,46 +65,13 @@ export interface ResolvedParams {
   maxOutputTokens?: number;
 }
 
-function clampNumber(value: number, min?: number, max?: number): number {
-  let v = value;
-  if (typeof min === 'number') v = Math.max(v, min);
-  if (typeof max === 'number') v = Math.min(v, max);
-  return v;
-}
-
-/**
- * Resolve the effective generation params. Operator defaults always apply. On
- * `overridable` routes, client-supplied values are accepted but clamped to the
- * route's bounds. On `locked` routes, client params are ignored entirely.
- */
-export function resolveParams(
-  operator: RouteParams,
-  bounds: RouteParamBounds,
-  mode: RouteMode,
-  client: { temperature?: number; top_p?: number; max_tokens?: number; max_completion_tokens?: number },
-): ResolvedParams {
-  const out: ResolvedParams = {
-    temperature: operator.temperature,
-    topP: operator.topP,
-    maxOutputTokens: operator.maxOutputTokens,
+/** The key's operator-set params are applied as-is (client params are ignored). */
+export function resolveParams(params: KeyParams): ResolvedParams {
+  return {
+    temperature: params.temperature,
+    topP: params.topP,
+    maxOutputTokens: params.maxOutputTokens,
   };
-  if (mode !== 'overridable') return out;
-
-  if (typeof client.temperature === 'number') {
-    out.temperature = clampNumber(
-      client.temperature,
-      bounds.temperature?.min,
-      bounds.temperature?.max,
-    );
-  }
-  if (typeof client.top_p === 'number') {
-    out.topP = clampNumber(client.top_p, bounds.topP?.min, bounds.topP?.max);
-  }
-  const clientMax = client.max_completion_tokens ?? client.max_tokens;
-  if (typeof clientMax === 'number') {
-    out.maxOutputTokens = clampNumber(clientMax, undefined, bounds.maxOutputTokens?.max);
-  }
-  return out;
 }
 
 // ---- Finish reason mapping --------------------------------------------------

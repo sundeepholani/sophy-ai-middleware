@@ -23,7 +23,7 @@ export default async function LogsPage() {
         <TableHeader>
           <TableRow>
             <TableHead>Time</TableHead>
-            <TableHead>Route</TableHead>
+            <TableHead>Key</TableHead>
             <TableHead>Model</TableHead>
             <TableHead>In</TableHead>
             <TableHead>Out</TableHead>
@@ -38,7 +38,7 @@ export default async function LogsPage() {
               <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                 {new Date(l.createdAt).toLocaleString()}
               </TableCell>
-              <TableCell className="font-mono text-xs">{l.routeName ?? '—'}</TableCell>
+              <TableCell className="font-mono text-xs">{l.apiKeyId.slice(0, 8)}</TableCell>
               <TableCell className="font-mono text-xs">{l.model ?? '—'}</TableCell>
               <TableCell>{l.inputTokens}</TableCell>
               <TableCell>{l.outputTokens}</TableCell>

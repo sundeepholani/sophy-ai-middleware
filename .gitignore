@@ -34,6 +34,9 @@ yarn-error.log*
 .env*
 !.env.example
 
+# local credentials handoff (never commit)
+CREDENTIALS.local.md
+
 # vercel
 .vercel
 
