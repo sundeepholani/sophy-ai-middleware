@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from 'react';
 import { toast } from 'sonner';
+import { Plus, Pencil } from 'lucide-react';
 import { createKey, updateKey, revokeKey, type KeyFormInput } from '@/app/admin/actions';
 import type { KeyRow } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
@@ -10,7 +11,6 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   Dialog,
   DialogContent,
@@ -20,12 +20,30 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 
 function numOrNull(s: string): number | null {
   const t = s.trim();
@@ -37,46 +55,114 @@ function numOrUndef(s: string): number | undefined {
   const n = numOrNull(s);
   return n == null ? undefined : n;
 }
+function quotaLabel(k: KeyRow): string {
+  const cap = k.monthlyTokenCap != null ? `${k.monthlyTokenCap.toLocaleString()} tok/mo` : '∞';
+  const rpm = k.rpmLimit != null ? `${k.rpmLimit}/min` : '∞';
+  return `${cap} · ${rpm}`;
+}
 
 export function KeysManager({ keys, models }: { keys: KeyRow[]; models: AvailableModel[] }) {
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editing, setEditing] = useState<KeyRow | null>(null);
   const [issued, setIssued] = useState<string | null>(null);
 
   return (
-    <div className="space-y-8">
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">New API key</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <KeyForm mode="create" models={models} onIssued={setIssued} />
-        </CardContent>
-      </Card>
-
-      <div className="space-y-4">
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-muted-foreground">
           {keys.length} key{keys.length === 1 ? '' : 's'}
         </h2>
-        {keys.map((k) => (
-          <Card key={k.id}>
-            <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
-              <CardTitle className="text-base">
-                {k.name}{' '}
-                <span className="ml-1 font-mono text-xs text-muted-foreground">
-                  {k.keyPrefix}…{k.keyLast4}
-                </span>
-              </CardTitle>
-              <div className="flex items-center gap-2">
-                <Badge variant={k.status === 'active' ? 'default' : 'destructive'}>{k.status}</Badge>
-                {k.status === 'active' && <RevokeButton id={k.id} />}
-              </div>
-            </CardHeader>
-            <CardContent>
-              <KeyForm mode="edit" keyId={k.id} models={models} initial={k} />
-            </CardContent>
-          </Card>
-        ))}
+        <Button size="sm" onClick={() => setCreateOpen(true)}>
+          <Plus className="h-4 w-4" />
+          New API key
+        </Button>
+        <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+          <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>New API key</DialogTitle>
+              <DialogDescription>
+                Pick a model and write the system prompt. The key is shown once.
+              </DialogDescription>
+            </DialogHeader>
+            <KeyForm
+              mode="create"
+              models={models}
+              onIssued={setIssued}
+              onDone={() => setCreateOpen(false)}
+            />
+          </DialogContent>
+        </Dialog>
       </div>
 
+      <div className="overflow-hidden rounded-lg border bg-card">
+        <Table>
+          <TableHeader className="bg-muted/50">
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead>Key</TableHead>
+              <TableHead>Model</TableHead>
+              <TableHead>Quota</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {keys.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                  No keys yet — create one with “New API key”.
+                </TableCell>
+              </TableRow>
+            )}
+            {keys.map((k) => (
+              <TableRow key={k.id}>
+                <TableCell className="font-medium">{k.name}</TableCell>
+                <TableCell className="font-mono text-xs text-muted-foreground">
+                  {k.keyPrefix}…{k.keyLast4}
+                </TableCell>
+                <TableCell className="font-mono text-xs">{k.model}</TableCell>
+                <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                  {quotaLabel(k)}
+                </TableCell>
+                <TableCell>
+                  <Badge variant={k.status === 'active' ? 'default' : 'destructive'}>
+                    {k.status}
+                  </Badge>
+                </TableCell>
+                <TableCell className="space-x-1 text-right">
+                  <Button size="sm" variant="ghost" onClick={() => setEditing(k)}>
+                    <Pencil className="h-3.5 w-3.5" />
+                    Edit
+                  </Button>
+                  {k.status === 'active' && <RevokeButton id={k.id} name={k.name} />}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+
+      {/* Edit modal */}
+      <Dialog open={editing != null} onOpenChange={(o) => !o && setEditing(null)}>
+        <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit key</DialogTitle>
+            <DialogDescription>Changes apply on the next request — no redeploy.</DialogDescription>
+          </DialogHeader>
+          {editing && (
+            <KeyForm
+              key={editing.id}
+              mode="edit"
+              keyId={editing.id}
+              initial={editing}
+              models={models}
+              onDone={() => setEditing(null)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Show-once key reveal */}
       <Dialog open={issued != null} onOpenChange={(o) => !o && setIssued(null)}>
         <DialogContent>
           <DialogHeader>
@@ -102,26 +188,51 @@ export function KeysManager({ keys, models }: { keys: KeyRow[]; models: Availabl
   );
 }
 
-function RevokeButton({ id }: { id: string }) {
+function RevokeButton({ id, name }: { id: string; name: string }) {
+  const [open, setOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
   return (
-    <Button
-      size="sm"
-      variant="destructive"
-      disabled={isPending}
-      onClick={() =>
-        startTransition(async () => {
-          try {
-            await revokeKey(id);
-            toast.success('Key revoked');
-          } catch {
-            toast.error('Failed to revoke');
-          }
-        })
-      }
-    >
-      Revoke
-    </Button>
+    <>
+      <Button
+        size="sm"
+        variant="ghost"
+        className="text-destructive hover:text-destructive"
+        onClick={() => setOpen(true)}
+      >
+        Revoke
+      </Button>
+      <AlertDialog open={open} onOpenChange={setOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Revoke “{name}”?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The key stops working immediately and cannot be restored. Any client using it will
+              get 401s.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={isPending}
+              onClick={(e) => {
+                e.preventDefault();
+                startTransition(async () => {
+                  try {
+                    await revokeKey(id);
+                    toast.success('Key revoked');
+                    setOpen(false);
+                  } catch {
+                    toast.error('Failed to revoke');
+                  }
+                });
+              }}
+            >
+              Revoke
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 
@@ -131,12 +242,14 @@ function KeyForm({
   initial,
   models,
   onIssued,
+  onDone,
 }: {
   mode: 'create' | 'edit';
   keyId?: string;
   initial?: KeyRow;
   models: AvailableModel[];
   onIssued?: (key: string) => void;
+  onDone?: () => void;
 }) {
   const [isPending, startTransition] = useTransition();
   const [name, setName] = useState(initial?.name ?? '');
@@ -179,14 +292,12 @@ function KeyForm({
         if (mode === 'create') {
           const { fullKey } = await createKey(input);
           onIssued?.(fullKey);
-          setName('');
-          setSystemPrompt('');
-          setSchemaText('');
           toast.success('Key created');
         } else {
           await updateKey({ id: keyId!, ...input });
           toast.success('Saved — applies to the next request');
         }
+        onDone?.();
       } catch {
         toast.error('Something went wrong');
       }
@@ -195,38 +306,37 @@ function KeyForm({
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="space-y-1">
-          <Label className="text-xs">Name</Label>
+      <div className="space-y-1">
+        <Label className="text-xs">Name</Label>
+        <Input
+          placeholder="billing-service prod"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+      </div>
+
+      <div className="space-y-1">
+        <Label className="text-xs">Model</Label>
+        {models.length > 0 ? (
+          <Select value={model} onValueChange={(v) => setModel(v ?? '')}>
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="Select a model" />
+            </SelectTrigger>
+            <SelectContent>
+              {models.map((m) => (
+                <SelectItem key={m.id} value={m.id}>
+                  {m.id}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
           <Input
-            placeholder="billing-service prod"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
+            placeholder="anthropic/claude-sonnet-4.6"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
           />
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs">Model</Label>
-          {models.length > 0 ? (
-            <Select value={model} onValueChange={(v) => setModel(v ?? '')}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select a model" />
-              </SelectTrigger>
-              <SelectContent>
-                {models.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    {m.id}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          ) : (
-            <Input
-              placeholder="anthropic/claude-sonnet-4.6"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-            />
-          )}
-        </div>
+        )}
       </div>
 
       <div className="space-y-1">
@@ -240,9 +350,9 @@ function KeyForm({
         />
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1">
-          <Label className="text-xs">Monthly token cap (blank = unlimited)</Label>
+          <Label className="text-xs">Monthly token cap (blank = ∞)</Label>
           <Input value={tokenCap} inputMode="numeric" onChange={(e) => setTokenCap(e.target.value)} />
         </div>
         <div className="space-y-1">
@@ -261,7 +371,7 @@ function KeyForm({
 
       {showAdvanced && (
         <div className="space-y-4 rounded-md border p-3">
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1">
               <Label className="text-xs">Temperature</Label>
               <Input value={temperature} onChange={(e) => setTemperature(e.target.value)} placeholder="0.7" />
@@ -284,9 +394,11 @@ function KeyForm({
         </div>
       )}
 
-      <Button onClick={submit} disabled={isPending}>
-        {isPending ? 'Saving…' : mode === 'create' ? 'Create key' : 'Save changes'}
-      </Button>
+      <div className="flex justify-end gap-2 pt-2">
+        <Button onClick={submit} disabled={isPending}>
+          {isPending ? 'Saving…' : mode === 'create' ? 'Create key' : 'Save changes'}
+        </Button>
+      </div>
     </div>
   );
 }
