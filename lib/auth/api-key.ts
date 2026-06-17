@@ -15,7 +15,6 @@ import { eq } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import { apiKeys, type KeyScopes, type KeyStatus } from '@/db/schema';
 import { env } from '@/lib/env';
-import { isRevoked } from '@/lib/redis';
 
 export interface GeneratedKey {
   fullKey: string;
@@ -91,8 +90,8 @@ function constantTimeEqualHex(a: string, b: string): boolean {
  * Verify a presented bearer token. Returns the key record on success, or null
  * for any failure (malformed, unknown, bad hash, expired, revoked).
  *
- * Revocation is checked against Redis for strong consistency — a revoked key is
- * rejected immediately, regardless of any cached/DB lag.
+ * The key row (incl. `status`) is read fresh from Postgres on every request, so
+ * revocation is already instant and authoritative — no separate flag needed.
  */
 export async function verifyKey(presented: string): Promise<VerifiedKey | null> {
   const prefix = keyPrefixOf(presented);
@@ -116,7 +115,6 @@ export async function verifyKey(presented: string): Promise<VerifiedKey | null> 
   if (!constantTimeEqualHex(hmac(presented), row.keyHash)) return null;
   if (row.status !== 'active') return null;
   if (row.expiresAt && row.expiresAt.getTime() < Date.now()) return null;
-  if (await isRevoked(row.id)) return null;
 
   return {
     id: row.id,

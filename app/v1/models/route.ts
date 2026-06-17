@@ -11,6 +11,7 @@ import { openAiError } from '@/lib/http/openai';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const preferredRegion = 'bom1';
 
 export async function GET(req: Request): Promise<Response> {
   const token = bearerFromHeader(req.headers.get('authorization'));

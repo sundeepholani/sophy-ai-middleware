@@ -11,7 +11,7 @@ import { eq } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import { quotaPolicies } from '@/db/schema';
 import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
-import { checkRateLimit, quotaUsed } from '@/lib/redis';
+import { checkRateLimit, quotaUsed } from '@/lib/counters';
 import { resolveRoute, keyAllowsRoute } from '@/lib/routing/resolve';
 import { toModelMessages, resolveParams } from '@/lib/gateway/openai-map';
 import { handleNonStreaming, handleStreaming, type CallContext } from '@/lib/gateway/call';
@@ -21,6 +21,8 @@ import { openAiError, type ChatCompletionRequest } from '@/lib/http/openai';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 800;
+// Run near the database (Supabase ap-south-1) to minimize per-request DB latency.
+export const preferredRegion = 'bom1';
 
 /** Reject client-supplied schemas that are too large or deeply nested. */
 function schemaWithinBounds(schema: unknown): boolean {

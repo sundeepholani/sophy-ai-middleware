@@ -25,7 +25,6 @@ import {
 } from '@/db/schema';
 import { assertAdmin } from '@/lib/admin/guard';
 import { issueKey } from '@/lib/auth/api-key';
-import { markRevoked } from '@/lib/redis';
 import { invalidateConfigCache } from '@/lib/routing/resolve';
 
 async function audit(
@@ -97,8 +96,8 @@ export async function revokeKey(keyId: string): Promise<void> {
     .update(apiKeys)
     .set({ status: 'revoked', revokedAt: new Date() })
     .where(eq(apiKeys.id, keyId));
-  // Instant kill switch — strongly consistent, independent of any cache lag.
-  await markRevoked(keyId);
+  // Revocation is instant: verifyKey() reads `status` fresh from Postgres on
+  // every request, so no separate flag is needed.
   await audit('key.revoke', keyId, null, null);
   revalidatePath('/admin/keys');
 }

@@ -6,7 +6,6 @@
 import type { LanguageModelUsage, ProviderMetadata } from 'ai';
 import { getDb } from '@/db/client';
 import { usageEvents, type UsageStatus, type ResponseKind } from '@/db/schema';
-import { quotaCharge } from '@/lib/redis';
 
 export interface NormalizedUsage {
   inputTokens: number;
@@ -95,13 +94,7 @@ export async function recordUsage(input: RecordUsageInput): Promise<void> {
   } catch (err) {
     console.error('[usage] failed to insert usage_event', err);
   }
-
-  // 2) Charge quota for any tokens actually consumed (even on validation failure).
-  try {
-    if (input.usage.totalTokens > 0) {
-      await quotaCharge(input.keyId, input.usage.totalTokens);
-    }
-  } catch (err) {
-    console.error('[usage] failed to charge quota', err);
-  }
+  // Quota is derived from the sum of usage_events for the period (see
+  // lib/counters.ts#quotaUsed) — the insert above IS the charge. No separate
+  // counter to update.
 }

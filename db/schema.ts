@@ -1,8 +1,8 @@
 /**
  * Postgres schema (Drizzle) — the durable system of record.
  *
- * Hot-path counters (rate limit, quota, revocation, config version) live in
- * Redis, not here. See lib/redis.ts.
+ * Hot-path counters (rate limit, quota window, cron lock) are Postgres-backed
+ * too — see lib/counters.ts and the rate_counters / locks tables below.
  */
 import {
   pgTable,
@@ -214,6 +214,19 @@ export const blobUploads = pgTable(
   },
   (t) => [index('blob_uploads_key_idx').on(t.apiKeyId)],
 );
+
+// ---- Hot-path counters (Postgres-backed; replaces Redis) -------------------
+
+export const rateCounters = pgTable('rate_counters', {
+  bucket: text('bucket').primaryKey(),
+  windowStart: bigint('window_start', { mode: 'number' }).notNull(),
+  count: integer('count').notNull().default(0),
+});
+
+export const locks = pgTable('locks', {
+  name: text('name').primaryKey(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+});
 
 export const auditLog = pgTable('audit_log', {
   id: uuid('id').primaryKey().defaultRandom(),

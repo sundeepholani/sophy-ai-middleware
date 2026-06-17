@@ -9,7 +9,7 @@
 import { gte, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import { usageEvents, usageRollups } from '@/db/schema';
-import { acquireLock, releaseLock } from '@/lib/redis';
+import { acquireLock, releaseLock } from '@/lib/counters';
 import { sweepStaleUploads } from '@/lib/files/blob';
 import { env } from '@/lib/env';
 

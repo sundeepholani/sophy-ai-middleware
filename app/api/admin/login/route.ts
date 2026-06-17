@@ -1,5 +1,5 @@
 import { getSession, verifyAdminCredentials } from '@/lib/auth/admin-session';
-import { checkLoginRateLimit } from '@/lib/redis';
+import { checkLoginRateLimit } from '@/lib/counters';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';

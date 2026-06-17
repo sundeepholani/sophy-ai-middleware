@@ -28,15 +28,16 @@ client (OpenAI SDK, baseURL=<mw>/v1, model="support-bot")
 
 - The `model` field a client sends is a **route name**, not a provider slug. The
   operator repoints it in the UI.
-- **Stores:** Postgres (Supabase) is the source of truth; Upstash Redis holds atomic
-  rate-limit/quota counters and the instant key-revocation flag; the Vercel
-  Runtime Cache holds hot route/prompt config (tag-invalidated on publish);
-  Vercel Blob holds uploaded files.
+- **Stores:** Postgres (Supabase) is the source of truth and also runs the
+  hot-path counters (rate limit via an atomic counter table; quota as a sum over
+  `usage_events`; cron lock via a `locks` row). The Vercel Runtime Cache holds
+  hot route/prompt config (tag-invalidated on publish); Vercel Blob holds
+  uploaded files. (No Redis — the whole stack is Supabase + Vercel.)
 
 ## Stack
 
 Next.js 16 (App Router) · AI SDK v6 · Vercel AI Gateway · Supabase Postgres (Drizzle)
-· Upstash Redis · Vercel Blob · Vercel Runtime Cache · shadcn/ui · iron-session.
+· Vercel Blob · Vercel Runtime Cache · shadcn/ui · iron-session.
 
 ## Provision (Vercel)
 
@@ -44,7 +45,6 @@ Next.js 16 (App Router) · AI SDK v6 · Vercel AI Gateway · Supabase Postgres (
    ```bash
    vercel link
    vercel integration add supabase   # Postgres -> POSTGRES_URL / POSTGRES_URL_NON_POOLING
-   vercel integration add upstash    # Redis    -> UPSTASH_REDIS_REST_URL/TOKEN
    ```
    The Supabase integration auto-sets `POSTGRES_URL` (pooled) and
    `POSTGRES_URL_NON_POOLING` (direct); a manual setup uses `DATABASE_URL` /

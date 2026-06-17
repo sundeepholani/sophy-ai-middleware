@@ -48,10 +48,6 @@ export const env = {
   /** Set to "1" to skip TLS CA verification (some poolers present an untrusted chain). */
   databaseSslNoVerify: () => optionalEnv('DATABASE_SSL_NO_VERIFY') === '1',
 
-  // --- Upstash Redis (via Vercel Marketplace) ---
-  upstashRedisRestUrl: () => requireEnv('UPSTASH_REDIS_REST_URL'),
-  upstashRedisRestToken: () => requireEnv('UPSTASH_REDIS_REST_TOKEN'),
-
   // --- AI Gateway ---
   /** Optional in prod (OIDC token is used automatically); required locally. */
   aiGatewayApiKey: () => optionalEnv('AI_GATEWAY_API_KEY'),
