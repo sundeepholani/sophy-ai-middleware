@@ -15,7 +15,7 @@ per-key config, quotas, and the admin console — is owned here.
 > Design rationale, alternatives considered, and the adversarial review are in
 > the plan: `~/.claude/plans/we-are-implementing-ai-snug-mitten.md`.
 
-> **Migrating a client app?** Hand developers **[MIGRATION.md](MIGRATION.md)** — a
+> **Migrating a client app?** Hand developers **[AI API Migration.md](AI%20API%20Migration.md)** — a
 > copy-paste guide for switching from the OpenAI or Anthropic (Claude) SDKs to Sophy.
 
 ## How it works
