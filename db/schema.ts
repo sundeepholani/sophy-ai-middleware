@@ -9,6 +9,7 @@
  * Hot-path counters (rate limit window, cron lock) are Postgres-backed too —
  * see lib/counters.ts and the rate_counters / locks tables below.
  */
+import { sql } from 'drizzle-orm';
 import {
   pgTable,
   uuid,
@@ -21,6 +22,7 @@ import {
   boolean,
   date,
   index,
+  uniqueIndex,
   primaryKey,
 } from 'drizzle-orm/pg-core';
 
@@ -169,6 +171,94 @@ export const locks = pgTable('locks', {
   name: text('name').primaryKey(),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
 });
+
+// ---- Model eval (champion vs challenger) -----------------------------------
+// A run shadows the next N live requests on a key: the configured "champion"
+// model serves the client as usual, the same input is replayed to a
+// "challenger" model, and a blind "judge" model picks the better output. After
+// N samples we email a verdict + cost/latency comparison. Content for samples is
+// captured here regardless of the key's log_content flag, and purged when the
+// run ends.
+
+export type EvalRunStatus = 'running' | 'completed' | 'cancelled' | 'failed';
+export type EvalWinner = 'champion' | 'challenger' | 'tie';
+export type EvalSampleStatus = 'pending' | 'judged' | 'failed';
+
+/** Global, singleton settings (one row, id='global'). */
+export const appSettings = pgTable('app_settings', {
+  id: text('id').primaryKey().default('global'),
+  /** AI Gateway model id used as the eval judge. */
+  judgeModel: text('judge_model').notNull().default('anthropic/claude-opus-4.8'),
+  /** Where eval summary emails are sent. */
+  notifyEmail: text('notify_email'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const evalRuns = pgTable(
+  'eval_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    apiKeyId: uuid('api_key_id').notNull(),
+    /** Model snapshots taken at run start (the key's model may change later). */
+    championModel: text('champion_model').notNull(),
+    challengerModel: text('challenger_model').notNull(),
+    judgeModel: text('judge_model').notNull(),
+    targetN: integer('target_n').notNull().default(100),
+    /** Successful live requests captured so far (atomic trigger counter). */
+    capturedN: integer('captured_n').notNull().default(0),
+    status: text('status').$type<EvalRunStatus>().notNull().default('running'),
+    /** Frozen verdict + aggregates, written at completion. */
+    summary: jsonb('summary').$type<Record<string, unknown> | null>(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    emailedAt: timestamp('emailed_at', { withTimezone: true }),
+  },
+  (t) => [
+    index('eval_runs_key_status_idx').on(t.apiKeyId, t.status),
+    // At most one running run per key — enforced atomically at the DB level so the
+    // app-level check in startEvalRun can't be raced into two concurrent runs.
+    uniqueIndex('eval_runs_one_running_per_key')
+      .on(t.apiKeyId)
+      .where(sql`${t.status} = 'running'`),
+  ],
+);
+
+export const evalSamples = pgTable(
+  'eval_samples',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    runId: uuid('run_id').notNull(),
+    /** The live usage_events row this sample came from (for correlation). */
+    usageEventId: uuid('usage_event_id'),
+    surface: text('surface'), // 'chat' | 'responses'
+    // Resolved input replayed identically to the challenger.
+    systemPrompt: text('system_prompt'),
+    request: jsonb('request'),
+    params: jsonb('params').$type<KeyParams>(),
+    structured: boolean('structured').notNull().default(false),
+    outputSchema: jsonb('output_schema').$type<Record<string, unknown> | null>(),
+    // Champion (captured live).
+    championOutput: text('champion_output'),
+    championCostUsd: numeric('champion_cost_usd', { precision: 12, scale: 6 }),
+    championLatencyMs: integer('champion_latency_ms'),
+    // Challenger (produced by the cron processor).
+    challengerOutput: text('challenger_output'),
+    challengerCostUsd: numeric('challenger_cost_usd', { precision: 12, scale: 6 }),
+    challengerLatencyMs: integer('challenger_latency_ms'),
+    // Judge.
+    judgeCostUsd: numeric('judge_cost_usd', { precision: 12, scale: 6 }),
+    winner: text('winner').$type<EvalWinner>(),
+    confidence: numeric('confidence', { precision: 4, scale: 3 }),
+    judgeReason: text('judge_reason'),
+    /** Whether the judge saw challenger as "Response A" (position-bias control). */
+    orderSwapped: boolean('order_swapped').notNull().default(false),
+    status: text('status').$type<EvalSampleStatus>().notNull().default('pending'),
+    errorMessage: text('error_message'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    judgedAt: timestamp('judged_at', { withTimezone: true }),
+  },
+  (t) => [index('eval_samples_run_status_idx').on(t.runId, t.status)],
+);
 
 // ---- Audit ------------------------------------------------------------------
 

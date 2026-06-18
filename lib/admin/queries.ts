@@ -1,9 +1,18 @@
 /**
  * Read-side queries for the admin console (server components only).
  */
-import { and, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
-import { apiKeys, usageEvents, requestLogs, type KeyParams } from '@/db/schema';
+import {
+  apiKeys,
+  usageEvents,
+  requestLogs,
+  evalRuns,
+  evalSamples,
+  type KeyParams,
+  type EvalRunStatus,
+} from '@/db/schema';
+import type { EvalSummary } from '@/lib/eval/aggregate';
 
 export async function getOverview() {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -239,4 +248,56 @@ export async function getRecentLogs(limit = 100) {
     .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
     .orderBy(desc(usageEvents.createdAt))
     .limit(limit);
+}
+
+// ---- Model eval --------------------------------------------------------------
+
+export interface KeyEval {
+  runId: string;
+  status: EvalRunStatus;
+  championModel: string;
+  challengerModel: string;
+  judgeModel: string;
+  targetN: number;
+  capturedN: number;
+  judgedN: number;
+  summary: EvalSummary | null;
+  createdAt: Date;
+  completedAt: Date | null;
+}
+
+/** Latest eval run per key (keyed by apiKeyId) for the keys list / eval panel. */
+export async function getKeyEvals(): Promise<Record<string, KeyEval>> {
+  const db = getDb();
+  const runs = await db.select().from(evalRuns).orderBy(desc(evalRuns.createdAt));
+  const latestByKey = new Map<string, (typeof runs)[number]>();
+  for (const r of runs) if (!latestByKey.has(r.apiKeyId)) latestByKey.set(r.apiKeyId, r);
+
+  const ids = [...latestByKey.values()].map((r) => r.id);
+  const counts = ids.length
+    ? await db
+        .select({ runId: evalSamples.runId, n: sql<string>`count(*)` })
+        .from(evalSamples)
+        .where(and(inArray(evalSamples.runId, ids), eq(evalSamples.status, 'judged')))
+        .groupBy(evalSamples.runId)
+    : [];
+  const judgedByRun = new Map(counts.map((c) => [c.runId, Number(c.n)]));
+
+  const out: Record<string, KeyEval> = {};
+  for (const [keyId, r] of latestByKey) {
+    out[keyId] = {
+      runId: r.id,
+      status: r.status,
+      championModel: r.championModel,
+      challengerModel: r.challengerModel,
+      judgeModel: r.judgeModel,
+      targetN: r.targetN,
+      capturedN: r.capturedN,
+      judgedN: judgedByRun.get(r.id) ?? 0,
+      summary: (r.summary as EvalSummary | null) ?? null,
+      createdAt: r.createdAt,
+      completedAt: r.completedAt,
+    };
+  }
+  return out;
 }

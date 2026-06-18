@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, KeyRound, BarChart3, ScrollText } from 'lucide-react';
+import { LayoutDashboard, KeyRound, BarChart3, ScrollText, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const ITEMS = [
@@ -10,6 +10,7 @@ const ITEMS = [
   { href: '/admin/keys', label: 'API Keys', icon: KeyRound },
   { href: '/admin/usage', label: 'Usage', icon: BarChart3 },
   { href: '/admin/logs', label: 'Logs', icon: ScrollText },
+  { href: '/admin/settings', label: 'Settings', icon: Settings },
 ];
 
 export function Nav() {

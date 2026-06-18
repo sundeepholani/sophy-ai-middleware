@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "eval_runs_one_running_per_key" ON "eval_runs" USING btree ("api_key_id") WHERE "eval_runs"."status" = 'running';
