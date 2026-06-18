@@ -31,8 +31,8 @@ export function Nav() {
                 : 'text-muted-foreground hover:bg-muted hover:text-foreground',
             )}
           >
-            <Icon className="h-4 w-4" />
-            <span className="hidden sm:inline">{item.label}</span>
+            <Icon className="h-4 w-4 shrink-0" />
+            <span className="hidden whitespace-nowrap sm:inline">{item.label}</span>
           </Link>
         );
       })}

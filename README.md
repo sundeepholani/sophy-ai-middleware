@@ -6,8 +6,9 @@ issues. **Each key carries its own model + system prompt + quota**, all editable
 from a UI with **no client change and no redeploy**. You also get central
 usage/cost visibility.
 
-It exposes an **OpenAI-compatible** API, so existing clients only change
-`base_url` + `api_key`. Outbound calls go through the **Vercel AI Gateway**
+It exposes an **OpenAI-compatible** API — both **Chat Completions**
+(`/v1/chat/completions`) and the **Responses API** (`/v1/responses`) — so existing
+clients only change `base_url` + `api_key`. Outbound calls go through the **Vercel AI Gateway**
 (provider keys held there as BYOK); everything above it — your client keys, their
 per-key config, quotas, and the admin console — is owned here.
 
@@ -114,6 +115,21 @@ Notes: the `model` field is ignored (the key's model wins); client `system`
 messages are dropped (the key's system prompt is used); **tool/function calling
 is rejected with a 400**; large files use `POST /v1/files` (multipart, ≤4 MB) and
 the returned URL as a content part.
+
+### Responses API clients
+
+Both surfaces are supported, so clients on the newer **Responses API** also migrate
+with just `base_url` + `api_key` — keep using `client.responses.create(...)`:
+
+```ts
+const openai = new OpenAI({ apiKey: process.env.MIDDLEWARE_KEY, baseURL: 'https://<your-mw-host>/v1' });
+const r = await openai.responses.create({ model: 'anything', input: 'Hello' }); // model/instructions ignored
+console.log(r.output_text);
+```
+
+`POST /v1/responses` supports text + structured output (buffered and streaming).
+Same key-owns-config rules apply; `previous_response_id` (stateful) and `tools`
+are rejected with a 400.
 
 ## Verify end-to-end
 
