@@ -103,6 +103,7 @@ export async function POST(req: Request): Promise<Response> {
     structured,
     schema: key.outputSchema,
     includeUsage: body.stream_options?.include_usage === true,
+    logContent: key.logContent,
   };
 
   // 7) Stream or buffer.

@@ -17,10 +17,12 @@ import { randomBytes } from 'node:crypto';
 import { generateText, streamText, Output, jsonSchema } from 'ai';
 import type { ModelMessage } from 'ai';
 import { waitUntil } from '@vercel/functions';
+import { randomUUID } from 'node:crypto';
 import { commonCall, type CallContext } from '@/lib/gateway/call';
 import { validateAgainstSchema } from '@/lib/gateway/openai-map';
 import {
   recordUsage,
+  recordRequestLog,
   normalizeUsage,
   extractGatewayCost,
   extractGatewayRequestId,
@@ -57,7 +59,21 @@ export async function handleResponsesNonStreaming(
   const id = respId();
   const created = Math.floor(start / 1000);
   const provider = ctx.model.split('/')[0] ?? 'unknown';
-  const base = { keyId: ctx.keyId, provider, model: ctx.model };
+  const eventId = randomUUID();
+  const base = { id: eventId, keyId: ctx.keyId, provider, model: ctx.model };
+  const logIf = (response: string | null, status: 'ok' | 'validation_failed' | 'error') =>
+    ctx.logContent
+      ? recordRequestLog({
+          id: eventId,
+          keyId: ctx.keyId,
+          surface: 'responses',
+          systemPrompt: ctx.systemPrompt,
+          messages,
+          response,
+          streamed: false,
+          status,
+        })
+      : Promise.resolve();
 
   try {
     let text: string;
@@ -80,6 +96,7 @@ export async function handleResponsesNonStreaming(
           gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
           errorMessage: check.errors,
         });
+        await logIf(JSON.stringify(obj), 'validation_failed');
         return openAiError(502, 'api_error', 'Model output failed schema validation.', {
           code: 'schema_validation_failed',
         });
@@ -94,6 +111,7 @@ export async function handleResponsesNonStreaming(
         responseKind: 'structured',
         gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
       });
+      await logIf(text, 'ok');
       return Response.json(
         buildResponseObject({
           id,
@@ -122,6 +140,7 @@ export async function handleResponsesNonStreaming(
       responseKind: 'text',
       gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
     });
+    await logIf(result.text, 'ok');
     return Response.json(
       buildResponseObject({
         id,
@@ -146,6 +165,7 @@ export async function handleResponsesNonStreaming(
       responseKind: ctx.structured ? 'structured' : 'text',
       errorMessage: err instanceof Error ? err.message : String(err),
     });
+    await logIf(null, 'error');
     return openAiError(502, 'api_error', 'Upstream model request failed.', { code: 'upstream_error' });
   }
 }
@@ -159,13 +179,28 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
   const created = Math.floor(start / 1000);
   const model = ctx.model;
   const provider = model.split('/')[0] ?? 'unknown';
+  const eventId = randomUUID();
   const base = {
+    id: eventId,
     keyId: ctx.keyId,
     provider,
     model,
     streamed: true,
     responseKind: (ctx.structured ? 'structured' : 'text') as 'structured' | 'text',
   };
+  const logIf = (response: string | null, status: 'ok' | 'error') =>
+    ctx.logContent
+      ? recordRequestLog({
+          id: eventId,
+          keyId: ctx.keyId,
+          surface: 'responses',
+          systemPrompt: ctx.systemPrompt,
+          messages,
+          response,
+          streamed: true,
+          status,
+        })
+      : Promise.resolve();
 
   const result = streamText({
     ...commonCall(ctx, messages),
@@ -181,6 +216,7 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
         status: 'ok',
         gatewayRequestId: extractGatewayRequestId(event.providerMetadata),
       });
+      await logIf(event.text, 'ok');
     },
     onError: async ({ error }) => {
       await recordUsage({

@@ -8,7 +8,7 @@
  * generation always drains to completion and `onFinish` always fires with full
  * token usage — even when the client disconnects mid-stream.
  */
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { generateText, streamText, Output, jsonSchema } from 'ai';
 import type { ModelMessage, FinishReason } from 'ai';
 import { waitUntil } from '@vercel/functions';
@@ -24,6 +24,7 @@ import {
 } from '@/lib/gateway/openai-map';
 import {
   recordUsage,
+  recordRequestLog,
   normalizeUsage,
   extractGatewayCost,
   extractGatewayRequestId,
@@ -57,6 +58,8 @@ export interface CallContext {
   /** The JSON schema to enforce (from the key's config). */
   schema: Record<string, unknown> | null;
   includeUsage: boolean;
+  /** Whether to persist inbound/outbound message content for this request. */
+  logContent: boolean;
 }
 
 function providerOf(model: string): string {
@@ -90,7 +93,21 @@ export async function handleNonStreaming(
   const start = Date.now();
   const id = chatId();
   const created = Math.floor(start / 1000);
-  const base = { keyId: ctx.keyId, provider: providerOf(ctx.model), model: ctx.model };
+  const eventId = randomUUID();
+  const base = { id: eventId, keyId: ctx.keyId, provider: providerOf(ctx.model), model: ctx.model };
+  const logIf = (response: string | null, status: 'ok' | 'validation_failed' | 'error') =>
+    ctx.logContent
+      ? recordRequestLog({
+          id: eventId,
+          keyId: ctx.keyId,
+          surface: 'chat',
+          systemPrompt: ctx.systemPrompt,
+          messages,
+          response,
+          streamed: false,
+          status,
+        })
+      : Promise.resolve();
 
   try {
     if (ctx.structured && ctx.schema) {
@@ -113,6 +130,7 @@ export async function handleNonStreaming(
           gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
           errorMessage: check.errors,
         });
+        await logIf(JSON.stringify(obj), 'validation_failed');
         return openAiError(502, 'api_error', 'Model output failed schema validation.', {
           code: 'schema_validation_failed',
         });
@@ -126,6 +144,7 @@ export async function handleNonStreaming(
         responseKind: 'structured',
         gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
       });
+      await logIf(JSON.stringify(obj), 'ok');
       return Response.json(
         toChatCompletion({
           id,
@@ -150,6 +169,7 @@ export async function handleNonStreaming(
       responseKind: 'text',
       gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
     });
+    await logIf(result.text, 'ok');
     return Response.json(
       toChatCompletion({
         id,
@@ -170,6 +190,7 @@ export async function handleNonStreaming(
       responseKind: ctx.structured ? 'structured' : 'text',
       errorMessage: err instanceof Error ? err.message : String(err),
     });
+    await logIf(null, 'error');
     return openAiError(502, 'api_error', 'Upstream model request failed.', {
       code: 'upstream_error',
     });

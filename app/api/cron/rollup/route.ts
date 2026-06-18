@@ -6,12 +6,14 @@
  * Guarded by CRON_SECRET (Vercel sends it as a Bearer token) + a Redis lock so
  * overlapping invocations don't double-work.
  */
-import { gte, sql } from 'drizzle-orm';
+import { gte, lt, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
-import { usageEvents, usageRollups } from '@/db/schema';
+import { usageEvents, usageRollups, requestLogs } from '@/db/schema';
 import { acquireLock, releaseLock } from '@/lib/counters';
 import { sweepStaleUploads } from '@/lib/files/blob';
 import { env } from '@/lib/env';
+
+const REQUEST_LOG_RETENTION_DAYS = 30;
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -73,7 +75,14 @@ export async function GET(req: Request): Promise<Response> {
   try {
     const rolled = await rollupRecentDays();
     const swept = await sweepStaleUploads(24);
-    return Response.json({ ok: true, rolledRows: rolled, sweptBlobs: swept });
+    const cutoff = new Date(Date.now() - REQUEST_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const purged = await getDb().delete(requestLogs).where(lt(requestLogs.createdAt, cutoff));
+    return Response.json({
+      ok: true,
+      rolledRows: rolled,
+      sweptBlobs: swept,
+      purgedRequestLogs: purged.rowCount ?? 0,
+    });
   } catch (err) {
     console.error('[cron] rollup failed', err);
     return Response.json({ error: 'rollup_failed' }, { status: 500 });

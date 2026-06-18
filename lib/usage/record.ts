@@ -3,9 +3,9 @@
  * period-keyed quota counter. Resilient by design — failures here are logged
  * but never propagated into the client response path.
  */
-import type { LanguageModelUsage, ProviderMetadata } from 'ai';
+import type { LanguageModelUsage, ProviderMetadata, ModelMessage } from 'ai';
 import { getDb } from '@/db/client';
-import { usageEvents, type UsageStatus, type ResponseKind } from '@/db/schema';
+import { usageEvents, requestLogs, type UsageStatus, type ResponseKind } from '@/db/schema';
 
 export interface NormalizedUsage {
   inputTokens: number;
@@ -51,6 +51,8 @@ export function extractGatewayRequestId(pm: ProviderMetadata | undefined): strin
 }
 
 export interface RecordUsageInput {
+  /** Optional explicit id; pass it to correlate with a request_logs row. */
+  id?: string;
   keyId: string;
   provider?: string | null;
   model?: string | null;
@@ -70,6 +72,7 @@ export async function recordUsage(input: RecordUsageInput): Promise<void> {
     await getDb()
       .insert(usageEvents)
       .values({
+        ...(input.id ? { id: input.id } : {}),
         apiKeyId: input.keyId,
         provider: input.provider ?? null,
         model: input.model ?? null,
@@ -91,4 +94,56 @@ export async function recordUsage(input: RecordUsageInput): Promise<void> {
   // Quota is derived from the sum of usage_events for the period (see
   // lib/counters.ts#quotaUsed) — the insert above IS the charge. No separate
   // counter to update.
+}
+
+// ---- Request content logging (per-key, separate retention) -----------------
+
+const MAX_LOG_CHARS = 100_000;
+
+function cap(s: string): string {
+  return s.length > MAX_LOG_CHARS ? `${s.slice(0, MAX_LOG_CHARS)}…[truncated]` : s;
+}
+
+export interface RecordRequestLogInput {
+  /** Shared with the usage_events row id. */
+  id: string;
+  keyId: string;
+  surface: 'chat' | 'responses';
+  /** The operator system prompt that was applied (if any). */
+  systemPrompt: string | null;
+  /** Inbound messages actually sent to the model. */
+  messages: ModelMessage[];
+  /** Outbound model text. */
+  response: string | null;
+  streamed?: boolean;
+  status: UsageStatus;
+}
+
+/**
+ * Persist inbound/outbound content for a request (gated by the key's logContent
+ * upstream). Size-capped and fully resilient — never throws into the response path.
+ */
+export async function recordRequestLog(input: RecordRequestLogInput): Promise<void> {
+  try {
+    const serialized = JSON.stringify(input.messages ?? []);
+    const request =
+      serialized.length > MAX_LOG_CHARS
+        ? { truncated: true, preview: serialized.slice(0, MAX_LOG_CHARS) }
+        : input.messages;
+    await getDb()
+      .insert(requestLogs)
+      .values({
+        id: input.id,
+        apiKeyId: input.keyId,
+        surface: input.surface,
+        systemPrompt: input.systemPrompt ? cap(input.systemPrompt) : null,
+        request: request as object,
+        response: input.response != null ? cap(input.response) : null,
+        streamed: input.streamed ?? false,
+        status: input.status,
+      })
+      .onConflictDoNothing();
+  } catch (err) {
+    console.error('[request-log] failed to insert request_log', err);
+  }
 }
