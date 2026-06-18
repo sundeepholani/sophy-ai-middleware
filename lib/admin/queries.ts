@@ -90,6 +90,7 @@ export async function getLogDetail(id: string) {
       id: usageEvents.id,
       createdAt: usageEvents.createdAt,
       apiKeyId: usageEvents.apiKeyId,
+      keyName: apiKeys.name,
       provider: usageEvents.provider,
       model: usageEvents.model,
       inputTokens: usageEvents.inputTokens,
@@ -102,6 +103,7 @@ export async function getLogDetail(id: string) {
       errorMessage: usageEvents.errorMessage,
     })
     .from(usageEvents)
+    .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
     .where(eq(usageEvents.id, id))
     .limit(1);
   if (!event) return null;
@@ -124,6 +126,7 @@ export async function getRecentLogs(limit = 100) {
       id: usageEvents.id,
       createdAt: usageEvents.createdAt,
       apiKeyId: usageEvents.apiKeyId,
+      keyName: apiKeys.name,
       provider: usageEvents.provider,
       model: usageEvents.model,
       inputTokens: usageEvents.inputTokens,
@@ -134,6 +137,7 @@ export async function getRecentLogs(limit = 100) {
       responseKind: usageEvents.responseKind,
     })
     .from(usageEvents)
+    .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
     .orderBy(desc(usageEvents.createdAt))
     .limit(limit);
 }
