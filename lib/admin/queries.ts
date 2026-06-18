@@ -1,9 +1,9 @@
 /**
  * Read-side queries for the admin console (server components only).
  */
-import { desc, gte, sql } from 'drizzle-orm';
+import { desc, eq, gte, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
-import { apiKeys, usageEvents, type KeyParams } from '@/db/schema';
+import { apiKeys, usageEvents, requestLogs, type KeyParams } from '@/db/schema';
 
 export async function getOverview() {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -37,6 +37,7 @@ export interface KeyRow {
   outputSchema: Record<string, unknown> | null;
   monthlyTokenCap: number | null;
   rpmLimit: number | null;
+  logContent: boolean;
   status: string;
 }
 
@@ -53,6 +54,7 @@ export async function listKeys(): Promise<KeyRow[]> {
       outputSchema: apiKeys.outputSchema,
       monthlyTokenCap: apiKeys.monthlyTokenCap,
       rpmLimit: apiKeys.rpmLimit,
+      logContent: apiKeys.logContent,
       status: apiKeys.status,
     })
     .from(apiKeys)
@@ -79,6 +81,41 @@ export async function getUsageSeries() {
     tokens: Number(r.tokens),
     cost: Number(r.cost),
   }));
+}
+
+export async function getLogDetail(id: string) {
+  const db = getDb();
+  const [event] = await db
+    .select({
+      id: usageEvents.id,
+      createdAt: usageEvents.createdAt,
+      apiKeyId: usageEvents.apiKeyId,
+      provider: usageEvents.provider,
+      model: usageEvents.model,
+      inputTokens: usageEvents.inputTokens,
+      outputTokens: usageEvents.outputTokens,
+      costUsd: usageEvents.costUsd,
+      latencyMs: usageEvents.latencyMs,
+      status: usageEvents.status,
+      streamed: usageEvents.streamed,
+      responseKind: usageEvents.responseKind,
+      errorMessage: usageEvents.errorMessage,
+    })
+    .from(usageEvents)
+    .where(eq(usageEvents.id, id))
+    .limit(1);
+  if (!event) return null;
+  const [content] = await db
+    .select({
+      surface: requestLogs.surface,
+      systemPrompt: requestLogs.systemPrompt,
+      request: requestLogs.request,
+      response: requestLogs.response,
+    })
+    .from(requestLogs)
+    .where(eq(requestLogs.id, id))
+    .limit(1);
+  return { event, content: content ?? null };
 }
 
 export async function getRecentLogs(limit = 100) {

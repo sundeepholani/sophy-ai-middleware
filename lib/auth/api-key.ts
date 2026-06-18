@@ -31,6 +31,7 @@ export interface KeyConfigInput {
   outputSchema?: Record<string, unknown> | null;
   monthlyTokenCap?: number | null;
   rpmLimit?: number | null;
+  logContent?: boolean;
 }
 
 export interface VerifiedKey {
@@ -42,6 +43,7 @@ export interface VerifiedKey {
   outputSchema: Record<string, unknown> | null;
   monthlyTokenCap: number | null;
   rpmLimit: number | null;
+  logContent: boolean;
   status: KeyStatus;
 }
 
@@ -88,6 +90,7 @@ export async function issueKey(
       outputSchema: input.outputSchema ?? null,
       monthlyTokenCap: input.monthlyTokenCap ?? null,
       rpmLimit: input.rpmLimit ?? null,
+      logContent: input.logContent ?? true,
     })
     .returning({ id: apiKeys.id });
   return { fullKey: gen.fullKey, id: row.id, prefix: gen.prefix, last4: gen.last4 };
@@ -131,6 +134,7 @@ export async function verifyKey(presented: string): Promise<VerifiedKey | null> 
     outputSchema: row.outputSchema ?? null,
     monthlyTokenCap: row.monthlyTokenCap,
     rpmLimit: row.rpmLimit,
+    logContent: row.logContent,
     status: row.status,
   };
 }

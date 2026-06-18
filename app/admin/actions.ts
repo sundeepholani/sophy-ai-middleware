@@ -26,6 +26,7 @@ export interface KeyFormInput {
   outputSchema: Record<string, unknown> | null;
   monthlyTokenCap: number | null;
   rpmLimit: number | null;
+  logContent: boolean;
 }
 
 export async function createKey(input: KeyFormInput): Promise<{ fullKey: string }> {
@@ -48,6 +49,7 @@ export async function updateKey(input: KeyFormInput & { id: string }): Promise<v
       outputSchema: input.outputSchema,
       monthlyTokenCap: input.monthlyTokenCap,
       rpmLimit: input.rpmLimit,
+      logContent: input.logContent,
     })
     .where(eq(apiKeys.id, input.id));
   await audit('key.update', input.id, { name: input.name, model: input.model });

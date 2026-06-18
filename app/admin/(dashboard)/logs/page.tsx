@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { getRecentLogs } from '@/lib/admin/queries';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -30,6 +31,7 @@ export default async function LogsPage() {
             <TableHead>Cost</TableHead>
             <TableHead>Kind</TableHead>
             <TableHead>Status</TableHead>
+            <TableHead />
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -50,11 +52,16 @@ export default async function LogsPage() {
               <TableCell>
                 <Badge variant={l.status === 'ok' ? 'default' : 'destructive'}>{l.status}</Badge>
               </TableCell>
+              <TableCell className="text-right">
+                <Link className="text-sm underline" href={`/admin/logs/${l.id}`}>
+                  View
+                </Link>
+              </TableCell>
             </TableRow>
           ))}
           {logs.length === 0 && (
             <TableRow>
-              <TableCell colSpan={8} className="text-center text-sm text-muted-foreground">
+              <TableCell colSpan={9} className="text-center text-sm text-muted-foreground">
                 No requests yet.
               </TableCell>
             </TableRow>

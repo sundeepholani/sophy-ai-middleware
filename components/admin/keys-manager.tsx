@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
 import {
   Dialog,
   DialogContent,
@@ -259,6 +260,7 @@ function KeyForm({
   const [maxTokens, setMaxTokens] = useState(initial?.params.maxOutputTokens?.toString() ?? '');
   const [tokenCap, setTokenCap] = useState(initial?.monthlyTokenCap?.toString() ?? '');
   const [rpm, setRpm] = useState(initial?.rpmLimit?.toString() ?? '');
+  const [logContent, setLogContent] = useState(initial?.logContent ?? true);
   const [schemaText, setSchemaText] = useState(
     initial?.outputSchema ? JSON.stringify(initial.outputSchema, null, 2) : '',
   );
@@ -286,6 +288,7 @@ function KeyForm({
       outputSchema,
       monthlyTokenCap: numOrNull(tokenCap),
       rpmLimit: numOrNull(rpm),
+      logContent,
     };
     startTransition(async () => {
       try {
@@ -359,6 +362,16 @@ function KeyForm({
           <Label className="text-xs">Rate limit (req/min, blank = none)</Label>
           <Input value={rpm} inputMode="numeric" onChange={(e) => setRpm(e.target.value)} />
         </div>
+      </div>
+
+      <div className="flex items-center justify-between rounded-md border p-3">
+        <div>
+          <Label className="text-sm">Log message content</Label>
+          <p className="text-xs text-muted-foreground">
+            Store inbound prompts &amp; model replies for this key (viewable in Logs, kept 30 days).
+          </p>
+        </div>
+        <Switch checked={logContent} onCheckedChange={setLogContent} />
       </div>
 
       <button

@@ -63,6 +63,9 @@ export const apiKeys = pgTable(
     monthlyTokenCap: bigint('monthly_token_cap', { mode: 'number' }),
     rpmLimit: integer('rpm_limit'),
 
+    /** Whether to log inbound/outbound message content for this key's requests. */
+    logContent: boolean('log_content').notNull().default(true),
+
     // --- lifecycle ---
     status: text('status').$type<KeyStatus>().notNull().default('active'),
     expiresAt: timestamp('expires_at', { withTimezone: true }),
@@ -113,6 +116,30 @@ export const usageRollups = pgTable(
     errors: bigint('errors', { mode: 'number' }).notNull().default(0),
   },
   (t) => [primaryKey({ columns: [t.apiKeyId, t.periodStart] })],
+);
+
+// ---- Request logs (inbound/outbound content; per-key, 30-day retention) -----
+// Shares its primary key with the corresponding usage_events row so the two
+// correlate. Kept separate from usage_events so content can be purged on its own
+// retention schedule without losing usage/cost history.
+
+export const requestLogs = pgTable(
+  'request_logs',
+  {
+    id: uuid('id').primaryKey(), // == usage_events.id (app-generated, shared)
+    apiKeyId: uuid('api_key_id').notNull(),
+    surface: text('surface'), // 'chat' | 'responses'
+    systemPrompt: text('system_prompt'),
+    request: jsonb('request'), // inbound messages sent to the model
+    response: text('response'), // outbound model text
+    streamed: boolean('streamed').notNull().default(false),
+    status: text('status').$type<UsageStatus>(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('request_logs_key_time_idx').on(t.apiKeyId, t.createdAt),
+    index('request_logs_time_idx').on(t.createdAt),
+  ],
 );
 
 // ---- File uploads -----------------------------------------------------------
