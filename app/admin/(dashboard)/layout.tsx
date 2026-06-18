@@ -15,21 +15,28 @@ export default async function DashboardLayout({
 
   return (
     <div className="min-h-screen bg-muted/40">
-      <header className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
-        <div className="mx-auto flex h-16 max-w-6xl items-center gap-6 px-6">
-          <div className="flex items-center gap-2">
+      <header className="sticky top-0 z-30 border-b bg-background">
+        <div className="flex h-16 items-center gap-6 px-4 sm:px-6 lg:px-8">
+          <div className="flex shrink-0 items-center gap-2">
             <div className="grid h-7 w-7 place-items-center rounded-md bg-primary text-sm font-bold text-primary-foreground">
               ai
             </div>
-            <span className="text-sm font-semibold tracking-tight">AI Middleware</span>
+            <span className="hidden whitespace-nowrap text-sm font-semibold tracking-tight sm:inline">
+              AI Middleware
+            </span>
           </div>
           <div className="flex-1">
             <Nav />
           </div>
-          <LogoutButton />
+          <div className="flex items-center gap-3">
+            <LogoutButton />
+            <div className="grid h-8 w-8 place-items-center rounded-full bg-secondary text-xs font-semibold text-secondary-foreground">
+              A
+            </div>
+          </div>
         </div>
       </header>
-      <main className="mx-auto max-w-6xl px-6 py-8">{children}</main>
+      <main className="px-4 py-6 sm:px-6 lg:px-8">{children}</main>
       <Toaster />
     </div>
   );
