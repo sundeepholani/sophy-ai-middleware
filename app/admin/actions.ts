@@ -8,7 +8,7 @@
 import { revalidatePath } from 'next/cache';
 import { eq } from 'drizzle-orm';
 import { getDb } from '@/db/client';
-import { apiKeys, auditLog, type KeyParams } from '@/db/schema';
+import { apiKeys, appSettings, auditLog, type KeyParams } from '@/db/schema';
 import { assertAdmin } from '@/lib/admin/guard';
 import { issueKey } from '@/lib/auth/api-key';
 
@@ -16,6 +16,32 @@ async function audit(action: string, target: string, after: unknown): Promise<vo
   await getDb()
     .insert(auditLog)
     .values({ actor: 'admin', action, target, after: after as object });
+}
+
+// ---- Global settings --------------------------------------------------------
+
+export interface SettingsInput {
+  judgeModel: string;
+  notifyEmail: string | null;
+}
+
+export async function updateSettings(input: SettingsInput): Promise<void> {
+  await assertAdmin();
+  const judgeModel = input.judgeModel.trim();
+  if (!judgeModel) throw new Error('Judge model is required');
+  const notifyEmail = input.notifyEmail?.trim() || null;
+  if (notifyEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(notifyEmail)) {
+    throw new Error('Notification email is not a valid address');
+  }
+  await getDb()
+    .insert(appSettings)
+    .values({ id: 'global', judgeModel, notifyEmail, updatedAt: new Date() })
+    .onConflictDoUpdate({
+      target: appSettings.id,
+      set: { judgeModel, notifyEmail, updatedAt: new Date() },
+    });
+  await audit('settings.update', 'global', { judgeModel, notifyEmail });
+  revalidatePath('/admin/settings');
 }
 
 export interface KeyFormInput {
