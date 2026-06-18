@@ -25,13 +25,11 @@ export default async function OverviewPage() {
         <h1 className="text-2xl font-semibold">Overview</h1>
         <p className="text-sm text-muted-foreground">Last 30 days across all clients.</p>
       </div>
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
         <Stat label="Requests" value={nf.format(o.requests)} />
         <Stat label="Input tokens" value={nf.format(o.inputTokens)} />
         <Stat label="Output tokens" value={nf.format(o.outputTokens)} />
         <Stat label="Est. cost" value={`$${o.cost.toFixed(4)}`} />
-      </div>
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <Stat label="Errors" value={nf.format(o.errors)} />
       </div>
     </div>

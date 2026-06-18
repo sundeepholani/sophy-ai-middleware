@@ -8,10 +8,12 @@ export default async function KeysPage() {
   const keys = await listKeys();
   // Best-effort model list; the form falls back to free text if unavailable.
   let models: AvailableModel[] = [];
+  let modelsUnavailable = false;
   try {
     models = await listGatewayModels();
   } catch {
     models = [];
+    modelsUnavailable = true;
   }
   return (
     <div className="space-y-6">
@@ -22,7 +24,7 @@ export default async function KeysPage() {
           changes apply on the next request, no redeploy. Keys are shown once at creation.
         </p>
       </div>
-      <KeysManager keys={keys} models={models} />
+      <KeysManager keys={keys} models={models} modelsUnavailable={modelsUnavailable} />
     </div>
   );
 }

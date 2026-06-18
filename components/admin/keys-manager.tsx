@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useTransition } from 'react';
+import { useId, useState, useTransition } from 'react';
 import { toast } from 'sonner';
 import { Plus, Pencil } from 'lucide-react';
 import { createKey, updateKey, revokeKey, type KeyFormInput } from '@/app/admin/actions';
@@ -46,15 +46,12 @@ import {
   TableRow,
 } from '@/components/ui/table';
 
-function numOrNull(s: string): number | null {
+/** Parses a positive whole number; '' → null (no limit); anything else → 'invalid'. */
+function posIntOrNull(s: string): number | null | 'invalid' {
   const t = s.trim();
   if (!t) return null;
   const n = Number(t);
-  return Number.isFinite(n) ? n : null;
-}
-function numOrUndef(s: string): number | undefined {
-  const n = numOrNull(s);
-  return n == null ? undefined : n;
+  return Number.isInteger(n) && n > 0 ? n : 'invalid';
 }
 function quotaLabel(k: KeyRow): string {
   const cap = k.monthlyTokenCap != null ? `${k.monthlyTokenCap.toLocaleString()} tok/mo` : '∞';
@@ -62,10 +59,29 @@ function quotaLabel(k: KeyRow): string {
   return `${cap} · ${rpm}`;
 }
 
-export function KeysManager({ keys, models }: { keys: KeyRow[]; models: AvailableModel[] }) {
+export function KeysManager({
+  keys,
+  models,
+  modelsUnavailable = false,
+}: {
+  keys: KeyRow[];
+  models: AvailableModel[];
+  modelsUnavailable?: boolean;
+}) {
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<KeyRow | null>(null);
   const [issued, setIssued] = useState<string | null>(null);
+
+  async function copyIssued() {
+    if (!issued) return;
+    try {
+      if (!navigator.clipboard) throw new Error('clipboard unavailable');
+      await navigator.clipboard.writeText(issued);
+      toast.success('Copied');
+    } catch {
+      toast.error('Copy failed — select the key and copy it manually');
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -78,7 +94,7 @@ export function KeysManager({ keys, models }: { keys: KeyRow[]; models: Availabl
           New API key
         </Button>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-          <DialogContent className="max-h-[85vh] w-[60vw] overflow-y-auto sm:max-w-[60vw]">
+          <DialogContent className="max-h-[85vh] w-full overflow-y-auto sm:max-w-2xl">
             <DialogHeader>
               <DialogTitle>New API key</DialogTitle>
               <DialogDescription>
@@ -88,6 +104,7 @@ export function KeysManager({ keys, models }: { keys: KeyRow[]; models: Availabl
             <KeyForm
               mode="create"
               models={models}
+              modelsUnavailable={modelsUnavailable}
               onIssued={setIssued}
               onDone={() => setCreateOpen(false)}
             />
@@ -145,7 +162,7 @@ export function KeysManager({ keys, models }: { keys: KeyRow[]; models: Availabl
 
       {/* Edit modal */}
       <Dialog open={editing != null} onOpenChange={(o) => !o && setEditing(null)}>
-        <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
+        <DialogContent className="max-h-[85vh] w-full overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Edit key</DialogTitle>
             <DialogDescription>Changes apply on the next request — no redeploy.</DialogDescription>
@@ -157,31 +174,37 @@ export function KeysManager({ keys, models }: { keys: KeyRow[]; models: Availabl
               keyId={editing.id}
               initial={editing}
               models={models}
+              modelsUnavailable={modelsUnavailable}
               onDone={() => setEditing(null)}
             />
           )}
         </DialogContent>
       </Dialog>
 
-      {/* Show-once key reveal */}
-      <Dialog open={issued != null} onOpenChange={(o) => !o && setIssued(null)}>
-        <DialogContent>
+      {/* Show-once key reveal — dismissable only via the explicit acknowledgement button,
+          since the key cannot be retrieved later. */}
+      <Dialog
+        open={issued != null}
+        onOpenChange={(open) => {
+          // Ignore Escape / backdrop dismissals; only the buttons below may close it.
+          if (open) return;
+        }}
+      >
+        <DialogContent showCloseButton={false} className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>API key created</DialogTitle>
             <DialogDescription>
               Copy this now — it is shown only once and cannot be retrieved later.
             </DialogDescription>
           </DialogHeader>
-          <code className="block break-all rounded-md bg-muted p-3 text-sm">{issued}</code>
+          <code className="block select-all break-all rounded-md bg-muted p-3 text-sm">
+            {issued}
+          </code>
           <DialogFooter>
-            <Button
-              onClick={() => {
-                if (issued) navigator.clipboard?.writeText(issued);
-                toast.success('Copied');
-              }}
-            >
-              Copy
+            <Button variant="outline" onClick={() => setIssued(null)}>
+              I&apos;ve saved my key
             </Button>
+            <Button onClick={copyIssued}>Copy</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -242,6 +265,7 @@ function KeyForm({
   keyId,
   initial,
   models,
+  modelsUnavailable = false,
   onIssued,
   onDone,
 }: {
@@ -249,15 +273,18 @@ function KeyForm({
   keyId?: string;
   initial?: KeyRow;
   models: AvailableModel[];
+  modelsUnavailable?: boolean;
   onIssued?: (key: string) => void;
   onDone?: () => void;
 }) {
+  const uid = useId();
   const [isPending, startTransition] = useTransition();
   const [name, setName] = useState(initial?.name ?? '');
   const [model, setModel] = useState(initial?.model ?? (models[0]?.id ?? ''));
   const [systemPrompt, setSystemPrompt] = useState(initial?.systemPrompt ?? '');
   const [temperature, setTemperature] = useState(initial?.params.temperature?.toString() ?? '');
   const [maxTokens, setMaxTokens] = useState(initial?.params.maxOutputTokens?.toString() ?? '');
+  const [topP, setTopP] = useState(initial?.params.topP?.toString() ?? '');
   const [tokenCap, setTokenCap] = useState(initial?.monthlyTokenCap?.toString() ?? '');
   const [rpm, setRpm] = useState(initial?.rpmLimit?.toString() ?? '');
   const [logContent, setLogContent] = useState(initial?.logContent ?? true);
@@ -266,28 +293,81 @@ function KeyForm({
   );
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  // Saved model that's no longer in the live catalog — surface it so it stays selectable.
+  const initialModel = initial?.model ?? null;
+  const staleModel =
+    initialModel && !models.some((m) => m.id === initialModel) ? initialModel : null;
+
   function submit() {
     if (!name.trim()) return toast.error('Name is required');
     if (!model.trim()) return toast.error('Model is required');
+
+    // Output schema must be a JSON object (not an array/string/number/null).
     let outputSchema: Record<string, unknown> | null = null;
     if (schemaText.trim()) {
+      let parsed: unknown;
       try {
-        outputSchema = JSON.parse(schemaText) as Record<string, unknown>;
+        parsed = JSON.parse(schemaText);
       } catch {
         return toast.error('Output schema is not valid JSON');
       }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return toast.error('Output schema must be a JSON object');
+      }
+      outputSchema = parsed as Record<string, unknown>;
     }
+
+    // Quota fields: positive whole numbers (blank = no limit).
+    const cap = posIntOrNull(tokenCap);
+    if (cap === 'invalid') return toast.error('Monthly token cap must be a positive whole number');
+    const rpmV = posIntOrNull(rpm);
+    if (rpmV === 'invalid') return toast.error('Rate limit must be a positive whole number');
+
+    // Temperature: optional, 0–2 inclusive.
+    let temp: number | undefined;
+    if (temperature.trim()) {
+      const n = Number(temperature);
+      if (!Number.isFinite(n) || n < 0 || n > 2) {
+        return toast.error('Temperature must be between 0 and 2');
+      }
+      temp = n;
+    }
+
+    // Top P: optional, 0–1 inclusive.
+    let topPV: number | undefined;
+    if (topP.trim()) {
+      const n = Number(topP);
+      if (!Number.isFinite(n) || n < 0 || n > 1) {
+        return toast.error('Top P must be between 0 and 1');
+      }
+      topPV = n;
+    }
+
+    // Max output tokens: optional, positive whole number.
+    let maxOut: number | undefined;
+    if (maxTokens.trim()) {
+      const n = Number(maxTokens);
+      if (!Number.isInteger(n) || n <= 0) {
+        return toast.error('Max output tokens must be a positive whole number');
+      }
+      maxOut = n;
+    }
+
     const input: KeyFormInput = {
       name: name.trim(),
       model: model.trim(),
       systemPrompt: systemPrompt.trim() ? systemPrompt : null,
+      // Spread the original params so any field we don't surface survives an edit;
+      // blank UI fields serialize out of the jsonb as undefined.
       params: {
-        temperature: numOrUndef(temperature),
-        maxOutputTokens: numOrUndef(maxTokens),
+        ...initial?.params,
+        temperature: temp,
+        maxOutputTokens: maxOut,
+        topP: topPV,
       },
       outputSchema,
-      monthlyTokenCap: numOrNull(tokenCap),
-      rpmLimit: numOrNull(rpm),
+      monthlyTokenCap: cap,
+      rpmLimit: rpmV,
       logContent,
     };
     startTransition(async () => {
@@ -301,8 +381,13 @@ function KeyForm({
           toast.success('Saved — applies to the next request');
         }
         onDone?.();
-      } catch {
-        toast.error('Something went wrong');
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : '';
+        toast.error(
+          msg === 'unauthorized'
+            ? 'Your session expired — please sign in again.'
+            : 'Could not save the key. Check your inputs and try again.',
+        );
       }
     });
   }
@@ -310,8 +395,11 @@ function KeyForm({
   return (
     <div className="space-y-4">
       <div className="space-y-1">
-        <Label className="text-xs">Name</Label>
+        <Label htmlFor={`${uid}-name`} className="text-xs">
+          Name
+        </Label>
         <Input
+          id={`${uid}-name`}
           placeholder="billing-service prod"
           value={name}
           onChange={(e) => setName(e.target.value)}
@@ -319,10 +407,17 @@ function KeyForm({
       </div>
 
       <div className="space-y-1">
-        <Label className="text-xs">Model</Label>
+        <Label htmlFor={`${uid}-model`} className="text-xs">
+          Model
+        </Label>
         {models.length > 0 ? (
-          <Select value={model} onValueChange={(v) => setModel(v ?? '')}>
-            <SelectTrigger className="w-full">
+          <Select
+            value={model}
+            onValueChange={(v) => {
+              if (v != null) setModel(v);
+            }}
+          >
+            <SelectTrigger id={`${uid}-model`} className="w-full">
               <SelectValue placeholder="Select a model" />
             </SelectTrigger>
             <SelectContent>
@@ -331,20 +426,35 @@ function KeyForm({
                   {m.id}
                 </SelectItem>
               ))}
+              {staleModel && (
+                <SelectItem value={staleModel}>{staleModel} (unavailable)</SelectItem>
+              )}
             </SelectContent>
           </Select>
         ) : (
-          <Input
-            placeholder="anthropic/claude-sonnet-4.6"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-          />
+          <>
+            <Input
+              id={`${uid}-model`}
+              placeholder="anthropic/claude-sonnet-4.6"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+            />
+            {modelsUnavailable && (
+              <p className="text-xs text-muted-foreground">
+                Couldn’t load the model list from the gateway — enter the model id as free text
+                (e.g. <code>anthropic/claude-sonnet-4.6</code>).
+              </p>
+            )}
+          </>
         )}
       </div>
 
       <div className="space-y-1">
-        <Label className="text-xs">System prompt</Label>
+        <Label htmlFor={`${uid}-system`} className="text-xs">
+          System prompt
+        </Label>
         <Textarea
+          id={`${uid}-system`}
           rows={5}
           className="text-sm"
           placeholder="You are a helpful assistant for…"
@@ -355,23 +465,39 @@ function KeyForm({
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1">
-          <Label className="text-xs">Monthly token cap (blank = ∞)</Label>
-          <Input value={tokenCap} inputMode="numeric" onChange={(e) => setTokenCap(e.target.value)} />
+          <Label htmlFor={`${uid}-cap`} className="text-xs">
+            Monthly token cap (blank = ∞)
+          </Label>
+          <Input
+            id={`${uid}-cap`}
+            value={tokenCap}
+            inputMode="numeric"
+            onChange={(e) => setTokenCap(e.target.value)}
+          />
         </div>
         <div className="space-y-1">
-          <Label className="text-xs">Rate limit (req/min, blank = none)</Label>
-          <Input value={rpm} inputMode="numeric" onChange={(e) => setRpm(e.target.value)} />
+          <Label htmlFor={`${uid}-rpm`} className="text-xs">
+            Rate limit (req/min, blank = none)
+          </Label>
+          <Input
+            id={`${uid}-rpm`}
+            value={rpm}
+            inputMode="numeric"
+            onChange={(e) => setRpm(e.target.value)}
+          />
         </div>
       </div>
 
       <div className="flex items-center justify-between rounded-md border p-3">
         <div>
-          <Label className="text-sm">Log message content</Label>
+          <Label htmlFor={`${uid}-log`} className="text-sm">
+            Log message content
+          </Label>
           <p className="text-xs text-muted-foreground">
             Store inbound prompts &amp; model replies for this key (viewable in Logs, kept 30 days).
           </p>
         </div>
-        <Switch checked={logContent} onCheckedChange={setLogContent} />
+        <Switch id={`${uid}-log`} checked={logContent} onCheckedChange={setLogContent} />
       </div>
 
       <button
@@ -386,17 +512,48 @@ function KeyForm({
         <div className="space-y-4 rounded-md border p-3">
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1">
-              <Label className="text-xs">Temperature</Label>
-              <Input value={temperature} onChange={(e) => setTemperature(e.target.value)} placeholder="0.7" />
+              <Label htmlFor={`${uid}-temp`} className="text-xs">
+                Temperature
+              </Label>
+              <Input
+                id={`${uid}-temp`}
+                inputMode="decimal"
+                value={temperature}
+                onChange={(e) => setTemperature(e.target.value)}
+                placeholder="0.7"
+              />
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">Max output tokens</Label>
-              <Input value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="1024" />
+              <Label htmlFor={`${uid}-maxtokens`} className="text-xs">
+                Max output tokens
+              </Label>
+              <Input
+                id={`${uid}-maxtokens`}
+                inputMode="numeric"
+                value={maxTokens}
+                onChange={(e) => setMaxTokens(e.target.value)}
+                placeholder="1024"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor={`${uid}-topp`} className="text-xs">
+                Top P
+              </Label>
+              <Input
+                id={`${uid}-topp`}
+                inputMode="decimal"
+                value={topP}
+                onChange={(e) => setTopP(e.target.value)}
+                placeholder="1"
+              />
             </div>
           </div>
           <div className="space-y-1">
-            <Label className="text-xs">Output JSON schema (blank = plain text)</Label>
+            <Label htmlFor={`${uid}-schema`} className="text-xs">
+              Output JSON schema (blank = plain text)
+            </Label>
             <Textarea
+              id={`${uid}-schema`}
               className="font-mono text-xs"
               rows={6}
               placeholder='{ "type": "object", "properties": { ... }, "required": [...] }'
