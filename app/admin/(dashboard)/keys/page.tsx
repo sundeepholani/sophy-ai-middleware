@@ -1,0 +1,28 @@
+import { listKeys } from '@/lib/admin/queries';
+import { listGatewayModels, type AvailableModel } from '@/lib/gateway/models';
+import { KeysManager } from '@/components/admin/keys-manager';
+
+export const dynamic = 'force-dynamic';
+
+export default async function KeysPage() {
+  const keys = await listKeys();
+  // Best-effort model list; the form falls back to free text if unavailable.
+  let models: AvailableModel[] = [];
+  try {
+    models = await listGatewayModels();
+  } catch {
+    models = [];
+  }
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-semibold">API Keys</h1>
+        <p className="text-sm text-muted-foreground">
+          Each key carries its own model, system prompt, and quota. Create or edit a key here —
+          changes apply on the next request, no redeploy. Keys are shown once at creation.
+        </p>
+      </div>
+      <KeysManager keys={keys} models={models} />
+    </div>
+  );
+}
