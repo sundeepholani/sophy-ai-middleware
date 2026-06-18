@@ -69,7 +69,7 @@ function gatewayProviderOptions(ctx: CallContext) {
   };
 }
 
-function commonCall(ctx: CallContext, messages: ModelMessage[]) {
+export function commonCall(ctx: CallContext, messages: ModelMessage[]) {
   return {
     model: ctx.model,
     system: buildSystem(ctx.systemPrompt),

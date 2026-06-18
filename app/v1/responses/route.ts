@@ -1,0 +1,108 @@
+/**
+ * OpenAI Responses-API-compatible endpoint (POST /v1/responses).
+ *
+ * Scoped to the text + structured-JSON path so clients using
+ * `client.responses.create(...)` work by changing only base_url + api_key. The
+ * key owns model/system/params (client `model`, `instructions`, params are
+ * ignored — same as /v1/chat/completions). Stateful conversations
+ * (`previous_response_id`) and tools are rejected with a clear 400.
+ */
+import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
+import { checkRateLimit, quotaUsed } from '@/lib/counters';
+import { resolveParams } from '@/lib/gateway/openai-map';
+import { type CallContext } from '@/lib/gateway/call';
+import {
+  handleResponsesNonStreaming,
+  handleResponsesStreaming,
+} from '@/lib/gateway/responses';
+import { responsesInputToMessages, type ResponsesRequest } from '@/lib/http/responses';
+import { openAiError } from '@/lib/http/openai';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const maxDuration = 800;
+export const preferredRegion = 'bom1';
+
+export async function POST(req: Request): Promise<Response> {
+  // 1) Authenticate the key (carries the whole config).
+  const token = bearerFromHeader(req.headers.get('authorization'));
+  if (!token) {
+    return openAiError(401, 'authentication_error', 'Missing API key.', { code: 'missing_api_key' });
+  }
+  const key = await verifyKey(token);
+  if (!key) {
+    return openAiError(401, 'authentication_error', 'Invalid API key.', { code: 'invalid_api_key' });
+  }
+
+  // 2) Parse the body.
+  let body: ResponsesRequest;
+  try {
+    body = (await req.json()) as ResponsesRequest;
+  } catch {
+    return openAiError(400, 'invalid_request_error', 'Request body must be valid JSON.');
+  }
+  if (body.input == null) {
+    return openAiError(400, 'invalid_request_error', 'Missing required parameter: input.', {
+      param: 'input',
+    });
+  }
+
+  // 3) Reject unsupported features (loudly, not silently).
+  if (Array.isArray(body.tools) && body.tools.length > 0) {
+    return openAiError(400, 'invalid_request_error', 'Tools are not supported by this endpoint.', {
+      param: 'tools',
+      code: 'tools_unsupported',
+    });
+  }
+  if (body.previous_response_id != null) {
+    return openAiError(
+      400,
+      'invalid_request_error',
+      'Stateful conversations (previous_response_id) are not supported; send the full input each call.',
+      { param: 'previous_response_id', code: 'stateful_unsupported' },
+    );
+  }
+
+  // 4) Rate limit + quota pre-check (limits come from the key).
+  const rl = await checkRateLimit(key.id, key.rpmLimit);
+  if (!rl.ok) {
+    const retryAfter = rl.reset ? Math.max(1, Math.ceil((rl.reset - Date.now()) / 1000)) : 60;
+    return openAiError(429, 'rate_limit_error', 'Rate limit exceeded.', {
+      code: 'rate_limit_exceeded',
+      headers: { 'retry-after': String(retryAfter) },
+    });
+  }
+  if (key.monthlyTokenCap != null) {
+    const used = await quotaUsed(key.id);
+    if (used >= key.monthlyTokenCap) {
+      return openAiError(402, 'insufficient_quota', 'Monthly token quota exceeded.', {
+        code: 'quota_exceeded',
+      });
+    }
+  }
+
+  // 5) Map input -> messages (client system/developer items dropped; key owns the prompt).
+  const messages = responsesInputToMessages(body.input);
+  if (messages.length === 0) {
+    return openAiError(400, 'invalid_request_error', 'No usable input content provided.', {
+      param: 'input',
+    });
+  }
+
+  // 6) Assemble the call from the key's config (structured iff the key has a schema).
+  const structured = key.outputSchema != null;
+  const ctx: CallContext = {
+    keyId: key.id,
+    model: key.model,
+    systemPrompt: key.systemPrompt,
+    params: resolveParams(key.params),
+    structured,
+    schema: key.outputSchema,
+    includeUsage: true,
+  };
+
+  // 7) Stream or buffer.
+  return body.stream === true
+    ? handleResponsesStreaming(ctx, messages)
+    : handleResponsesNonStreaming(ctx, messages);
+}
