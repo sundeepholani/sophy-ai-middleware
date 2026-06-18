@@ -1,7 +1,7 @@
 /**
  * Read-side queries for the admin console (server components only).
  */
-import { desc, eq, gte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import { apiKeys, usageEvents, requestLogs, type KeyParams } from '@/db/schema';
 
@@ -62,17 +62,33 @@ export async function listKeys(): Promise<KeyRow[]> {
   return rows.map((r) => ({ ...r, outputSchema: r.outputSchema ?? null }));
 }
 
-export async function getUsageSeries() {
-  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+/** Filters shared by every usage query (range + optional key/model). */
+export interface UsageFilters {
+  sinceDays: number;
+  keyId?: string;
+  model?: string;
+}
+
+function usageWhere(f: UsageFilters) {
+  const since = new Date(Date.now() - f.sinceDays * 24 * 60 * 60 * 1000);
+  const conds = [gte(usageEvents.createdAt, since)];
+  if (f.keyId) conds.push(eq(usageEvents.apiKeyId, f.keyId));
+  if (f.model) conds.push(eq(usageEvents.model, f.model));
+  return and(...conds);
+}
+
+const tokensExpr = sql`${usageEvents.inputTokens} + ${usageEvents.outputTokens}`;
+
+export async function getUsageSeries(f: UsageFilters) {
   const rows = await getDb()
     .select({
       day: sql<string>`to_char(date_trunc('day', ${usageEvents.createdAt}), 'YYYY-MM-DD')`,
       requests: sql<string>`count(*)`,
-      tokens: sql<string>`coalesce(sum(${usageEvents.inputTokens} + ${usageEvents.outputTokens}),0)`,
+      tokens: sql<string>`coalesce(sum(${tokensExpr}),0)`,
       cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
     })
     .from(usageEvents)
-    .where(gte(usageEvents.createdAt, since))
+    .where(usageWhere(f))
     .groupBy(sql`date_trunc('day', ${usageEvents.createdAt})`)
     .orderBy(sql`date_trunc('day', ${usageEvents.createdAt})`);
   return rows.map((r) => ({
@@ -81,6 +97,89 @@ export async function getUsageSeries() {
     tokens: Number(r.tokens),
     cost: Number(r.cost),
   }));
+}
+
+export async function getUsageTotals(f: UsageFilters) {
+  const [agg] = await getDb()
+    .select({
+      requests: sql<string>`coalesce(count(*),0)`,
+      inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}),0)`,
+      outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}),0)`,
+      cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
+    })
+    .from(usageEvents)
+    .where(usageWhere(f));
+  return {
+    requests: Number(agg?.requests ?? 0),
+    inputTokens: Number(agg?.inputTokens ?? 0),
+    outputTokens: Number(agg?.outputTokens ?? 0),
+    cost: Number(agg?.cost ?? 0),
+  };
+}
+
+export interface UsageBreakdownRow {
+  label: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cost: number;
+}
+
+export async function getUsageByKey(f: UsageFilters): Promise<UsageBreakdownRow[]> {
+  const rows = await getDb()
+    .select({
+      keyId: usageEvents.apiKeyId,
+      keyName: apiKeys.name,
+      requests: sql<string>`count(*)`,
+      inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}),0)`,
+      outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}),0)`,
+      cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
+    })
+    .from(usageEvents)
+    .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
+    .where(usageWhere(f))
+    .groupBy(usageEvents.apiKeyId, apiKeys.name)
+    .orderBy(desc(sql`sum(${tokensExpr})`));
+  return rows.map((r) => ({
+    label: r.keyName ?? `${r.keyId.slice(0, 8)}… (deleted)`,
+    requests: Number(r.requests),
+    inputTokens: Number(r.inputTokens),
+    outputTokens: Number(r.outputTokens),
+    cost: Number(r.cost),
+  }));
+}
+
+export async function getUsageByModel(f: UsageFilters): Promise<UsageBreakdownRow[]> {
+  const rows = await getDb()
+    .select({
+      model: usageEvents.model,
+      requests: sql<string>`count(*)`,
+      inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}),0)`,
+      outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}),0)`,
+      cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
+    })
+    .from(usageEvents)
+    .where(usageWhere(f))
+    .groupBy(usageEvents.model)
+    .orderBy(desc(sql`sum(${tokensExpr})`));
+  return rows.map((r) => ({
+    label: r.model ?? '—',
+    requests: Number(r.requests),
+    inputTokens: Number(r.inputTokens),
+    outputTokens: Number(r.outputTokens),
+    cost: Number(r.cost),
+  }));
+}
+
+/** Distinct models seen in the last 90 days — drives the model filter dropdown. */
+export async function listUsedModels(): Promise<string[]> {
+  const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  const rows = await getDb()
+    .selectDistinct({ model: usageEvents.model })
+    .from(usageEvents)
+    .where(gte(usageEvents.createdAt, since))
+    .orderBy(usageEvents.model);
+  return rows.map((r) => r.model).filter((m): m is string => !!m);
 }
 
 export async function getLogDetail(id: string) {
