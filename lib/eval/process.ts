@@ -7,19 +7,23 @@
  * Bounded per invocation (batch) and idempotent — the cron lock prevents
  * overlap, and the status guards prevent double-finalize/double-email.
  */
-import { and, eq, gte, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 import { generateText, Output, jsonSchema } from 'ai';
 import type { ModelMessage } from 'ai';
 import { getDb } from '@/db/client';
-import { evalRuns, evalSamples, usageEvents, type KeyParams } from '@/db/schema';
+import { evalRuns, evalSamples, usageEvents, type EvalWinner, type KeyParams } from '@/db/schema';
 import { buildSystem } from '@/lib/gateway/call';
+import { validateAgainstSchema } from '@/lib/gateway/openai-map';
 import { extractGatewayCost } from '@/lib/usage/record';
-import { judge } from '@/lib/eval/judge';
+import { judge, type JudgeVerdict } from '@/lib/eval/judge';
+import { evalModel } from '@/lib/eval/model';
 import { summarize, type JudgedSample } from '@/lib/eval/aggregate';
 import { getSettings } from '@/lib/admin/settings';
 import { formatEvalEmail, sendEvalEmail } from '@/lib/eval/email';
 
 const MAX_OUTPUT_CHARS = 100_000;
+const MODEL_TIMEOUT_MS = 60_000;
+const STALE_PENDING_MS = 60 * 60 * 1000;
 
 async function replayChallenger(
   model: string,
@@ -28,15 +32,16 @@ async function replayChallenger(
   params: KeyParams,
   structured: boolean,
   outputSchema: Record<string, unknown> | null,
-): Promise<{ output: string; costUsd: number | null; latencyMs: number }> {
+): Promise<{ output: string; costUsd: number | null; latencyMs: number; schemaValid: boolean }> {
   const start = Date.now();
   const callArgs = {
-    model,
+    model: evalModel(model),
     system: buildSystem(systemPrompt),
     messages,
     temperature: params.temperature,
     topP: params.topP,
     maxOutputTokens: params.maxOutputTokens,
+    abortSignal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
     providerOptions: { gateway: { tags: ['eval:challenger'] } } as never,
   };
   if (structured && outputSchema) {
@@ -44,14 +49,23 @@ async function replayChallenger(
       ...callArgs,
       experimental_output: Output.object({ schema: jsonSchema(outputSchema) }),
     });
+    const obj = r.experimental_output as unknown;
+    const check = validateAgainstSchema(obj, outputSchema);
     return {
-      output: JSON.stringify(r.experimental_output),
+      // undefined → JSON.stringify yields the value undefined (not a string); guard it.
+      output: obj === undefined ? '' : JSON.stringify(obj),
       costUsd: extractGatewayCost(r.providerMetadata),
       latencyMs: Date.now() - start,
+      schemaValid: check.valid,
     };
   }
   const r = await generateText(callArgs);
-  return { output: r.text, costUsd: extractGatewayCost(r.providerMetadata), latencyMs: Date.now() - start };
+  return {
+    output: r.text,
+    costUsd: extractGatewayCost(r.providerMetadata),
+    latencyMs: Date.now() - start,
+    schemaValid: true,
+  };
 }
 
 export async function processEvalRuns(opts?: { batch?: number }): Promise<{
@@ -60,6 +74,27 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
 }> {
   const db = getDb();
   const batch = opts?.batch ?? 20;
+
+  // Backstop 1: abandon poison samples stuck pending far longer than a cron
+  // cycle, so one perpetually-hanging challenger/judge can't wedge a run forever.
+  await db
+    .update(evalSamples)
+    .set({ status: 'failed', errorMessage: 'stale pending — abandoned' })
+    .where(
+      and(
+        eq(evalSamples.status, 'pending'),
+        lt(evalSamples.createdAt, new Date(Date.now() - STALE_PENDING_MS)),
+      ),
+    );
+
+  // Backstop 2: a capture can race a cancel and insert a sample after cancel's
+  // delete; purge any samples left under a cancelled run (privacy option A).
+  await db.delete(evalSamples).where(
+    inArray(
+      evalSamples.runId,
+      db.select({ id: evalRuns.id }).from(evalRuns).where(eq(evalRuns.status, 'cancelled')),
+    ),
+  );
 
   const pending = await db
     .select({
@@ -91,14 +126,28 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
         p.structured,
         p.outputSchema ?? null,
       );
-      const verdict = await judge({
-        judgeModel: p.judgeModel,
-        systemPrompt: p.systemPrompt,
-        messages,
-        championOutput: p.championOutput ?? '',
-        challengerOutput: challenger.output,
-        randomSwap: Math.random() < 0.5,
-      });
+      let verdict: JudgeVerdict;
+      if (p.structured && !challenger.schemaValid) {
+        // Champion captures are always schema-valid (the proxy fail-closes on
+        // invalid structured output), so an invalid challenger loses outright —
+        // don't waste a judge call on an unfair comparison.
+        verdict = {
+          winner: 'champion' as EvalWinner,
+          confidence: 1,
+          reason: 'Challenger output failed the key’s JSON schema.',
+          costUsd: null,
+          orderSwapped: false,
+        };
+      } else {
+        verdict = await judge({
+          judgeModel: p.judgeModel,
+          systemPrompt: p.systemPrompt,
+          messages,
+          championOutput: p.championOutput ?? '',
+          challengerOutput: challenger.output,
+          randomSwap: Math.random() < 0.5,
+        });
+      }
       await db
         .update(evalSamples)
         .set({
@@ -178,7 +227,20 @@ async function finalizeRuns(): Promise<number> {
       challengerModel: run.challengerModel,
     });
 
-    let emailedAt: Date | null = null;
+    // Claim the run (flip running → completed, guarded) BEFORE any side effect,
+    // so an overlapping cron can't also send the email. Only the winner proceeds.
+    const done = await db
+      .update(evalRuns)
+      .set({
+        status: 'completed',
+        summary: summary as unknown as Record<string, unknown>,
+        completedAt: new Date(),
+      })
+      .where(and(eq(evalRuns.id, run.id), eq(evalRuns.status, 'running')))
+      .returning({ id: evalRuns.id });
+    if (done.length === 0) continue; // someone else finalized it
+
+    // Email (best-effort) — gated by the claim above, so no double-send.
     try {
       const settings = await getSettings();
       if (settings.notifyEmail) {
@@ -189,29 +251,26 @@ async function finalizeRuns(): Promise<number> {
           summary,
         });
         const sent = await sendEvalEmail(settings.notifyEmail, subject, html);
-        if (sent) emailedAt = new Date();
+        if (sent) {
+          await db.update(evalRuns).set({ emailedAt: new Date() }).where(eq(evalRuns.id, run.id));
+        }
       }
     } catch (err) {
       console.error('[eval] summary email failed', err);
     }
 
-    // Complete the run (guarded so overlapping crons can't double-finalize).
-    const done = await db
-      .update(evalRuns)
-      .set({
-        status: 'completed',
-        summary: summary as unknown as Record<string, unknown>,
-        completedAt: new Date(),
-        emailedAt,
-      })
-      .where(and(eq(evalRuns.id, run.id), eq(evalRuns.status, 'running')))
-      .returning({ id: evalRuns.id });
-    if (done.length === 0) continue; // someone else finalized it
-
-    // Privacy option A: purge captured content; keep verdict + metrics.
+    // Privacy option A: purge captured content + derived judge reasons. The
+    // frozen summary.examples retain a few verdict rationales by design (that's
+    // the report's value); the raw per-sample content is removed.
     await db
       .update(evalSamples)
-      .set({ systemPrompt: null, request: null, championOutput: null, challengerOutput: null })
+      .set({
+        systemPrompt: null,
+        request: null,
+        championOutput: null,
+        challengerOutput: null,
+        judgeReason: null,
+      })
       .where(eq(evalSamples.runId, run.id));
     finalized++;
   }

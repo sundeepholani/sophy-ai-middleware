@@ -220,7 +220,9 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
         gatewayRequestId: extractGatewayRequestId(event.providerMetadata),
       });
       await logIf(event.text, 'ok');
-      scheduleChampionCapture(ctx, messages, 'responses', event.text, event.providerMetadata, start, eventId);
+      const eo = (event as { experimental_output?: unknown }).experimental_output;
+      const championOut = ctx.structured && eo !== undefined ? JSON.stringify(eo) : event.text;
+      scheduleChampionCapture(ctx, messages, 'responses', championOut, event.providerMetadata, start, eventId);
     },
     onError: async ({ error }) => {
       await recordUsage({

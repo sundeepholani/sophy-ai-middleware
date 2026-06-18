@@ -9,6 +9,7 @@
  * Hot-path counters (rate limit window, cron lock) are Postgres-backed too —
  * see lib/counters.ts and the rate_counters / locks tables below.
  */
+import { sql } from 'drizzle-orm';
 import {
   pgTable,
   uuid,
@@ -21,6 +22,7 @@ import {
   boolean,
   date,
   index,
+  uniqueIndex,
   primaryKey,
 } from 'drizzle-orm/pg-core';
 
@@ -211,7 +213,14 @@ export const evalRuns = pgTable(
     completedAt: timestamp('completed_at', { withTimezone: true }),
     emailedAt: timestamp('emailed_at', { withTimezone: true }),
   },
-  (t) => [index('eval_runs_key_status_idx').on(t.apiKeyId, t.status)],
+  (t) => [
+    index('eval_runs_key_status_idx').on(t.apiKeyId, t.status),
+    // At most one running run per key — enforced atomically at the DB level so the
+    // app-level check in startEvalRun can't be raced into two concurrent runs.
+    uniqueIndex('eval_runs_one_running_per_key')
+      .on(t.apiKeyId)
+      .where(sql`${t.status} = 'running'`),
+  ],
 );
 
 export const evalSamples = pgTable(

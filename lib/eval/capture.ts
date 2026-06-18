@@ -49,34 +49,38 @@ async function captureEvalSample(input: CaptureInput): Promise<void> {
       .limit(1);
     if (!run) return;
 
-    // Atomically claim a slot — increments only while captured_n < target_n, so
-    // concurrent requests can't over-fill the run past N.
-    const claimed = await db
-      .update(evalRuns)
-      .set({ capturedN: sql`${evalRuns.capturedN} + 1` })
-      .where(
-        and(
-          eq(evalRuns.id, run.id),
-          eq(evalRuns.status, 'running'),
-          sql`${evalRuns.capturedN} < ${evalRuns.targetN}`,
-        ),
-      )
-      .returning({ capturedN: evalRuns.capturedN });
-    if (claimed.length === 0) return; // run full or no longer running
+    // Claim a slot AND write the sample in one transaction: the conditional
+    // UPDATE (captured_n < target_n) is the atomic over-fill guard, and pairing
+    // it with the insert means a failed insert rolls the increment back — so a
+    // claimed slot always has a real sample behind it (no silent under-sampling).
+    await db.transaction(async (tx) => {
+      const claimed = await tx
+        .update(evalRuns)
+        .set({ capturedN: sql`${evalRuns.capturedN} + 1` })
+        .where(
+          and(
+            eq(evalRuns.id, run.id),
+            eq(evalRuns.status, 'running'),
+            sql`${evalRuns.capturedN} < ${evalRuns.targetN}`,
+          ),
+        )
+        .returning({ capturedN: evalRuns.capturedN });
+      if (claimed.length === 0) return; // run full or no longer running
 
-    await db.insert(evalSamples).values({
-      runId: run.id,
-      usageEventId: input.usageEventId ?? null,
-      surface: input.surface,
-      systemPrompt: input.systemPrompt,
-      request: input.messages as object,
-      params: input.params,
-      structured: input.structured,
-      outputSchema: input.outputSchema ?? null,
-      championOutput: cap(input.championOutput),
-      championCostUsd: input.championCostUsd != null ? String(input.championCostUsd) : null,
-      championLatencyMs: input.championLatencyMs,
-      status: 'pending',
+      await tx.insert(evalSamples).values({
+        runId: run.id,
+        usageEventId: input.usageEventId ?? null,
+        surface: input.surface,
+        systemPrompt: input.systemPrompt,
+        request: input.messages as object,
+        params: input.params,
+        structured: input.structured,
+        outputSchema: input.outputSchema ?? null,
+        championOutput: cap(input.championOutput),
+        championCostUsd: input.championCostUsd != null ? String(input.championCostUsd) : null,
+        championLatencyMs: input.championLatencyMs,
+        status: 'pending',
+      });
     });
   } catch (err) {
     console.error('[eval] failed to capture champion sample', err);

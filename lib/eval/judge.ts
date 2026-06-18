@@ -9,7 +9,10 @@
 import { generateText, Output, jsonSchema } from 'ai';
 import type { ModelMessage } from 'ai';
 import { extractGatewayCost } from '@/lib/usage/record';
+import { evalModel } from '@/lib/eval/model';
 import type { EvalWinner } from '@/db/schema';
+
+const JUDGE_TIMEOUT_MS = 60_000;
 
 export interface JudgeVerdict {
   winner: EvalWinner; // champion | challenger | tie
@@ -82,14 +85,21 @@ export async function judge(args: {
   ].join('\n\n');
 
   const result = await generateText({
-    model: args.judgeModel,
+    model: evalModel(args.judgeModel),
     system: JUDGE_SYSTEM,
     prompt,
     experimental_output: Output.object({ schema: jsonSchema(JUDGE_SCHEMA) }),
+    abortSignal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
     providerOptions: { gateway: { tags: ['eval:judge'] } } as never,
   });
 
-  const out = result.experimental_output as { winner: 'A' | 'B' | 'tie'; confidence: number; reason: string };
+  // The JSON-schema constraints are only a provider hint (the AI SDK doesn't
+  // enforce them client-side), so guard the field that drives the verdict: a
+  // missing / out-of-enum winner must FAIL the sample, not silently count as 'B'.
+  const out = result.experimental_output as { winner?: unknown; confidence?: unknown; reason?: unknown };
+  if (out.winner !== 'A' && out.winner !== 'B' && out.winner !== 'tie') {
+    throw new Error(`judge returned an invalid winner: ${JSON.stringify(out.winner)}`);
+  }
   let winner: EvalWinner;
   if (out.winner === 'tie') winner = 'tie';
   else if (out.winner === 'A') winner = swapped ? 'challenger' : 'champion';

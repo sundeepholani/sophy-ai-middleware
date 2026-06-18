@@ -213,7 +213,9 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
   const start = Date.now();
   const id = chatId();
   const created = Math.floor(start / 1000);
+  const eventId = randomUUID();
   const base = {
+    id: eventId,
     keyId: ctx.keyId,
     provider: providerOf(ctx.model),
     model: ctx.model,
@@ -235,7 +237,9 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
         status: 'ok',
         gatewayRequestId: extractGatewayRequestId(event.providerMetadata),
       });
-      scheduleChampionCapture(ctx, messages, 'chat', event.text, event.providerMetadata, start);
+      const eo = (event as { experimental_output?: unknown }).experimental_output;
+      const championOut = ctx.structured && eo !== undefined ? JSON.stringify(eo) : event.text;
+      scheduleChampionCapture(ctx, messages, 'chat', championOut, event.providerMetadata, start, eventId);
     },
     onError: async ({ error }) => {
       await recordUsage({

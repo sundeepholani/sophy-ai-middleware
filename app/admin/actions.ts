@@ -170,14 +170,22 @@ export async function startEvalRun(input: StartEvalInput): Promise<void> {
   if (active) throw new Error('An eval is already running for this key');
 
   const settings = await getSettings();
-  await db.insert(evalRuns).values({
-    apiKeyId: input.apiKeyId,
-    championModel: key.model,
-    challengerModel,
-    judgeModel: settings.judgeModel,
-    targetN,
-    status: 'running',
-  });
+  try {
+    await db.insert(evalRuns).values({
+      apiKeyId: input.apiKeyId,
+      championModel: key.model,
+      challengerModel,
+      judgeModel: settings.judgeModel,
+      targetN,
+      status: 'running',
+    });
+  } catch (e) {
+    // Partial unique index (one running run per key) — lost the race.
+    if (e && typeof e === 'object' && 'code' in e && (e as { code?: string }).code === '23505') {
+      throw new Error('An eval is already running for this key');
+    }
+    throw e;
+  }
   await audit('eval.start', input.apiKeyId, {
     championModel: key.model,
     challengerModel,
