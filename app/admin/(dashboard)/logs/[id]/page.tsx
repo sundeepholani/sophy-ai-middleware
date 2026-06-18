@@ -33,7 +33,7 @@ export default async function LogDetailPage({
   return (
     <div className="space-y-6">
       <div>
-        <Link href="/admin/logs" className="text-sm text-muted-foreground underline">
+        <Link href="/admin/logs" className="text-sm text-primary hover:underline">
           ← Logs
         </Link>
         <h1 className="mt-1 text-2xl font-semibold">Request detail</h1>
@@ -49,7 +49,7 @@ export default async function LogDetailPage({
         {event.streamed && <Badge variant="outline">stream</Badge>}
         <span className="text-muted-foreground">
           {event.inputTokens} in · {event.outputTokens} out
-          {event.costUsd ? ` · $${Number(event.costUsd).toFixed(5)}` : ''}
+          {event.costUsd ? ` · $${Number(event.costUsd).toFixed(4)}` : ''}
           {event.latencyMs != null ? ` · ${event.latencyMs} ms` : ''}
         </span>
       </div>
@@ -89,13 +89,13 @@ export default async function LogDetailPage({
                     <div className="mb-1 text-xs font-medium uppercase text-muted-foreground">
                       {m.role ?? 'message'}
                     </div>
-                    <pre className="whitespace-pre-wrap break-words text-sm">
+                    <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words text-sm">
                       {renderContent(m.content)}
                     </pre>
                   </div>
                 ))
               ) : (
-                <pre className="whitespace-pre-wrap break-words text-xs">
+                <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs">
                   {JSON.stringify(content.request, null, 2)}
                 </pre>
               )}
@@ -110,9 +110,13 @@ export default async function LogDetailPage({
               {event.errorMessage && (
                 <p className="mb-2 text-sm text-destructive">Error: {event.errorMessage}</p>
               )}
-              <pre className="whitespace-pre-wrap break-words text-sm">
-                {content.response ?? '(no response captured)'}
-              </pre>
+              {content.response ? (
+                <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words text-sm">
+                  {content.response}
+                </pre>
+              ) : (
+                <span className="text-sm text-muted-foreground">(no response captured)</span>
+              )}
             </CardContent>
           </Card>
         </>

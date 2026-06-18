@@ -29,8 +29,48 @@ export interface KeyFormInput {
   logContent: boolean;
 }
 
+/**
+ * Server-side guard mirroring the form's client checks, so a crafted action
+ * payload can't write a non-object schema, a non-positive cap/rpm, or an
+ * out-of-range param. Throws on the first problem.
+ */
+function validateKeyInput(input: KeyFormInput): void {
+  if (!input.name.trim()) throw new Error('Name is required');
+  if (!input.model.trim()) throw new Error('Model is required');
+
+  const { outputSchema, monthlyTokenCap, rpmLimit, params } = input;
+  if (outputSchema !== null && (typeof outputSchema !== 'object' || Array.isArray(outputSchema))) {
+    throw new Error('Output schema must be a JSON object');
+  }
+  for (const [label, v] of [
+    ['Monthly token cap', monthlyTokenCap],
+    ['Rate limit', rpmLimit],
+  ] as const) {
+    if (v !== null && (!Number.isInteger(v) || v <= 0)) {
+      throw new Error(`${label} must be a positive whole number`);
+    }
+  }
+  const { temperature, topP, maxOutputTokens } = params;
+  if (
+    temperature !== undefined &&
+    (!Number.isFinite(temperature) || temperature < 0 || temperature > 2)
+  ) {
+    throw new Error('Temperature must be between 0 and 2');
+  }
+  if (topP !== undefined && (!Number.isFinite(topP) || topP < 0 || topP > 1)) {
+    throw new Error('Top P must be between 0 and 1');
+  }
+  if (
+    maxOutputTokens !== undefined &&
+    (!Number.isInteger(maxOutputTokens) || maxOutputTokens <= 0)
+  ) {
+    throw new Error('Max output tokens must be a positive whole number');
+  }
+}
+
 export async function createKey(input: KeyFormInput): Promise<{ fullKey: string }> {
   await assertAdmin();
+  validateKeyInput(input);
   const { fullKey, id } = await issueKey(input);
   await audit('key.create', id, { name: input.name, model: input.model });
   revalidatePath('/admin/keys');
@@ -39,6 +79,7 @@ export async function createKey(input: KeyFormInput): Promise<{ fullKey: string 
 
 export async function updateKey(input: KeyFormInput & { id: string }): Promise<void> {
   await assertAdmin();
+  validateKeyInput(input);
   await getDb()
     .update(apiKeys)
     .set({
