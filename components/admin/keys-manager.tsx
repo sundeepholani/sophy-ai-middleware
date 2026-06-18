@@ -2,10 +2,11 @@
 
 import { useId, useState, useTransition } from 'react';
 import { toast } from 'sonner';
-import { Plus, Pencil } from 'lucide-react';
+import { Plus, Pencil, FlaskConical } from 'lucide-react';
 import { createKey, updateKey, revokeKey, type KeyFormInput } from '@/app/admin/actions';
-import type { KeyRow } from '@/lib/admin/queries';
+import type { KeyRow, KeyEval } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
+import { EvalDialog } from '@/components/admin/eval-dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -63,14 +64,19 @@ export function KeysManager({
   keys,
   models,
   modelsUnavailable = false,
+  evals = {},
+  judgeModel,
 }: {
   keys: KeyRow[];
   models: AvailableModel[];
   modelsUnavailable?: boolean;
+  evals?: Record<string, KeyEval>;
+  judgeModel: string;
 }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<KeyRow | null>(null);
   const [issued, setIssued] = useState<string | null>(null);
+  const [evalKey, setEvalKey] = useState<KeyRow | null>(null);
 
   async function copyIssued() {
     if (!issued) return;
@@ -152,6 +158,15 @@ export function KeysManager({
                     <Pencil className="h-3.5 w-3.5" />
                     Edit
                   </Button>
+                  {k.status === 'active' && (
+                    <Button size="sm" variant="ghost" onClick={() => setEvalKey(k)}>
+                      <FlaskConical className="h-3.5 w-3.5" />
+                      Eval
+                      {evals[k.id]?.status === 'running' && (
+                        <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-primary" />
+                      )}
+                    </Button>
+                  )}
                   {k.status === 'active' && <RevokeButton id={k.id} name={k.name} />}
                 </TableCell>
               </TableRow>
@@ -180,6 +195,18 @@ export function KeysManager({
           )}
         </DialogContent>
       </Dialog>
+
+      {/* Eval modal */}
+      {evalKey && (
+        <EvalDialog
+          keyRow={{ id: evalKey.id, name: evalKey.name, model: evalKey.model }}
+          models={models}
+          current={evals[evalKey.id] ?? null}
+          judgeModel={judgeModel}
+          open={evalKey != null}
+          onOpenChange={(o) => !o && setEvalKey(null)}
+        />
+      )}
 
       {/* Show-once key reveal — dismissable only via the explicit acknowledgement button,
           since the key cannot be retrieved later. */}

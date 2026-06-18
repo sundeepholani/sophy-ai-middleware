@@ -6,11 +6,12 @@
  * lives on the key and is read fresh per request, so there's no cache to bust.
  */
 import { revalidatePath } from 'next/cache';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { getDb } from '@/db/client';
-import { apiKeys, appSettings, auditLog, type KeyParams } from '@/db/schema';
+import { apiKeys, appSettings, auditLog, evalRuns, evalSamples, type KeyParams } from '@/db/schema';
 import { assertAdmin } from '@/lib/admin/guard';
 import { issueKey } from '@/lib/auth/api-key';
+import { getSettings } from '@/lib/admin/settings';
 
 async function audit(action: string, target: string, after: unknown): Promise<void> {
   await getDb()
@@ -131,5 +132,73 @@ export async function revokeKey(id: string): Promise<void> {
     .where(eq(apiKeys.id, id));
   // Revocation is instant: verifyKey() reads `status` fresh on every request.
   await audit('key.revoke', id, null);
+  revalidatePath('/admin/keys');
+}
+
+// ---- Model eval runs --------------------------------------------------------
+
+export interface StartEvalInput {
+  apiKeyId: string;
+  challengerModel: string;
+  targetN: number;
+}
+
+export async function startEvalRun(input: StartEvalInput): Promise<void> {
+  await assertAdmin();
+  const challengerModel = input.challengerModel.trim();
+  if (!challengerModel) throw new Error('Challenger model is required');
+  const targetN =
+    Number.isInteger(input.targetN) && input.targetN > 0 ? Math.min(input.targetN, 1000) : 100;
+
+  const db = getDb();
+  const [key] = await db
+    .select({ model: apiKeys.model, status: apiKeys.status })
+    .from(apiKeys)
+    .where(eq(apiKeys.id, input.apiKeyId))
+    .limit(1);
+  if (!key) throw new Error('Key not found');
+  if (key.status !== 'active') throw new Error('Key is not active');
+  if (challengerModel === key.model) {
+    throw new Error('Challenger must differ from the current model');
+  }
+
+  const [active] = await db
+    .select({ id: evalRuns.id })
+    .from(evalRuns)
+    .where(and(eq(evalRuns.apiKeyId, input.apiKeyId), eq(evalRuns.status, 'running')))
+    .limit(1);
+  if (active) throw new Error('An eval is already running for this key');
+
+  const settings = await getSettings();
+  await db.insert(evalRuns).values({
+    apiKeyId: input.apiKeyId,
+    championModel: key.model,
+    challengerModel,
+    judgeModel: settings.judgeModel,
+    targetN,
+    status: 'running',
+  });
+  await audit('eval.start', input.apiKeyId, {
+    championModel: key.model,
+    challengerModel,
+    judgeModel: settings.judgeModel,
+    targetN,
+  });
+  revalidatePath('/admin/keys');
+}
+
+export async function cancelEvalRun(runId: string): Promise<void> {
+  await assertAdmin();
+  const db = getDb();
+  const cancelled = await db
+    .update(evalRuns)
+    .set({ status: 'cancelled', completedAt: new Date() })
+    .where(and(eq(evalRuns.id, runId), eq(evalRuns.status, 'running')))
+    .returning({ id: evalRuns.id });
+  // Privacy option A: purge captured content for the abandoned run.
+  if (cancelled.length > 0) {
+    await db.delete(evalSamples).where(eq(evalSamples.runId, runId));
+  }
+  await audit('eval.cancel', runId, null);
   revalidatePath('/admin/keys');
 }

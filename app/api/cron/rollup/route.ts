@@ -11,6 +11,7 @@ import { getDb } from '@/db/client';
 import { usageEvents, usageRollups, requestLogs } from '@/db/schema';
 import { acquireLock, releaseLock } from '@/lib/counters';
 import { sweepStaleUploads } from '@/lib/files/blob';
+import { processEvalRuns } from '@/lib/eval/process';
 import { env } from '@/lib/env';
 
 const REQUEST_LOG_RETENTION_DAYS = 30;
@@ -77,11 +78,14 @@ export async function GET(req: Request): Promise<Response> {
     const swept = await sweepStaleUploads(24);
     const cutoff = new Date(Date.now() - REQUEST_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000);
     const purged = await getDb().delete(requestLogs).where(lt(requestLogs.createdAt, cutoff));
+    const evals = await processEvalRuns({ batch: 25 });
     return Response.json({
       ok: true,
       rolledRows: rolled,
       sweptBlobs: swept,
       purgedRequestLogs: purged.rowCount ?? 0,
+      evalsJudged: evals.judged,
+      evalRunsFinalized: evals.finalized,
     });
   } catch (err) {
     console.error('[cron] rollup failed', err);

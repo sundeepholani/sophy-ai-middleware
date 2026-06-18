@@ -1,11 +1,12 @@
-import { listKeys } from '@/lib/admin/queries';
+import { listKeys, getKeyEvals } from '@/lib/admin/queries';
+import { getSettings } from '@/lib/admin/settings';
 import { listGatewayModels, type AvailableModel } from '@/lib/gateway/models';
 import { KeysManager } from '@/components/admin/keys-manager';
 
 export const dynamic = 'force-dynamic';
 
 export default async function KeysPage() {
-  const keys = await listKeys();
+  const [keys, evals, settings] = await Promise.all([listKeys(), getKeyEvals(), getSettings()]);
   // Best-effort model list; the form falls back to free text if unavailable.
   let models: AvailableModel[] = [];
   let modelsUnavailable = false;
@@ -24,7 +25,13 @@ export default async function KeysPage() {
           changes apply on the next request, no redeploy. Keys are shown once at creation.
         </p>
       </div>
-      <KeysManager keys={keys} models={models} modelsUnavailable={modelsUnavailable} />
+      <KeysManager
+        keys={keys}
+        models={models}
+        modelsUnavailable={modelsUnavailable}
+        evals={evals}
+        judgeModel={settings.judgeModel}
+      />
     </div>
   );
 }

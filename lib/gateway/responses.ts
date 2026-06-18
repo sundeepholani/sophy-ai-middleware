@@ -19,6 +19,7 @@ import type { ModelMessage } from 'ai';
 import { waitUntil } from '@vercel/functions';
 import { randomUUID } from 'node:crypto';
 import { commonCall, type CallContext } from '@/lib/gateway/call';
+import { scheduleChampionCapture } from '@/lib/eval/capture';
 import { validateAgainstSchema } from '@/lib/gateway/openai-map';
 import {
   recordUsage,
@@ -112,6 +113,7 @@ export async function handleResponsesNonStreaming(
         gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
       });
       await logIf(text, 'ok');
+      scheduleChampionCapture(ctx, messages, 'responses', text, result.providerMetadata, start, eventId);
       return Response.json(
         buildResponseObject({
           id,
@@ -141,6 +143,7 @@ export async function handleResponsesNonStreaming(
       gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
     });
     await logIf(result.text, 'ok');
+    scheduleChampionCapture(ctx, messages, 'responses', result.text, result.providerMetadata, start, eventId);
     return Response.json(
       buildResponseObject({
         id,
@@ -217,6 +220,7 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
         gatewayRequestId: extractGatewayRequestId(event.providerMetadata),
       });
       await logIf(event.text, 'ok');
+      scheduleChampionCapture(ctx, messages, 'responses', event.text, event.providerMetadata, start, eventId);
     },
     onError: async ({ error }) => {
       await recordUsage({
