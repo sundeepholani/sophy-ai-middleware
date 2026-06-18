@@ -42,7 +42,7 @@ export default async function LogsPage() {
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                   {new Date(l.createdAt).toLocaleString()}
                 </TableCell>
-                <TableCell className="font-mono text-xs">{l.apiKeyId.slice(0, 8)}</TableCell>
+                <TableCell className="font-medium">{l.keyName ?? l.apiKeyId.slice(0, 8)}</TableCell>
                 <TableCell className="font-mono text-xs">{l.model ?? '—'}</TableCell>
                 <TableCell className="text-right tabular-nums">{l.inputTokens}</TableCell>
                 <TableCell className="text-right tabular-nums">{l.outputTokens}</TableCell>

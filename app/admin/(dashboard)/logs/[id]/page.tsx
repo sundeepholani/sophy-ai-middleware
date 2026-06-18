@@ -38,7 +38,7 @@ export default async function LogDetailPage({
         </Link>
         <h1 className="mt-1 text-2xl font-semibold">Request detail</h1>
         <p className="text-sm text-muted-foreground">
-          {new Date(event.createdAt).toLocaleString()} · key {event.apiKeyId.slice(0, 8)} ·{' '}
+          {new Date(event.createdAt).toLocaleString()} · key {event.keyName ?? event.apiKeyId.slice(0, 8)} ·{' '}
           <span className="font-mono">{event.model}</span>
         </p>
       </div>
