@@ -78,7 +78,7 @@ export function KeysManager({ keys, models }: { keys: KeyRow[]; models: Availabl
           New API key
         </Button>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-          <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
+          <DialogContent className="max-h-[85vh] w-[60vw] overflow-y-auto sm:max-w-[60vw]">
             <DialogHeader>
               <DialogTitle>New API key</DialogTitle>
               <DialogDescription>
