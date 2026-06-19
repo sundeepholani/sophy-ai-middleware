@@ -56,6 +56,43 @@ describe('summarize', () => {
     expect(s.recommendation).toBe('switch_for_cost');
   });
 
+  it('counts low-confidence verdicts (<60%) as ties, not wins', () => {
+    const lowConf = (winner: W, n: number): JudgedSample[] =>
+      Array.from({ length: n }, () => ({
+        winner,
+        confidence: 0.59,
+        reason: 'r',
+        championCostUsd: null,
+        challengerCostUsd: null,
+        championLatencyMs: null,
+        challengerLatencyMs: null,
+      }));
+    // 80 challenger + 20 champion verdicts, every one below the 60% threshold.
+    const s = summarize([...lowConf('challenger', 80), ...lowConf('champion', 20)], opts);
+    expect(s.winsChallenger).toBe(0);
+    expect(s.winsChampion).toBe(0);
+    expect(s.ties).toBe(100);
+    expect(s.challengerWinRate).toBeNull();
+    expect(s.recommendation).toBe('inconclusive');
+    expect(s.examples).toHaveLength(0);
+  });
+
+  it('keeps verdicts at exactly 60% confidence as decisive wins', () => {
+    const atThreshold: JudgedSample[] = Array.from({ length: 100 }, (_, i) => ({
+      winner: i < 80 ? 'challenger' : 'champion',
+      confidence: 0.6,
+      reason: 'r',
+      championCostUsd: null,
+      challengerCostUsd: null,
+      championLatencyMs: null,
+      challengerLatencyMs: null,
+    }));
+    const s = summarize(atThreshold, opts);
+    expect(s.winsChallenger).toBe(80);
+    expect(s.winsChampion).toBe(20);
+    expect(s.recommendation).toBe('switch');
+  });
+
   it('projects monthly cost delta and tie rate', () => {
     const s = summarize(
       samples([{ winner: 'tie', n: 100 }], { champ: 0.003, chall: 0.001 }),
