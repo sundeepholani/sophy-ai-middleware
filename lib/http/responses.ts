@@ -21,6 +21,13 @@ import type { NormalizedUsage } from '@/lib/usage/record';
 export interface ResponsesContentPart {
   type: string; // input_text | output_text | text | input_image | input_file | ...
   text?: string;
+  // input_image: the Responses API sends image_url as a string (a URL or a
+  // data: URL); we also tolerate the chat-style { url } object.
+  image_url?: string | { url?: string };
+  // input_file
+  file_url?: string;
+  file_data?: string;
+  filename?: string;
 }
 export interface ResponsesInputItem {
   type?: string; // optional "message"
@@ -52,10 +59,38 @@ function partText(content: string | ResponsesContentPart[] | undefined): string 
     .join('');
 }
 
+/** Map one Responses content part to an AI SDK content part (or null to drop). */
+function responsesPartToModelPart(part: ResponsesContentPart) {
+  switch (part.type) {
+    case 'input_text':
+    case 'output_text':
+    case 'text':
+      return typeof part.text === 'string' ? { type: 'text' as const, text: part.text } : null;
+    case 'input_image': {
+      const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
+      return url ? { type: 'image' as const, image: new URL(url) } : null;
+    }
+    case 'input_file': {
+      const url = part.file_url ?? part.file_data;
+      return url
+        ? {
+            type: 'file' as const,
+            data: new URL(url),
+            mediaType: 'application/octet-stream',
+            filename: part.filename,
+          }
+        : null;
+    }
+    default:
+      return null;
+  }
+}
+
 /**
  * Map the Responses `input` (string or array of items) to AI SDK messages.
  * Client system/developer items are dropped — the key owns the system prompt.
- * Only text content is carried (non-text input parts are ignored in v1).
+ * User turns carry multimodal content (text + input_image + input_file);
+ * assistant turns carry text only.
  */
 export function responsesInputToMessages(
   input: string | ResponsesInputItem[] | undefined,
@@ -67,11 +102,52 @@ export function responsesInputToMessages(
   const out: ModelMessage[] = [];
   for (const item of input) {
     if (item.role === 'system' || item.role === 'developer') continue;
-    const text = partText(item.content);
-    if (!text) continue;
-    out.push(item.role === 'assistant' ? { role: 'assistant', content: text } : { role: 'user', content: text });
+
+    if (typeof item.content === 'string') {
+      if (item.content.trim()) {
+        out.push({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content });
+      }
+      continue;
+    }
+    if (!Array.isArray(item.content)) continue;
+
+    if (item.role === 'assistant') {
+      // Prior model output — text only.
+      const text = partText(item.content);
+      if (text) out.push({ role: 'assistant', content: text });
+      continue;
+    }
+
+    // User turn — preserve text + images + files.
+    const parts = item.content
+      .map(responsesPartToModelPart)
+      .filter((p): p is NonNullable<typeof p> => p != null);
+    if (parts.length > 0) out.push({ role: 'user', content: parts as never });
   }
   return out;
+}
+
+/**
+ * URLs referenced by image/file parts in a Responses input — used for the same
+ * cross-key blob-ownership check the chat surface performs.
+ */
+export function responsesReferencedUrls(
+  input: string | ResponsesInputItem[] | undefined,
+): string[] {
+  if (!Array.isArray(input)) return [];
+  const urls: string[] = [];
+  for (const item of input) {
+    if (!Array.isArray(item.content)) continue;
+    for (const part of item.content) {
+      if (part.type === 'input_image') {
+        const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
+        if (url) urls.push(url);
+      } else if (part.type === 'input_file' && part.file_url) {
+        urls.push(part.file_url);
+      }
+    }
+  }
+  return urls;
 }
 
 // ---- Response object + usage -----------------------------------------------
