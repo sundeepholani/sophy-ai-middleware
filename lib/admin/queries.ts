@@ -11,6 +11,7 @@ import {
   evalSamples,
   type KeyParams,
   type EvalRunStatus,
+  type EvalWinner,
 } from '@/db/schema';
 import type { EvalSummary } from '@/lib/eval/aggregate';
 
@@ -252,6 +253,12 @@ export async function getRecentLogs(limit = 100) {
 
 // ---- Model eval --------------------------------------------------------------
 
+export interface EvalJudgment {
+  winner: EvalWinner;
+  confidence: number;
+  reason: string;
+}
+
 export interface KeyEval {
   runId: string;
   status: EvalRunStatus;
@@ -261,6 +268,8 @@ export interface KeyEval {
   targetN: number;
   capturedN: number;
   judgedN: number;
+  /** Per-sample verdicts so far (most recent first) — shown in the Eval panel. */
+  judgments: EvalJudgment[];
   summary: EvalSummary | null;
   createdAt: Date;
   completedAt: Date | null;
@@ -274,17 +283,32 @@ export async function getKeyEvals(): Promise<Record<string, KeyEval>> {
   for (const r of runs) if (!latestByKey.has(r.apiKeyId)) latestByKey.set(r.apiKeyId, r);
 
   const ids = [...latestByKey.values()].map((r) => r.id);
-  const counts = ids.length
+  const sampleRows = ids.length
     ? await db
-        .select({ runId: evalSamples.runId, n: sql<string>`count(*)` })
+        .select({
+          runId: evalSamples.runId,
+          winner: evalSamples.winner,
+          confidence: evalSamples.confidence,
+          judgeReason: evalSamples.judgeReason,
+        })
         .from(evalSamples)
         .where(and(inArray(evalSamples.runId, ids), eq(evalSamples.status, 'judged')))
-        .groupBy(evalSamples.runId)
+        .orderBy(desc(evalSamples.judgedAt))
     : [];
-  const judgedByRun = new Map(counts.map((c) => [c.runId, Number(c.n)]));
+  const judgmentsByRun = new Map<string, EvalJudgment[]>();
+  for (const s of sampleRows) {
+    const list = judgmentsByRun.get(s.runId) ?? [];
+    list.push({
+      winner: (s.winner ?? 'tie') as EvalWinner,
+      confidence: s.confidence != null ? Number(s.confidence) : 0,
+      reason: s.judgeReason ?? '',
+    });
+    judgmentsByRun.set(s.runId, list);
+  }
 
   const out: Record<string, KeyEval> = {};
   for (const [keyId, r] of latestByKey) {
+    const judgments = judgmentsByRun.get(r.id) ?? [];
     out[keyId] = {
       runId: r.id,
       status: r.status,
@@ -293,7 +317,8 @@ export async function getKeyEvals(): Promise<Record<string, KeyEval>> {
       judgeModel: r.judgeModel,
       targetN: r.targetN,
       capturedN: r.capturedN,
-      judgedN: judgedByRun.get(r.id) ?? 0,
+      judgedN: judgments.length,
+      judgments,
       summary: (r.summary as EvalSummary | null) ?? null,
       createdAt: r.createdAt,
       completedAt: r.completedAt,
