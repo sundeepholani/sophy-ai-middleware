@@ -88,13 +88,87 @@ export function EvalDialog({
   );
 }
 
-const WINNER: Record<string, { text: string; variant: 'default' | 'secondary' | 'outline' }> = {
-  challenger: { text: 'Challenger', variant: 'default' },
-  champion: { text: 'Champion', variant: 'secondary' },
-  tie: { text: 'Tie', variant: 'outline' },
-};
+/** Short, scannable model name for dense rows (drop the provider prefix). */
+function shortModel(m: string): string {
+  return m.split('/').pop() || m;
+}
 
-function JudgmentsList({ judgments }: { judgments: KeyEval['judgments'] }) {
+/**
+ * Per-side presentation, keyed off the judge's winner. We surface the *actual
+ * model names* (not "champion"/"challenger") so the operator reads the comparison
+ * in concrete terms. Colors are shared by the win bar and the row badges so a
+ * given model reads the same everywhere.
+ */
+function sideMeta(winner: string, championModel: string, challengerModel: string) {
+  switch (winner) {
+    case 'challenger':
+      return {
+        full: challengerModel,
+        label: shortModel(challengerModel),
+        bar: 'bg-primary',
+        badge: 'border-transparent bg-primary text-primary-foreground',
+      };
+    case 'champion':
+      return {
+        full: championModel,
+        label: shortModel(championModel),
+        bar: 'bg-amber-500',
+        badge: 'border-transparent bg-amber-500 text-white',
+      };
+    default:
+      return { full: 'Tie', label: 'Tie', bar: 'bg-muted-foreground/30', badge: '' };
+  }
+}
+
+/** Stacked win-share bar + legend, showing which model is winning what share. */
+function WinBar({ current }: { current: KeyEval }) {
+  const total = current.judgments.length;
+  if (total === 0) return null;
+  const sides = (['challenger', 'champion', 'tie'] as const).map((w) => {
+    const meta = sideMeta(w, current.championModel, current.challengerModel);
+    return { w, meta, n: current.judgments.filter((j) => j.winner === w).length };
+  });
+  const share = (n: number) => Math.round((n / total) * 100);
+  return (
+    <div className="space-y-2 rounded-md border p-3">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium">Who’s winning</span>
+        <span className="text-xs text-muted-foreground">{total} judged</span>
+      </div>
+      <div
+        className="flex h-2.5 w-full overflow-hidden rounded-full bg-muted"
+        role="img"
+        aria-label={sides.map((s) => `${s.meta.full}: ${share(s.n)}%`).join(', ')}
+      >
+        {sides.map((s) =>
+          s.n > 0 ? (
+            <div key={s.w} className={s.meta.bar} style={{ width: `${(s.n / total) * 100}%` }} />
+          ) : null,
+        )}
+      </div>
+      <ul className="space-y-1">
+        {sides.map((s) => (
+          <li key={s.w} className="flex items-center gap-2 text-xs">
+            <span className={`inline-block h-2.5 w-2.5 shrink-0 rounded-sm ${s.meta.bar}`} />
+            <code className="min-w-0 flex-1 truncate text-muted-foreground">{s.meta.full}</code>
+            <span className="shrink-0 tabular-nums font-medium">{share(s.n)}%</span>
+            <span className="w-6 shrink-0 text-right tabular-nums text-muted-foreground">{s.n}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function JudgmentsList({
+  judgments,
+  championModel,
+  challengerModel,
+}: {
+  judgments: KeyEval['judgments'];
+  championModel: string;
+  challengerModel: string;
+}) {
   if (!judgments?.length) {
     return (
       <p className="text-xs text-muted-foreground">
@@ -107,11 +181,11 @@ function JudgmentsList({ judgments }: { judgments: KeyEval['judgments'] }) {
       <p className="text-sm font-medium">Judgments ({judgments.length})</p>
       <div className="max-h-64 space-y-2 overflow-y-auto rounded-md border p-2">
         {judgments.map((j, i) => {
-          const w = WINNER[j.winner] ?? WINNER.tie;
+          const meta = sideMeta(j.winner, championModel, challengerModel);
           return (
             <div key={i} className="flex items-start gap-2 text-xs">
-              <Badge variant={w.variant} className="shrink-0">
-                {w.text}
+              <Badge variant="outline" className={`shrink-0 ${meta.badge}`}>
+                {meta.label}
               </Badge>
               <span className="shrink-0 tabular-nums text-muted-foreground">
                 {Math.round(j.confidence * 100)}%
@@ -152,8 +226,13 @@ function RunningView({ current, onDone }: { current: KeyEval; onDone: () => void
           run in the background. You’ll be emailed when it completes.
         </p>
       </div>
-      <JudgmentsList judgments={current.judgments} />
-      <div className="flex justify-end">
+      <WinBar current={current} />
+      <JudgmentsList
+        judgments={current.judgments}
+        championModel={current.championModel}
+        challengerModel={current.challengerModel}
+      />
+      <div className="flex justify-end gap-2">
         <Button
           variant="destructive"
           size="sm"
@@ -171,6 +250,9 @@ function RunningView({ current, onDone }: { current: KeyEval; onDone: () => void
           }
         >
           Cancel eval
+        </Button>
+        <Button variant="outline" size="sm" onClick={onDone}>
+          Close
         </Button>
       </div>
     </div>
@@ -212,7 +294,12 @@ function CompletedView({ current }: { current: KeyEval }) {
         </div>
         </dl>
       </div>
-      <JudgmentsList judgments={current.judgments} />
+      <WinBar current={current} />
+      <JudgmentsList
+        judgments={current.judgments}
+        championModel={current.championModel}
+        challengerModel={current.challengerModel}
+      />
     </div>
   );
 }
