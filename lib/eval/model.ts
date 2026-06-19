@@ -1,5 +1,5 @@
 /**
- * Model handle for eval (challenger + judge) calls made from the cron.
+ * Model handle for eval challenger/judge calls made from the cron.
  *
  * Live request handlers authenticate to the AI Gateway via the request-scoped
  * Vercel OIDC token, but the cron is not a user request — its build-time OIDC
