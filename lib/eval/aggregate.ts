@@ -5,6 +5,7 @@
  * recommendation.
  */
 import type { EvalWinner } from '@/db/schema';
+import { effectiveWinner } from '@/lib/eval/confidence';
 
 export interface JudgedSample {
   winner: EvalWinner;
@@ -58,9 +59,11 @@ export function summarize(
   opts: { monthlyRequests: number | null; championModel: string; challengerModel: string },
 ): EvalSummary {
   const total = samples.length;
-  const winsChampion = samples.filter((s) => s.winner === 'champion').length;
-  const winsChallenger = samples.filter((s) => s.winner === 'challenger').length;
-  const ties = samples.filter((s) => s.winner === 'tie').length;
+  // A verdict the judge wasn't confident about counts as a tie, not a win.
+  const eff = samples.map((s) => effectiveWinner(s.winner, s.confidence));
+  const winsChampion = eff.filter((w) => w === 'champion').length;
+  const winsChallenger = eff.filter((w) => w === 'challenger').length;
+  const ties = eff.filter((w) => w === 'tie').length;
   const decisive = winsChampion + winsChallenger;
 
   const challengerWinRate = decisive > 0 ? winsChallenger / decisive : null;
@@ -109,14 +112,16 @@ export function summarize(
       headline = `Inconclusive: no clear quality difference between the models, and ${ch} isn't cheaper. Consider a larger sample or deciding on other factors.`;
   }
 
-  // Up to 4 examples: the most confident decisive verdicts on each side.
+  // Up to 4 examples: the most confident decisive verdicts on each side
+  // (low-confidence verdicts are ties now, so they can't be examples).
   const decisiveSamples = samples
-    .filter((s) => s.winner !== 'tie')
-    .sort((a, b) => b.confidence - a.confidence);
+    .map((s) => ({ s, w: effectiveWinner(s.winner, s.confidence) }))
+    .filter((x) => x.w !== 'tie')
+    .sort((a, b) => b.s.confidence - a.s.confidence);
   const examples = [
-    ...decisiveSamples.filter((s) => s.winner === 'challenger').slice(0, 2),
-    ...decisiveSamples.filter((s) => s.winner === 'champion').slice(0, 2),
-  ].map((s) => ({ winner: s.winner, confidence: s.confidence, reason: s.reason }));
+    ...decisiveSamples.filter((x) => x.w === 'challenger').slice(0, 2),
+    ...decisiveSamples.filter((x) => x.w === 'champion').slice(0, 2),
+  ].map((x) => ({ winner: x.w, confidence: x.s.confidence, reason: x.s.reason }));
 
   return {
     total,

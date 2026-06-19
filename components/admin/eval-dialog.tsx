@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { startEvalRun, cancelEvalRun } from '@/app/admin/actions';
 import type { KeyEval } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
+import { effectiveWinner } from '@/lib/eval/confidence';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -126,7 +127,11 @@ function WinBar({ current }: { current: KeyEval }) {
   if (total === 0) return null;
   const sides = (['challenger', 'champion', 'tie'] as const).map((w) => {
     const meta = sideMeta(w, current.championModel, current.challengerModel);
-    return { w, meta, n: current.judgments.filter((j) => j.winner === w).length };
+    return {
+      w,
+      meta,
+      n: current.judgments.filter((j) => effectiveWinner(j.winner, j.confidence) === w).length,
+    };
   });
   const share = (n: number) => Math.round((n / total) * 100);
   return (
@@ -181,15 +186,16 @@ function JudgmentsList({
       <p className="text-sm font-medium">Judgments ({judgments.length})</p>
       <div className="max-h-64 space-y-2 overflow-y-auto rounded-md border p-2">
         {judgments.map((j, i) => {
-          const meta = sideMeta(j.winner, championModel, challengerModel);
+          const meta = sideMeta(
+            effectiveWinner(j.winner, j.confidence),
+            championModel,
+            challengerModel,
+          );
           return (
             <div key={i} className="flex items-start gap-2 text-xs">
               <Badge variant="outline" className={`shrink-0 ${meta.badge}`}>
                 {meta.label}
               </Badge>
-              <span className="shrink-0 tabular-nums text-muted-foreground">
-                {Math.round(j.confidence * 100)}%
-              </span>
               <span className="text-muted-foreground">{j.reason || '—'}</span>
             </div>
           );
