@@ -165,6 +165,28 @@ function WinBar({ current }: { current: KeyEval }) {
   );
 }
 
+/** Avg cost per task for each model in this eval (challenger first, to match the bar). */
+function CostPerTask({ current }: { current: KeyEval }) {
+  const rows = [
+    { name: current.challengerModel, cost: current.avgChallengerCostUsd, color: 'bg-primary' },
+    { name: current.championModel, cost: current.avgChampionCostUsd, color: 'bg-amber-500' },
+  ];
+  return (
+    <div className="space-y-2 rounded-md border p-3">
+      <span className="text-sm font-medium">Avg cost / task</span>
+      <ul className="space-y-1">
+        {rows.map((r) => (
+          <li key={r.name} className="flex items-center gap-2 text-xs">
+            <span className={`inline-block h-2.5 w-2.5 shrink-0 rounded-sm ${r.color}`} />
+            <code className="min-w-0 flex-1 truncate text-muted-foreground">{r.name}</code>
+            <span className="shrink-0 tabular-nums font-medium">{usd(r.cost)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function JudgmentsList({
   judgments,
   championModel,
@@ -233,6 +255,7 @@ function RunningView({ current, onDone }: { current: KeyEval; onDone: () => void
         </p>
       </div>
       <WinBar current={current} />
+      <CostPerTask current={current} />
       <JudgmentsList
         judgments={current.judgments}
         championModel={current.championModel}
@@ -286,9 +309,6 @@ function CompletedView({ current }: { current: KeyEval }) {
           Challenger win-rate: {pct(s.challengerWinRate)}
           {s.ci ? ` (CI ${pct(s.ci.low)}–${pct(s.ci.high)})` : ''}
         </div>
-        <div>
-          Avg cost: {usd(s.avgChampionCostUsd)} → {usd(s.avgChallengerCostUsd)}
-        </div>
         {delta != null && (
           <div>
             Projected: {delta < 0 ? '−' : '+'}${Math.abs(delta).toFixed(2)}/mo
@@ -301,6 +321,7 @@ function CompletedView({ current }: { current: KeyEval }) {
         </dl>
       </div>
       <WinBar current={current} />
+      <CostPerTask current={current} />
       <JudgmentsList
         judgments={current.judgments}
         championModel={current.championModel}

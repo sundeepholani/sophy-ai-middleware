@@ -44,9 +44,7 @@ export function formatEvalEmail(args: {
   const examples = s.examples
     .map(
       (e) =>
-        `<li><b>${e.winner === 'challenger' ? 'Challenger' : 'Champion'} won</b> (${pct(
-          e.confidence,
-        )}): ${escapeHtml(e.reason)}</li>`,
+        `<li><b>${e.winner === 'challenger' ? 'Challenger' : 'Champion'} won</b>: ${escapeHtml(e.reason)}</li>`,
     )
     .join('');
 
@@ -61,7 +59,7 @@ export function formatEvalEmail(args: {
       <tr><td style="padding:4px 8px;color:#666">Samples</td><td style="padding:4px 8px">${s.total}</td></tr>
       <tr><td style="padding:4px 8px;color:#666">Wins (challenger / champion / tie)</td><td style="padding:4px 8px">${s.winsChallenger} / ${s.winsChampion} / ${s.ties}</td></tr>
       <tr><td style="padding:4px 8px;color:#666">Challenger win-rate (decided)</td><td style="padding:4px 8px">${pct(s.challengerWinRate)} ${s.ci ? `(95% CI ${pct(s.ci.low)}–${pct(s.ci.high)})` : ''}</td></tr>
-      <tr><td style="padding:4px 8px;color:#666">Avg cost (champion → challenger)</td><td style="padding:4px 8px">${fmtUsd(s.avgChampionCostUsd)} → ${fmtUsd(s.avgChallengerCostUsd)}</td></tr>
+      <tr><td style="padding:4px 8px;color:#666">Avg cost per task (champion → challenger)</td><td style="padding:4px 8px">${fmtUsd(s.avgChampionCostUsd)} → ${fmtUsd(s.avgChallengerCostUsd)}</td></tr>
       <tr><td style="padding:4px 8px;color:#666">Projected monthly cost impact</td><td style="padding:4px 8px">${costDelta}</td></tr>
       <tr><td style="padding:4px 8px;color:#666">Avg latency (champion → challenger)</td><td style="padding:4px 8px">${fmtMs(s.avgChampionLatencyMs)} → ${fmtMs(s.avgChallengerLatencyMs)}</td></tr>
     </table>

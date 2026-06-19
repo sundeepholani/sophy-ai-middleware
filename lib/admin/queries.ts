@@ -268,6 +268,9 @@ export interface KeyEval {
   targetN: number;
   capturedN: number;
   judgedN: number;
+  /** Avg cost per task for each model in THIS run (live; null until samples have cost). */
+  avgChampionCostUsd: number | null;
+  avgChallengerCostUsd: number | null;
   /** Per-sample verdicts so far (most recent first) — shown in the Eval panel. */
   judgments: EvalJudgment[];
   summary: EvalSummary | null;
@@ -306,6 +309,27 @@ export async function getKeyEvals(): Promise<Record<string, KeyEval>> {
     judgmentsByRun.set(s.runId, list);
   }
 
+  // Avg cost per task per side, for each run (live — works while still running,
+  // and survives the post-finalize content purge since cost columns are retained).
+  const costRows = ids.length
+    ? await db
+        .select({
+          runId: evalSamples.runId,
+          avgChampion: sql<string | null>`avg(${evalSamples.championCostUsd})`,
+          avgChallenger: sql<string | null>`avg(${evalSamples.challengerCostUsd})`,
+        })
+        .from(evalSamples)
+        .where(inArray(evalSamples.runId, ids))
+        .groupBy(evalSamples.runId)
+    : [];
+  const costByRun = new Map<string, { champ: number | null; chall: number | null }>();
+  for (const c of costRows) {
+    costByRun.set(c.runId, {
+      champ: c.avgChampion != null ? Number(c.avgChampion) : null,
+      chall: c.avgChallenger != null ? Number(c.avgChallenger) : null,
+    });
+  }
+
   const out: Record<string, KeyEval> = {};
   for (const [keyId, r] of latestByKey) {
     const judgments = judgmentsByRun.get(r.id) ?? [];
@@ -318,6 +342,8 @@ export async function getKeyEvals(): Promise<Record<string, KeyEval>> {
       targetN: r.targetN,
       capturedN: r.capturedN,
       judgedN: judgments.length,
+      avgChampionCostUsd: costByRun.get(r.id)?.champ ?? null,
+      avgChallengerCostUsd: costByRun.get(r.id)?.chall ?? null,
       judgments,
       summary: (r.summary as EvalSummary | null) ?? null,
       createdAt: r.createdAt,
