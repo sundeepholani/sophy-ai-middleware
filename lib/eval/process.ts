@@ -259,9 +259,9 @@ async function finalizeRuns(): Promise<number> {
       console.error('[eval] summary email failed', err);
     }
 
-    // Privacy option A: purge captured content + derived judge reasons. The
-    // frozen summary.examples retain a few verdict rationales by design (that's
-    // the report's value); the raw per-sample content is removed.
+    // Privacy option A: purge the raw captured content (system prompt, inbound
+    // request, model outputs). The per-sample judge reason is RETAINED — it's the
+    // operator-facing verdict shown in the Eval panel, not raw captured content.
     await db
       .update(evalSamples)
       .set({
@@ -269,7 +269,6 @@ async function finalizeRuns(): Promise<number> {
         request: null,
         championOutput: null,
         challengerOutput: null,
-        judgeReason: null,
       })
       .where(eq(evalSamples.runId, run.id));
     finalized++;

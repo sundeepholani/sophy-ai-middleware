@@ -88,6 +88,43 @@ export function EvalDialog({
   );
 }
 
+const WINNER: Record<string, { text: string; variant: 'default' | 'secondary' | 'outline' }> = {
+  challenger: { text: 'Challenger', variant: 'default' },
+  champion: { text: 'Champion', variant: 'secondary' },
+  tie: { text: 'Tie', variant: 'outline' },
+};
+
+function JudgmentsList({ judgments }: { judgments: KeyEval['judgments'] }) {
+  if (!judgments?.length) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        No judgments yet — they appear here as the judge scores each sample.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-1.5">
+      <p className="text-sm font-medium">Judgments ({judgments.length})</p>
+      <div className="max-h-64 space-y-2 overflow-y-auto rounded-md border p-2">
+        {judgments.map((j, i) => {
+          const w = WINNER[j.winner] ?? WINNER.tie;
+          return (
+            <div key={i} className="flex items-start gap-2 text-xs">
+              <Badge variant={w.variant} className="shrink-0">
+                {w.text}
+              </Badge>
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {Math.round(j.confidence * 100)}%
+              </span>
+              <span className="text-muted-foreground">{j.reason || '—'}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function RunningView({ current, onDone }: { current: KeyEval; onDone: () => void }) {
   const [isPending, startTransition] = useTransition();
   return (
@@ -115,6 +152,7 @@ function RunningView({ current, onDone }: { current: KeyEval; onDone: () => void
           run in the background. You’ll be emailed when it completes.
         </p>
       </div>
+      <JudgmentsList judgments={current.judgments} />
       <div className="flex justify-end">
         <Button
           variant="destructive"
@@ -144,11 +182,12 @@ function CompletedView({ current }: { current: KeyEval }) {
   const rec = REC_LABEL[s.recommendation] ?? REC_LABEL.inconclusive;
   const delta = s.projectedMonthlyCostDeltaUsd;
   return (
-    <div className="space-y-2 rounded-md border p-3">
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-medium">Last result</span>
-        <Badge variant={rec.variant}>{rec.text}</Badge>
-      </div>
+    <div className="space-y-3">
+      <div className="space-y-2 rounded-md border p-3">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">Last result</span>
+          <Badge variant={rec.variant}>{rec.text}</Badge>
+        </div>
       <p className="text-sm">{s.headline}</p>
       <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground">
         <div>Samples: {s.total}</div>
@@ -171,7 +210,9 @@ function CompletedView({ current }: { current: KeyEval }) {
           Avg latency: {s.avgChampionLatencyMs != null ? `${Math.round(s.avgChampionLatencyMs)}ms` : '—'} →{' '}
           {s.avgChallengerLatencyMs != null ? `${Math.round(s.avgChallengerLatencyMs)}ms` : '—'}
         </div>
-      </dl>
+        </dl>
+      </div>
+      <JudgmentsList judgments={current.judgments} />
     </div>
   );
 }
