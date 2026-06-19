@@ -15,7 +15,12 @@ import {
   handleResponsesNonStreaming,
   handleResponsesStreaming,
 } from '@/lib/gateway/responses';
-import { responsesInputToMessages, type ResponsesRequest } from '@/lib/http/responses';
+import {
+  responsesInputToMessages,
+  responsesReferencedUrls,
+  type ResponsesRequest,
+} from '@/lib/http/responses';
+import { assertOwnedBlobs } from '@/lib/files/blob';
 import { openAiError } from '@/lib/http/openai';
 
 export const runtime = 'nodejs';
@@ -87,6 +92,17 @@ export async function POST(req: Request): Promise<Response> {
     return openAiError(400, 'invalid_request_error', 'No usable input content provided.', {
       param: 'input',
     });
+  }
+
+  // Cross-key blob protection: a key may not reference another key's upload.
+  const referencedUrls = responsesReferencedUrls(body.input);
+  if (referencedUrls.length > 0) {
+    const ok = await assertOwnedBlobs(key.id, referencedUrls);
+    if (!ok) {
+      return openAiError(403, 'invalid_request_error', 'Referenced file is not accessible to this key.', {
+        code: 'file_access_denied',
+      });
+    }
   }
 
   // 6) Assemble the call from the key's config (structured iff the key has a schema).

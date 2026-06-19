@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   responsesInputToMessages,
+  responsesReferencedUrls,
   mapResponsesUsage,
   buildResponseObject,
   responsesSseEvent,
@@ -11,7 +12,7 @@ describe('responsesInputToMessages', () => {
     expect(responsesInputToMessages('hi')).toEqual([{ role: 'user', content: 'hi' }]);
   });
 
-  it('drops system/developer items, keeps user/assistant, joins text parts', () => {
+  it('drops system/developer items, keeps user (as parts) + assistant (text)', () => {
     const out = responsesInputToMessages([
       { role: 'system', content: 'client system (ignored)' },
       { role: 'developer', content: 'dev (ignored)' },
@@ -19,15 +20,73 @@ describe('responsesInputToMessages', () => {
       { role: 'assistant', content: 'prior answer' },
     ]);
     expect(out).toEqual([
-      { role: 'user', content: 'part1 part2' },
+      { role: 'user', content: [{ type: 'text', text: 'part1 ' }, { type: 'text', text: 'part2' }] },
       { role: 'assistant', content: 'prior answer' },
     ]);
+  });
+
+  it('preserves an input_image as an AI SDK image part (the gap this closes)', () => {
+    const out = responsesInputToMessages([
+      {
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'what is this?' },
+          { type: 'input_image', image_url: 'https://example.com/cat.png' },
+        ],
+      },
+    ]);
+    expect(out).toHaveLength(1);
+    const content = out[0].content as Array<Record<string, unknown>>;
+    expect(content[0]).toEqual({ type: 'text', text: 'what is this?' });
+    expect(content[1].type).toBe('image');
+    expect(String(content[1].image)).toBe('https://example.com/cat.png');
+  });
+
+  it('keeps an image-only user turn (previously dropped entirely)', () => {
+    const out = responsesInputToMessages([
+      { role: 'user', content: [{ type: 'input_image', image_url: 'https://example.com/x.jpg' }] },
+    ]);
+    expect(out).toHaveLength(1);
+    expect((out[0].content as Array<Record<string, unknown>>)[0].type).toBe('image');
+  });
+
+  it('maps an input_file part', () => {
+    const out = responsesInputToMessages([
+      {
+        role: 'user',
+        content: [{ type: 'input_file', file_url: 'https://example.com/doc.pdf', filename: 'doc.pdf' }],
+      },
+    ]);
+    const content = out[0].content as Array<Record<string, unknown>>;
+    expect(content[0].type).toBe('file');
+    expect(content[0].filename).toBe('doc.pdf');
+    expect(String(content[0].data)).toBe('https://example.com/doc.pdf');
   });
 
   it('returns empty for null/empty input', () => {
     expect(responsesInputToMessages(undefined)).toEqual([]);
     expect(responsesInputToMessages('')).toEqual([]);
     expect(responsesInputToMessages([{ role: 'system', content: 'x' }])).toEqual([]);
+  });
+});
+
+describe('responsesReferencedUrls', () => {
+  it('extracts image and file URLs from input parts', () => {
+    const urls = responsesReferencedUrls([
+      {
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'x' },
+          { type: 'input_image', image_url: 'https://example.com/a.png' },
+          { type: 'input_file', file_url: 'https://example.com/b.pdf' },
+        ],
+      },
+    ]);
+    expect(urls).toEqual(['https://example.com/a.png', 'https://example.com/b.pdf']);
+  });
+
+  it('returns [] for string input', () => {
+    expect(responsesReferencedUrls('hi')).toEqual([]);
   });
 });
 
