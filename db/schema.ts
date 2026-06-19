@@ -172,7 +172,7 @@ export const locks = pgTable('locks', {
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
 });
 
-// ---- Model eval (champion vs challenger) -----------------------------------
+// ---- Model eval: champion vs challenger ------------------------------------
 // A run shadows the next N live requests on a key: the configured "champion"
 // model serves the client as usual, the same input is replayed to a
 // "challenger" model, and a blind "judge" model picks the better output. After
