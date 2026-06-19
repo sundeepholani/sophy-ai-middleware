@@ -83,6 +83,52 @@ print(resp.output_text)
 
 Streaming works unchanged (`stream=True`).
 
+### Images (vision)
+
+Send images the standard OpenAI way — Sophy passes them through to your key's
+model, which must be **vision-capable**. Both a public URL and an inline base64
+`data:` URL work, on either surface.
+
+```python
+# Chat Completions
+resp = client.chat.completions.create(
+    model="sophy",
+    messages=[{"role": "user", "content": [
+        {"type": "text", "text": "What's in this image?"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}},
+        # or inline: {"url": "data:image/png;base64,iVBORw0KGgo..."}
+    ]}],
+)
+```
+
+```python
+# Responses API — note the part types differ (input_text / input_image)
+resp = client.responses.create(
+    model="sophy",
+    input=[{"role": "user", "content": [
+        {"type": "input_text", "text": "What's in this image?"},
+        {"type": "input_image", "image_url": "https://example.com/photo.jpg"},
+    ]}],
+)
+```
+
+```ts
+// Node — Chat Completions
+const resp = await client.chat.completions.create({
+  model: "sophy",
+  messages: [{ role: "user", content: [
+    { type: "text", text: "What's in this image?" },
+    { type: "image_url", image_url: { url: "https://example.com/photo.jpg" } },
+  ]}],
+});
+```
+
+**Large images / files:** an inline base64 image must fit under the ~4.5 MB
+request cap. For bigger files, upload once with `POST /v1/files` (multipart,
+≤4 MB) and use the returned URL as the `image_url` / `input_image`. PDFs and
+other documents work the same way via a `file` part (Chat) or `input_file`
+(Responses), for models that accept them.
+
 ---
 
 ## 3. If you use the Anthropic (Claude) SDK
@@ -138,7 +184,7 @@ console.log(resp.choices[0].message.content);
 | `system="..."` (top-level) | **remove** — your key's system prompt is used |
 | `max_tokens=...` (required by Anthropic) | **remove** — owned by the key |
 | `model="claude-…"` | **remove / ignored** — the key is pointed at a Claude model |
-| `messages=[{role, content}]` | same shape (`user`/`assistant`, text content) |
+| `messages=[{role, content}]` | same shape (`user`/`assistant`); text or image content |
 | `msg.content[0].text` | `resp.choices[0].message.content` |
 | `client.messages.stream(...)` | `client.chat.completions.create(..., stream=True)`, read `chunk.choices[0].delta.content` |
 | tool use | not supported (returns HTTP 400) |
@@ -156,6 +202,7 @@ ignored** if you send them (no error):
 Other behavior:
 - **Tool / function calling is not supported** → returns HTTP `400`. Tell the operator if you need it.
 - **Structured JSON output** is configured on your key (not per request). When enabled, the reply text is a JSON string — parse `resp.choices[0].message.content` (or `resp.output_text`).
+- **Images / vision** are supported on both surfaces (your key's model must be vision-capable) — see [Images (vision)](#images-vision) above.
 - **Streaming** is unchanged (`stream=True`).
 - **Files:** don't inline large files in the request. Upload to `POST https://sophy.in/v1/files` (multipart, ≤ 4 MB) and pass the returned URL as a content part.
 - **Errors** use the standard OpenAI error shape and HTTP codes: `401` invalid key, `402` quota exceeded, `429` rate limited, `400` bad request.
