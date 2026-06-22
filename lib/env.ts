@@ -57,10 +57,20 @@ export const env = {
   keyHashPepper: () => requireEnv('KEY_HASH_PEPPER'),
   /** iron-session cookie password (>= 32 chars). */
   sessionPassword: () => requireEnv('SESSION_PASSWORD'),
-  /** bcrypt hash of the single admin password. */
-  adminPasswordHash: () => requireEnv('ADMIN_PASSWORD_HASH'),
-  /** Admin username (defaults to "admin"). */
-  adminUsername: () => optionalEnv('ADMIN_USERNAME') ?? 'admin',
+  /** Email seeded as the first admin on bootstrap (passwordless login thereafter). */
+  bootstrapAdminEmail: () => optionalEnv('BOOTSTRAP_ADMIN_EMAIL'),
+  /**
+   * Canonical origin (e.g. https://sophy.in) used to build magic-link URLs.
+   * MUST be server-controlled — never derived from request Host headers, which
+   * are attacker-spoofable and would let a poisoned link leak a valid token.
+   * Falls back to Vercel's production URL; undefined locally (dev uses the request origin).
+   */
+  appOrigin: () => {
+    const explicit = optionalEnv('APP_ORIGIN');
+    if (explicit) return explicit.replace(/\/+$/, '');
+    const vercel = optionalEnv('VERCEL_PROJECT_PRODUCTION_URL');
+    return vercel ? `https://${vercel}` : undefined;
+  },
   /** Shared secret guarding cron endpoints. */
   cronSecret: () => requireEnv('CRON_SECRET'),
 

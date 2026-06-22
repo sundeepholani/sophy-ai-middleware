@@ -7,9 +7,11 @@
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { getIronSession } from 'iron-session';
-import { sessionOptions, type AdminSession } from '@/lib/auth/session-config';
+import { sessionOptions, isAuthenticated, type AdminSession } from '@/lib/auth/session-config';
 
-const PUBLIC_ADMIN_PATHS = ['/admin/login', '/api/admin/login'];
+// Public (unauthenticated) console paths: the email-link request, and the verify
+// landing/confirm (which establishes the session itself).
+const PUBLIC_ADMIN_PATHS = ['/admin/login', '/api/admin/login', '/admin/auth/verify'];
 
 export default async function proxy(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
@@ -20,7 +22,7 @@ export default async function proxy(req: NextRequest): Promise<NextResponse> {
   const res = NextResponse.next();
   const session = await getIronSession<AdminSession>(req, res, sessionOptions());
 
-  if (session.isAdmin || isPublic) return res;
+  if (isPublic || isAuthenticated(session)) return res;
 
   if (pathname.startsWith('/api/admin')) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });

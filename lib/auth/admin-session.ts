@@ -1,19 +1,20 @@
 /**
- * Admin authentication — a single operator account (v1).
+ * Operator session helpers (route handlers / server components).
  *
- * This is intentionally separate from client API-key auth: the admin session is
- * an httpOnly, SameSite=Strict iron-session cookie scoped to /admin + /api/admin
- * (see middleware.ts). Client `mw_*` keys never grant admin access, and the
- * admin cookie never grants proxy access.
- *
- * The admin password is stored only as a bcrypt hash (ADMIN_PASSWORD_HASH).
- * Upgrade path to Clerk/SSO + per-user audit is documented in the plan.
+ * The session is an httpOnly, SameSite=Strict iron-session cookie scoped to
+ * /admin + /api/admin (see proxy.ts). Client `mw_*` keys never grant console
+ * access, and the console cookie never grants proxy access. Login is passwordless
+ * (magic link) — see lib/auth/magic-link.ts; there is no stored password.
  */
 import { cookies } from 'next/headers';
 import { getIronSession, type IronSession } from 'iron-session';
-import bcrypt from 'bcryptjs';
-import { env } from '@/lib/env';
-import { sessionOptions, type AdminSession } from '@/lib/auth/session-config';
+import {
+  sessionOptions,
+  isAuthenticated as isAuthenticatedSession,
+  isAdminSession,
+  type AdminSession,
+  type SessionRole,
+} from '@/lib/auth/session-config';
 
 export type { AdminSession };
 
@@ -22,24 +23,27 @@ export async function getSession(): Promise<IronSession<AdminSession>> {
   return getIronSession<AdminSession>(await cookies(), sessionOptions());
 }
 
-export async function isAdminAuthed(): Promise<boolean> {
-  const session = await getSession();
-  return session.isAdmin === true;
+/** True for any signed-in operator (admin or editor). */
+export async function isAuthenticated(): Promise<boolean> {
+  return isAuthenticatedSession(await getSession());
 }
 
-/** Verify operator credentials against the configured username + bcrypt hash. */
-export async function verifyAdminCredentials(
-  username: string,
-  password: string,
-): Promise<boolean> {
-  if (username !== env.adminUsername()) {
-    // Still run a comparison to avoid a username-timing oracle.
-    await bcrypt.compare(password, env.adminPasswordHash()).catch(() => false);
-    return false;
+/** True only for an admin (new role flag, or a legacy single-admin cookie). */
+export async function isAdminAuthed(): Promise<boolean> {
+  return isAdminSession(await getSession());
+}
+
+export interface CurrentUser {
+  userId: string;
+  role: SessionRole;
+  email: string;
+}
+
+/** The signed-in operator, or null (legacy admin cookies carry no userId). */
+export async function currentUser(): Promise<CurrentUser | null> {
+  const s = await getSession();
+  if (s.userId && s.role && s.email) {
+    return { userId: s.userId, role: s.role, email: s.email };
   }
-  try {
-    return await bcrypt.compare(password, env.adminPasswordHash());
-  } catch {
-    return false;
-  }
+  return null;
 }

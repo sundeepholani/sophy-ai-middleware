@@ -39,6 +39,46 @@ export interface KeyParams {
   topP?: number;
 }
 
+// ---- Users (operators: admins + editors) -----------------------------------
+
+export type UserRole = 'admin' | 'editor';
+export type UserStatus = 'active' | 'inactive';
+
+export const users = pgTable(
+  'users',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** Unique login identity; always stored lowercased + trimmed. */
+    email: text('email').notNull(),
+    role: text('role').$type<UserRole>().notNull().default('editor'),
+    status: text('status').$type<UserStatus>().notNull().default('active'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+  },
+  (t) => [uniqueIndex('users_email_idx').on(t.email)],
+);
+
+// ---- Magic-link login tokens (passwordless auth) ---------------------------
+
+export const loginTokens = pgTable(
+  'login_tokens',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').notNull(),
+    /** Denormalized for audit / generic logging. */
+    email: text('email').notNull(),
+    /** sha256(rawToken) hex — the raw token lives only in the emailed link. */
+    tokenHash: text('token_hash').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('login_tokens_hash_idx').on(t.tokenHash),
+    index('login_tokens_user_idx').on(t.userId),
+  ],
+);
+
 // ---- API keys (the whole config) -------------------------------------------
 
 export const apiKeys = pgTable(
@@ -70,12 +110,17 @@ export const apiKeys = pgTable(
 
     // --- lifecycle ---
     status: text('status').$type<KeyStatus>().notNull().default('active'),
+    /** Owning operator (admin or editor); null = unassigned. Never gates proxy traffic. */
+    ownerUserId: uuid('owner_user_id'),
     expiresAt: timestamp('expires_at', { withTimezone: true }),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index('api_keys_status_idx').on(t.status)],
+  (t) => [
+    index('api_keys_status_idx').on(t.status),
+    index('api_keys_owner_idx').on(t.ownerUserId),
+  ],
 );
 
 // ---- Usage (append-only facts) ---------------------------------------------
