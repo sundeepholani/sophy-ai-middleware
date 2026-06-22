@@ -1,27 +1,14 @@
 /**
- * Bootstrap the first admin from BOOTSTRAP_ADMIN_EMAIL.
- *
- * Two entry points, both idempotent and safe to call repeatedly:
- *  - seedBootstrapAdmin(): explicit seed (e.g. `pnpm db:seed` after a migrate).
- *  - maybeBootstrapAdminForLogin(): lazy self-heal on the login path so the very
- *    first sign-in can never be locked out, even if the explicit seed was skipped.
- * Neither ever overwrites or demotes an existing user.
+ * Bootstrap the first admin from BOOTSTRAP_ADMIN_EMAIL via a lazy self-heal on
+ * the login path, so the very first sign-in can never be locked out. Idempotent
+ * and safe to call repeatedly; never overwrites or demotes an existing user, and
+ * only ever creates an admin when none exist yet.
  */
 import { eq } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import { users } from '@/db/schema';
 import { env } from '@/lib/env';
 import { normalizeEmail, findActiveUserByEmail, type AuthUser } from '@/lib/auth/magic-link';
-
-/** Insert the bootstrap admin if it doesn't already exist. No-op when the env is unset. */
-export async function seedBootstrapAdmin(): Promise<void> {
-  const raw = env.bootstrapAdminEmail();
-  if (!raw) return;
-  await getDb()
-    .insert(users)
-    .values({ email: normalizeEmail(raw), role: 'admin', status: 'active' })
-    .onConflictDoNothing({ target: users.email });
-}
 
 /**
  * If a login is attempted for BOOTSTRAP_ADMIN_EMAIL and there are NO admins yet,

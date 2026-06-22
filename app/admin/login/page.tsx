@@ -11,7 +11,6 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [sent, setSent] = useState(false);
-  const [devLink, setDevLink] = useState<string | null>(null);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -24,10 +23,9 @@ export default function LoginPage() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ email, next }),
       });
-      const data = (await res.json().catch(() => ({}))) as { error?: string; devLink?: string };
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
       if (res.ok) {
         setSent(true);
-        setDevLink(data.devLink ?? null);
       } else if (data.error === 'too_many_attempts') {
         setError('Too many attempts. Try again in a few minutes.');
       } else if (data.error === 'invalid_email') {
@@ -61,22 +59,7 @@ export default function LoginPage() {
                 If <span className="font-medium">{email}</span> has an account, a sign-in link is on
                 its way. The link works once and expires in 15 minutes.
               </p>
-              {devLink && (
-                <div className="rounded-md border bg-muted/50 p-2 text-xs">
-                  <p className="mb-1 font-medium text-muted-foreground">Dev link (email not configured):</p>
-                  <a href={devLink} className="break-all text-primary underline">
-                    {devLink}
-                  </a>
-                </div>
-              )}
-              <Button
-                variant="outline"
-                className="w-full"
-                onClick={() => {
-                  setSent(false);
-                  setDevLink(null);
-                }}
-              >
+              <Button variant="outline" className="w-full" onClick={() => setSent(false)}>
                 Use a different email
               </Button>
             </div>

@@ -33,7 +33,7 @@ export default async function VerifyPage({
               <p className="text-sm text-muted-foreground">
                 This sign-in link is invalid or has expired. Request a new one.
               </p>
-              <Button className="w-full" render={<Link href="/admin/login" />}>
+              <Button className="w-full" nativeButton={false} render={<Link href="/admin/login" />}>
                 Back to sign in
               </Button>
             </div>

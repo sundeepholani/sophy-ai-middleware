@@ -2,10 +2,12 @@
  * Magic-link request endpoint (public).
  *
  * Takes an email, and IF it maps to an active user, emails a one-time sign-in
- * link. Always returns a generic success so it can't be used to enumerate users.
- * In non-prod with email unconfigured, the link is logged/returned so local dev
- * works without ZeptoMail.
+ * link. ALL account-specific work (lookup, token mint, send) runs AFTER the
+ * response via after(), so the response is constant-time regardless of whether
+ * the email exists — no enumeration via timing or error status. The link origin
+ * is server-controlled (never request headers) to prevent link poisoning.
  */
+import { after } from 'next/server';
 import { checkLoginRateLimit } from '@/lib/counters';
 import {
   normalizeEmail,
@@ -23,16 +25,17 @@ export const dynamic = 'force-dynamic';
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const GENERIC = { ok: true as const };
 
+/** Trusted client IP. Vercel sets x-real-ip; otherwise take the LAST (appended)
+ *  x-forwarded-for hop — never the spoofable leftmost client-supplied value. */
 function clientIp(req: Request): string {
+  const real = req.headers.get('x-real-ip');
+  if (real) return real.trim();
   const fwd = req.headers.get('x-forwarded-for');
-  return (fwd ? fwd.split(',')[0] : '').trim() || 'unknown';
-}
-
-function requestOrigin(req: Request): string | null {
-  const host = req.headers.get('x-forwarded-host') ?? req.headers.get('host');
-  if (!host) return null;
-  const proto = req.headers.get('x-forwarded-proto') ?? (env.isProd() ? 'https' : 'http');
-  return `${proto}://${host}`;
+  if (fwd) {
+    const parts = fwd.split(',').map((s) => s.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
+  return 'unknown';
 }
 
 function signInEmailHtml(url: string): string {
@@ -58,26 +61,37 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ error: 'invalid_email' }, { status: 400 });
   }
 
-  // Coarse abuse throttle on IP; per-email throttle is silent (no enumeration).
+  // Coarse abuse throttle on the trusted IP; per-email throttle is silent.
   if (!(await checkLoginRateLimit(`req-ip:${clientIp(req)}`))) {
     return Response.json({ error: 'too_many_attempts' }, { status: 429 });
   }
   const emailAllowed = await checkLoginRateLimit(`req:${email}`);
 
-  const origin = requestOrigin(req);
-  if (emailAllowed && origin) {
-    const user =
-      (await findActiveUserByEmail(email)) ?? (await maybeBootstrapAdminForLogin(email));
-    if (user) {
+  // Server-controlled origin only (header-derived host is never trusted in prod).
+  const origin =
+    env.appOrigin() ??
+    (env.isProd()
+      ? null
+      : `${req.headers.get('x-forwarded-proto') ?? 'http'}://${req.headers.get('host') ?? 'localhost:3000'}`);
+  const next = typeof body.next === 'string' ? body.next : undefined;
+
+  // Everything account-specific happens AFTER the response → constant-time, no
+  // enumeration via latency or a send-failure 500.
+  after(async () => {
+    try {
+      if (!emailAllowed || !origin) return;
+      const user = (await findActiveUserByEmail(email)) ?? (await maybeBootstrapAdminForLogin(email));
+      if (!user) return;
       const raw = await createLoginToken(user.id, user.email);
-      const url = buildVerifyUrl(origin, raw, body.next);
+      const url = buildVerifyUrl(origin, raw, next);
       const sent = await sendEmail(user.email, 'Sign in to Sophy', signInEmailHtml(url));
       if (!sent && !env.isProd()) {
         console.info(`[auth] DEV magic link for ${user.email}: ${url}`);
-        return Response.json({ ...GENERIC, devLink: url });
       }
+    } catch (err) {
+      console.error('[auth] magic-link send failed', err);
     }
-  }
+  });
 
   return Response.json(GENERIC);
 }
