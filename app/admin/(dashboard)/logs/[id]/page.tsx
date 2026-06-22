@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getLogDetail } from '@/lib/admin/queries';
 import { requireViewer } from '@/lib/auth/viewer';
+import { LocalTime } from '@/components/admin/local-time';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
@@ -40,7 +41,8 @@ export default async function LogDetailPage({
         </Link>
         <h1 className="mt-1 text-2xl font-semibold">Request detail</h1>
         <p className="text-sm text-muted-foreground">
-          {new Date(event.createdAt).toLocaleString()} · key {event.keyName ?? event.apiKeyId.slice(0, 8)} ·{' '}
+          <LocalTime value={event.createdAt.toISOString()} /> · key{' '}
+          {event.keyName ?? event.apiKeyId.slice(0, 8)} ·{' '}
           <span className="font-mono">{event.model}</span>
         </p>
       </div>
