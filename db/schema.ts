@@ -102,7 +102,8 @@ export const apiKeys = pgTable(
     outputSchema: jsonb('output_schema').$type<Record<string, unknown> | null>(),
 
     // --- quota / limits ---
-    monthlyTokenCap: bigint('monthly_token_cap', { mode: 'number' }),
+    /** Monthly spend budget in USD (null = unlimited). Admin-controlled; defaults to $100. */
+    monthlyCostCapUsd: numeric('monthly_cost_cap_usd', { precision: 12, scale: 4, mode: 'number' }).default(100),
     rpmLimit: integer('rpm_limit'),
 
     /** Whether to log inbound/outbound message content for this key's requests. */

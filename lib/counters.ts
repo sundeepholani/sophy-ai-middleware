@@ -3,7 +3,7 @@
  * the whole stack runs on Supabase + Vercel).
  *
  * - Rate limiting: atomic fixed-window counter (`rate_counters`), one statement.
- * - Quota: derived from the sum of tokens in `usage_events` for the current UTC
+ * - Quota: derived from the sum of cost_usd in `usage_events` for the current UTC
  *   month — the usage_event insert IS the charge, so there's no separate counter.
  * - Revocation: NOT here — key `status` is read fresh from Postgres on every
  *   request in verifyKey(), so revocation is already instant and authoritative.
@@ -60,11 +60,11 @@ function startOfUtcMonth(d: Date = new Date()): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
 }
 
-/** Tokens (input+output) consumed by this key so far this month. */
-export async function quotaUsed(keyId: string): Promise<number> {
+/** USD spend by this key so far this UTC month (summed from recorded gateway costs). */
+export async function costUsedThisMonth(keyId: string): Promise<number> {
   const since = startOfUtcMonth();
   const res = (await getDb().execute(sql`
-    SELECT coalesce(sum(input_tokens + output_tokens), 0)::bigint AS used
+    SELECT coalesce(sum(cost_usd), 0)::numeric AS used
     FROM usage_events
     WHERE api_key_id = ${keyId} AND created_at >= ${since}
   `)) as unknown as Rows;

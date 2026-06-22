@@ -29,7 +29,7 @@ export interface KeyConfigInput {
   systemPrompt?: string | null;
   params?: KeyParams;
   outputSchema?: Record<string, unknown> | null;
-  monthlyTokenCap?: number | null;
+  monthlyCostCapUsd?: number | null;
   rpmLimit?: number | null;
   logContent?: boolean;
   /** Owning operator (admin or editor); null = unassigned. Set by the caller. */
@@ -43,7 +43,7 @@ export interface VerifiedKey {
   systemPrompt: string | null;
   params: KeyParams;
   outputSchema: Record<string, unknown> | null;
-  monthlyTokenCap: number | null;
+  monthlyCostCapUsd: number | null;
   rpmLimit: number | null;
   logContent: boolean;
   status: KeyStatus;
@@ -90,7 +90,7 @@ export async function issueKey(
       systemPrompt: input.systemPrompt ?? null,
       params: input.params ?? {},
       outputSchema: input.outputSchema ?? null,
-      monthlyTokenCap: input.monthlyTokenCap ?? null,
+      monthlyCostCapUsd: input.monthlyCostCapUsd ?? null,
       rpmLimit: input.rpmLimit ?? null,
       logContent: input.logContent ?? true,
       ownerUserId: input.ownerUserId ?? null,
@@ -135,7 +135,7 @@ export async function verifyKey(presented: string): Promise<VerifiedKey | null> 
     systemPrompt: row.systemPrompt,
     params: row.params,
     outputSchema: row.outputSchema ?? null,
-    monthlyTokenCap: row.monthlyTokenCap,
+    monthlyCostCapUsd: row.monthlyCostCapUsd,
     rpmLimit: row.rpmLimit,
     logContent: row.logContent,
     status: row.status,
