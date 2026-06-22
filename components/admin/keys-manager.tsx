@@ -2,7 +2,7 @@
 
 import { useId, useState, useTransition } from 'react';
 import { toast } from 'sonner';
-import { Plus, Pencil, FlaskConical } from 'lucide-react';
+import { Plus, Pencil, FlaskConical, Ban } from 'lucide-react';
 import { createKey, updateKey, revokeKey, type KeyFormInput } from '@/app/admin/actions';
 import type { KeyRow, KeyEval } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
@@ -165,17 +165,28 @@ export function KeysManager({
                     {k.status}
                   </Badge>
                 </TableCell>
-                <TableCell className="space-x-1 text-right">
-                  <Button size="sm" variant="ghost" onClick={() => setEditing(k)}>
+                <TableCell className="space-x-0.5 text-right">
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    aria-label="Edit key"
+                    title="Edit"
+                    onClick={() => setEditing(k)}
+                  >
                     <Pencil className="h-3.5 w-3.5" />
-                    Edit
                   </Button>
                   {k.status === 'active' && (
-                    <Button size="sm" variant="ghost" onClick={() => setEvalKey(k)}>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label="Run eval"
+                      title="Eval"
+                      className="relative"
+                      onClick={() => setEvalKey(k)}
+                    >
                       <FlaskConical className="h-3.5 w-3.5" />
-                      Eval
                       {evals[k.id]?.status === 'running' && (
-                        <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-primary" />
+                        <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-primary" />
                       )}
                     </Button>
                   )}
@@ -259,12 +270,14 @@ function RevokeButton({ id, name }: { id: string; name: string }) {
   return (
     <>
       <Button
-        size="sm"
+        size="icon-sm"
         variant="ghost"
         className="text-destructive hover:text-destructive"
+        aria-label="Revoke key"
+        title="Revoke"
         onClick={() => setOpen(true)}
       >
-        Revoke
+        <Ban className="h-3.5 w-3.5" />
       </Button>
       <AlertDialog open={open} onOpenChange={setOpen}>
         <AlertDialogContent>
