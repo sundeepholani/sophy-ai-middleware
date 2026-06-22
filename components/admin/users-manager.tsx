@@ -104,18 +104,55 @@ function InviteForm({ onDone }: { onDone: () => void }) {
   const [isPending, startTransition] = useTransition();
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<UserRole>('editor');
+  const [result, setResult] = useState<{ email: string; inviteUrl: string | null; emailed: boolean } | null>(null);
 
   function submit() {
     if (!email.trim()) return toast.error('Email is required');
     startTransition(async () => {
       try {
-        await createUser({ email: email.trim(), role });
-        toast.success('Invite sent');
-        onDone();
+        const r = await createUser({ email: email.trim(), role });
+        setResult({ email: email.trim(), ...r });
       } catch (e) {
         toast.error(errMsg(e));
       }
     });
+  }
+
+  async function copyLink() {
+    if (!result?.inviteUrl) return;
+    try {
+      await navigator.clipboard.writeText(result.inviteUrl);
+      toast.success('Link copied');
+    } catch {
+      toast.error('Copy failed — select the link and copy it manually');
+    }
+  }
+
+  if (result) {
+    return (
+      <div className="space-y-3">
+        <p className="text-sm">
+          <span className="font-medium">{result.email}</span> was added.{' '}
+          {result.emailed
+            ? 'A sign-in link was emailed to them.'
+            : 'Email delivery isn’t confirmed — share the sign-in link below directly.'}
+        </p>
+        {result.inviteUrl && (
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">One-time sign-in link (expires in 15 minutes):</p>
+            <code className="block max-h-28 select-all overflow-auto rounded-md bg-muted p-2 text-xs break-all">
+              {result.inviteUrl}
+            </code>
+          </div>
+        )}
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={onDone}>
+            Done
+          </Button>
+          {result.inviteUrl && <Button onClick={copyLink}>Copy link</Button>}
+        </div>
+      </div>
+    );
   }
 
   return (
