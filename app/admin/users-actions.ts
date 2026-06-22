@@ -8,7 +8,7 @@
  */
 import { revalidatePath } from 'next/cache';
 import { headers } from 'next/headers';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import { users, auditLog, type UserRole } from '@/db/schema';
 import { assertAdmin } from '@/lib/auth/viewer';
@@ -54,21 +54,27 @@ async function sendInvite(email: string, userId: string): Promise<void> {
   }
 }
 
-/** Block removing/demoting the last active admin (prevents a total lockout). */
-async function ensureNotLastActiveAdmin(targetId: string): Promise<void> {
-  const db = getDb();
-  const [target] = await db
-    .select({ role: users.role, status: users.status })
-    .from(users)
-    .where(eq(users.id, targetId))
-    .limit(1);
-  if (!target || target.role !== 'admin' || target.status !== 'active') return;
-  const others = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(and(eq(users.role, 'admin'), eq(users.status, 'active'), ne(users.id, targetId)))
-    .limit(1);
-  if (others.length === 0) throw new Error('Cannot remove the last active admin');
+// Constant key serializing all admin-floor mutations. Without it, two concurrent
+// demotions/deactivations could each observe the other as still-active and both
+// commit, orphaning the system with zero admins (TOCTOU). The advisory xact lock
+// makes the check-and-mutate atomic; the second txn blocks, then sees the truth.
+const ADMIN_FLOOR_LOCK = 487213;
+
+/**
+ * Set a single column on a user inside a serialized transaction, rolling back if
+ * the change would leave zero active admins. The advisory xact lock serializes all
+ * admin-floor mutations so a TOCTOU race can't orphan the system with no admins.
+ */
+async function setUserFieldWithAdminFloor(id: string, patch: Partial<typeof users.$inferInsert>): Promise<void> {
+  await getDb().transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${ADMIN_FLOOR_LOCK})`);
+    await tx.update(users).set(patch).where(eq(users.id, id));
+    const [row] = await tx
+      .select({ n: sql<string>`count(*)` })
+      .from(users)
+      .where(and(eq(users.role, 'admin'), eq(users.status, 'active')));
+    if (Number(row?.n ?? 0) === 0) throw new Error('Cannot remove the last active admin');
+  });
 }
 
 export async function createUser(input: { email: string; role: UserRole }): Promise<void> {
@@ -94,11 +100,11 @@ export async function setUserStatus(input: { id: string; active: boolean }): Pro
   if (input.id === viewer.userId && !input.active) {
     throw new Error("You can't deactivate your own account");
   }
-  if (!input.active) await ensureNotLastActiveAdmin(input.id);
-  await getDb()
-    .update(users)
-    .set({ status: input.active ? 'active' : 'inactive' })
-    .where(eq(users.id, input.id));
+  if (input.active) {
+    await getDb().update(users).set({ status: 'active' }).where(eq(users.id, input.id));
+  } else {
+    await setUserFieldWithAdminFloor(input.id, { status: 'inactive' });
+  }
   await audit(viewer.email, 'user.status', input.id, { active: input.active });
   revalidatePath('/admin/users');
 }
@@ -106,8 +112,11 @@ export async function setUserStatus(input: { id: string; active: boolean }): Pro
 export async function setUserRole(input: { id: string; role: UserRole }): Promise<void> {
   const viewer = await assertAdmin();
   const role: UserRole = input.role === 'admin' ? 'admin' : 'editor';
-  if (role === 'editor') await ensureNotLastActiveAdmin(input.id); // demotion can't orphan admin
-  await getDb().update(users).set({ role }).where(eq(users.id, input.id));
+  if (role === 'admin') {
+    await getDb().update(users).set({ role }).where(eq(users.id, input.id));
+  } else {
+    await setUserFieldWithAdminFloor(input.id, { role }); // demotion can't orphan admin
+  }
   await audit(viewer.email, 'user.role', input.id, { role });
   revalidatePath('/admin/users');
 }

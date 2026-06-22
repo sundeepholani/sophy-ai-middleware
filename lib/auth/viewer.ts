@@ -9,18 +9,32 @@
 import { eq, inArray, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { getDb } from '@/db/client';
-import { apiKeys, evalRuns } from '@/db/schema';
+import { apiKeys, evalRuns, users } from '@/db/schema';
 import { currentUser, type CurrentUser } from '@/lib/auth/admin-session';
 
 export type Viewer = CurrentUser; // { userId, role, email }
 
+/**
+ * The signed-in operator, or null. Identity comes from the signed cookie, but the
+ * role and active status are authoritative in Postgres and re-checked on EVERY
+ * request — so deactivation and role changes take effect immediately (like key
+ * revocation), not only when the 8h cookie expires. (Legacy single-admin cookies
+ * have no userId → null → must re-login via magic link.)
+ */
 export async function getViewer(): Promise<Viewer | null> {
-  return currentUser();
+  const s = await currentUser();
+  if (!s) return null;
+  const [u] = await getDb()
+    .select({ role: users.role, status: users.status })
+    .from(users)
+    .where(eq(users.id, s.userId))
+    .limit(1);
+  if (!u || u.status !== 'active') return null;
+  return { userId: s.userId, role: u.role, email: s.email };
 }
 
-/** The signed-in operator, or throw. (Legacy single-admin cookies have no userId → treated as unauthenticated; they must re-login via magic link.) */
 export async function requireViewer(): Promise<Viewer> {
-  const v = await currentUser();
+  const v = await getViewer();
   if (!v) throw new Error('unauthorized');
   return v;
 }

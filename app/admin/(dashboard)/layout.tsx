@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import { currentUser } from '@/lib/auth/admin-session';
+import { getViewer } from '@/lib/auth/viewer';
 import { Nav } from '@/components/admin/nav';
 import { LogoutButton } from '@/components/admin/logout-button';
 import { Toaster } from '@/components/ui/sonner';
@@ -11,9 +11,9 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  // Require a real user (magic-link session). Legacy single-admin cookies carry no
-  // userId → null → bounce to login to re-auth, so every page below has a Viewer.
-  const user = await currentUser();
+  // Require a real, still-active user (DB-validated). Legacy single-admin cookies and
+  // deactivated users → null → bounce to login, so every page below has a live Viewer.
+  const user = await getViewer();
   if (!user) redirect('/admin/login');
   const initial = (user.email[0] ?? 'A').toUpperCase();
 
