@@ -1,4 +1,5 @@
 import { getOverview } from '@/lib/admin/queries';
+import { requireViewer } from '@/lib/auth/viewer';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 export const dynamic = 'force-dynamic';
@@ -17,13 +18,16 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 export default async function OverviewPage() {
-  const o = await getOverview();
+  const viewer = await requireViewer();
+  const o = await getOverview(viewer);
   const nf = new Intl.NumberFormat('en-US');
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold">Overview</h1>
-        <p className="text-sm text-muted-foreground">Last 30 days across all clients.</p>
+        <p className="text-sm text-muted-foreground">
+          Last 30 days {viewer.role === 'admin' ? 'across all keys' : 'for your keys'}.
+        </p>
       </div>
       <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
         <Stat label="Requests" value={nf.format(o.requests)} />

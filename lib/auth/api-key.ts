@@ -32,6 +32,8 @@ export interface KeyConfigInput {
   monthlyTokenCap?: number | null;
   rpmLimit?: number | null;
   logContent?: boolean;
+  /** Owning operator (admin or editor); null = unassigned. Set by the caller. */
+  ownerUserId?: string | null;
 }
 
 export interface VerifiedKey {
@@ -91,6 +93,7 @@ export async function issueKey(
       monthlyTokenCap: input.monthlyTokenCap ?? null,
       rpmLimit: input.rpmLimit ?? null,
       logContent: input.logContent ?? true,
+      ownerUserId: input.ownerUserId ?? null,
     })
     .returning({ id: apiKeys.id });
   return { fullKey: gen.fullKey, id: row.id, prefix: gen.prefix, last4: gen.last4 };

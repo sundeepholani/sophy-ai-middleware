@@ -6,6 +6,7 @@ import { Plus, Pencil, FlaskConical } from 'lucide-react';
 import { createKey, updateKey, revokeKey, type KeyFormInput } from '@/app/admin/actions';
 import type { KeyRow, KeyEval } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
+import type { SessionRole } from '@/lib/auth/session-config';
 import { EvalDialog } from '@/components/admin/eval-dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -66,12 +67,16 @@ export function KeysManager({
   modelsUnavailable = false,
   evals = {},
   judgeModel,
+  role,
+  users,
 }: {
   keys: KeyRow[];
   models: AvailableModel[];
   modelsUnavailable?: boolean;
   evals?: Record<string, KeyEval>;
   judgeModel: string;
+  role: SessionRole;
+  users: { id: string; email: string }[];
 }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<KeyRow | null>(null);
@@ -111,6 +116,8 @@ export function KeysManager({
               mode="create"
               models={models}
               modelsUnavailable={modelsUnavailable}
+              role={role}
+              users={users}
               onIssued={setIssued}
               onDone={() => setCreateOpen(false)}
             />
@@ -125,6 +132,7 @@ export function KeysManager({
               <TableHead>Name</TableHead>
               <TableHead>Key</TableHead>
               <TableHead>Model</TableHead>
+              <TableHead>Owner</TableHead>
               <TableHead>Quota</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Actions</TableHead>
@@ -133,7 +141,7 @@ export function KeysManager({
           <TableBody>
             {keys.length === 0 && (
               <TableRow>
-                <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
                   No keys yet — create one with “New API key”.
                 </TableCell>
               </TableRow>
@@ -145,6 +153,9 @@ export function KeysManager({
                   {k.keyPrefix}…{k.keyLast4}
                 </TableCell>
                 <TableCell className="font-mono text-xs">{k.model}</TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {k.ownerEmail ?? <span className="italic">Unassigned</span>}
+                </TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                   {quotaLabel(k)}
                 </TableCell>
@@ -190,6 +201,8 @@ export function KeysManager({
               initial={editing}
               models={models}
               modelsUnavailable={modelsUnavailable}
+              role={role}
+              users={users}
               onDone={() => setEditing(null)}
             />
           )}
@@ -293,6 +306,8 @@ function KeyForm({
   initial,
   models,
   modelsUnavailable = false,
+  role,
+  users,
   onIssued,
   onDone,
 }: {
@@ -301,6 +316,8 @@ function KeyForm({
   initial?: KeyRow;
   models: AvailableModel[];
   modelsUnavailable?: boolean;
+  role: SessionRole;
+  users: { id: string; email: string }[];
   onIssued?: (key: string) => void;
   onDone?: () => void;
 }) {
@@ -318,6 +335,7 @@ function KeyForm({
   const [schemaText, setSchemaText] = useState(
     initial?.outputSchema ? JSON.stringify(initial.outputSchema, null, 2) : '',
   );
+  const [ownerUserId, setOwnerUserId] = useState(initial?.ownerUserId ?? '');
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Saved model that's no longer in the live catalog — surface it so it stays selectable.
@@ -396,6 +414,8 @@ function KeyForm({
       monthlyTokenCap: cap,
       rpmLimit: rpmV,
       logContent,
+      // Owner is admin-only; the server forces self-ownership for editors regardless.
+      ownerUserId: role === 'admin' ? ownerUserId || null : undefined,
     };
     startTransition(async () => {
       try {
@@ -475,6 +495,39 @@ function KeyForm({
           </>
         )}
       </div>
+
+      {role === 'admin' && (
+        <div className="space-y-1">
+          <Label htmlFor={`${uid}-owner`} className="text-xs">
+            Owner
+          </Label>
+          <Select
+            items={[
+              { label: 'Unassigned', value: 'unassigned' },
+              ...users.map((u) => ({ label: u.email, value: u.id })),
+            ]}
+            value={ownerUserId || 'unassigned'}
+            onValueChange={(v) => {
+              if (v != null) setOwnerUserId(v === 'unassigned' ? '' : (v as string));
+            }}
+          >
+            <SelectTrigger id={`${uid}-owner`} className="w-full">
+              <SelectValue placeholder="Unassigned" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="unassigned">Unassigned</SelectItem>
+              {users.map((u) => (
+                <SelectItem key={u.id} value={u.id}>
+                  {u.email}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Who can manage this key. Unassigned keys keep serving traffic.
+          </p>
+        </div>
+      )}
 
       <div className="space-y-1">
         <Label htmlFor={`${uid}-system`} className="text-xs">

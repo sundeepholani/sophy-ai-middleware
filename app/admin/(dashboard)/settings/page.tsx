@@ -1,10 +1,16 @@
+import { redirect } from 'next/navigation';
 import { getSettings } from '@/lib/admin/settings';
+import { getViewer } from '@/lib/auth/viewer';
 import { listGatewayModels, type AvailableModel } from '@/lib/gateway/models';
 import { SettingsForm } from '@/components/admin/settings-form';
 
 export const dynamic = 'force-dynamic';
 
 export default async function SettingsPage() {
+  // Admin-only (global config). Editors can reach the dashboard, so guard here too.
+  const viewer = await getViewer();
+  if (!viewer) redirect('/admin/login');
+  if (viewer.role !== 'admin') redirect('/admin');
   const settings = await getSettings();
   // Best-effort model list; the judge picker falls back to free text if unavailable.
   let models: AvailableModel[] = [];

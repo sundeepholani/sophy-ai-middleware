@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { getRecentLogs } from '@/lib/admin/queries';
+import { requireViewer } from '@/lib/auth/viewer';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -14,7 +15,8 @@ import {
 export const dynamic = 'force-dynamic';
 
 export default async function LogsPage() {
-  const logs = await getRecentLogs(100);
+  const viewer = await requireViewer();
+  const logs = await getRecentLogs(viewer, 100);
   return (
     <div className="space-y-6">
       <div>
