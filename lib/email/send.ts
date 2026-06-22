@@ -5,8 +5,10 @@
  * ZEPTOMAIL_FROM are set — so local dev and unconfigured environments degrade
  * gracefully (the caller can fall back, e.g. log a magic link in non-prod).
  * Throws only on a hard send failure (non-2xx from the API).
+ *
+ * The API host is data-center specific (US api.zeptomail.com, India .in, EU .eu);
+ * override via ZEPTOMAIL_ENDPOINT when the account isn't in the US DC.
  */
-const ZEPTOMAIL_ENDPOINT = 'https://api.zeptomail.com/v1.1/email';
 
 /** Returns true if the email was sent; false if email isn't configured. */
 export async function sendEmail(to: string, subject: string, html: string): Promise<boolean> {
@@ -16,7 +18,8 @@ export async function sendEmail(to: string, subject: string, html: string): Prom
     console.warn('[email] not configured (ZEPTOMAIL_TOKEN/ZEPTOMAIL_FROM unset) — skipping send');
     return false;
   }
-  const res = await fetch(ZEPTOMAIL_ENDPOINT, {
+  const endpoint = process.env.ZEPTOMAIL_ENDPOINT || 'https://api.zeptomail.com/v1.1/email';
+  const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
