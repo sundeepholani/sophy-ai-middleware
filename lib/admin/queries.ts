@@ -1,5 +1,10 @@
 /**
  * Read-side queries for the admin console (server components only).
+ *
+ * Every query takes a Viewer and is scoped via scopeToOwner(): admins see all
+ * data, editors see only their own keys' data. The scope is a correlated
+ * subquery (empty-set-correct), and `and()`/`.where()` ignore the undefined an
+ * admin produces — so admins pass through unfiltered with no branching.
  */
 import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
@@ -9,13 +14,17 @@ import {
   requestLogs,
   evalRuns,
   evalSamples,
+  users,
   type KeyParams,
   type EvalRunStatus,
   type EvalWinner,
+  type UserRole,
+  type UserStatus,
 } from '@/db/schema';
 import type { EvalSummary } from '@/lib/eval/aggregate';
+import { scopeToOwner, type Viewer } from '@/lib/auth/viewer';
 
-export async function getOverview() {
+export async function getOverview(viewer: Viewer) {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const [agg] = await getDb()
     .select({
@@ -26,7 +35,7 @@ export async function getOverview() {
       errors: sql<string>`coalesce(count(*) filter (where ${usageEvents.status} <> 'ok'),0)`,
     })
     .from(usageEvents)
-    .where(gte(usageEvents.createdAt, since));
+    .where(and(gte(usageEvents.createdAt, since), scopeToOwner(viewer, usageEvents.apiKeyId)));
   return {
     requests: Number(agg?.requests ?? 0),
     inputTokens: Number(agg?.inputTokens ?? 0),
@@ -49,9 +58,11 @@ export interface KeyRow {
   rpmLimit: number | null;
   logContent: boolean;
   status: string;
+  ownerUserId: string | null;
+  ownerEmail: string | null;
 }
 
-export async function listKeys(): Promise<KeyRow[]> {
+export async function listKeys(viewer: Viewer): Promise<KeyRow[]> {
   const rows = await getDb()
     .select({
       id: apiKeys.id,
@@ -66,10 +77,14 @@ export async function listKeys(): Promise<KeyRow[]> {
       rpmLimit: apiKeys.rpmLimit,
       logContent: apiKeys.logContent,
       status: apiKeys.status,
+      ownerUserId: apiKeys.ownerUserId,
+      ownerEmail: users.email,
     })
     .from(apiKeys)
+    .leftJoin(users, eq(apiKeys.ownerUserId, users.id))
+    .where(viewer.role === 'admin' ? undefined : eq(apiKeys.ownerUserId, viewer.userId))
     .orderBy(desc(apiKeys.createdAt));
-  return rows.map((r) => ({ ...r, outputSchema: r.outputSchema ?? null }));
+  return rows.map((r) => ({ ...r, outputSchema: r.outputSchema ?? null, ownerEmail: r.ownerEmail ?? null }));
 }
 
 /** Filters shared by every usage query (range + optional key/model). */
@@ -79,17 +94,18 @@ export interface UsageFilters {
   model?: string;
 }
 
-function usageWhere(f: UsageFilters) {
+function usageWhere(viewer: Viewer, f: UsageFilters) {
   const since = new Date(Date.now() - f.sinceDays * 24 * 60 * 60 * 1000);
   const conds = [gte(usageEvents.createdAt, since)];
   if (f.keyId) conds.push(eq(usageEvents.apiKeyId, f.keyId));
   if (f.model) conds.push(eq(usageEvents.model, f.model));
-  return and(...conds);
+  // Owner scope ANDs with any keyId filter, so a crafted ?key=<other> stays empty.
+  return and(...conds, scopeToOwner(viewer, usageEvents.apiKeyId));
 }
 
 const tokensExpr = sql`${usageEvents.inputTokens} + ${usageEvents.outputTokens}`;
 
-export async function getUsageSeries(f: UsageFilters) {
+export async function getUsageSeries(viewer: Viewer, f: UsageFilters) {
   const rows = await getDb()
     .select({
       day: sql<string>`to_char(date_trunc('day', ${usageEvents.createdAt}), 'YYYY-MM-DD')`,
@@ -98,7 +114,7 @@ export async function getUsageSeries(f: UsageFilters) {
       cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
     })
     .from(usageEvents)
-    .where(usageWhere(f))
+    .where(usageWhere(viewer, f))
     .groupBy(sql`date_trunc('day', ${usageEvents.createdAt})`)
     .orderBy(sql`date_trunc('day', ${usageEvents.createdAt})`);
   return rows.map((r) => ({
@@ -109,7 +125,7 @@ export async function getUsageSeries(f: UsageFilters) {
   }));
 }
 
-export async function getUsageTotals(f: UsageFilters) {
+export async function getUsageTotals(viewer: Viewer, f: UsageFilters) {
   const [agg] = await getDb()
     .select({
       requests: sql<string>`coalesce(count(*),0)`,
@@ -118,7 +134,7 @@ export async function getUsageTotals(f: UsageFilters) {
       cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
     })
     .from(usageEvents)
-    .where(usageWhere(f));
+    .where(usageWhere(viewer, f));
   return {
     requests: Number(agg?.requests ?? 0),
     inputTokens: Number(agg?.inputTokens ?? 0),
@@ -135,7 +151,7 @@ export interface UsageBreakdownRow {
   cost: number;
 }
 
-export async function getUsageByKey(f: UsageFilters): Promise<UsageBreakdownRow[]> {
+export async function getUsageByKey(viewer: Viewer, f: UsageFilters): Promise<UsageBreakdownRow[]> {
   const rows = await getDb()
     .select({
       keyId: usageEvents.apiKeyId,
@@ -147,7 +163,7 @@ export async function getUsageByKey(f: UsageFilters): Promise<UsageBreakdownRow[
     })
     .from(usageEvents)
     .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
-    .where(usageWhere(f))
+    .where(usageWhere(viewer, f))
     .groupBy(usageEvents.apiKeyId, apiKeys.name)
     .orderBy(desc(sql`sum(${tokensExpr})`));
   return rows.map((r) => ({
@@ -159,7 +175,7 @@ export async function getUsageByKey(f: UsageFilters): Promise<UsageBreakdownRow[
   }));
 }
 
-export async function getUsageByModel(f: UsageFilters): Promise<UsageBreakdownRow[]> {
+export async function getUsageByModel(viewer: Viewer, f: UsageFilters): Promise<UsageBreakdownRow[]> {
   const rows = await getDb()
     .select({
       model: usageEvents.model,
@@ -169,7 +185,7 @@ export async function getUsageByModel(f: UsageFilters): Promise<UsageBreakdownRo
       cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
     })
     .from(usageEvents)
-    .where(usageWhere(f))
+    .where(usageWhere(viewer, f))
     .groupBy(usageEvents.model)
     .orderBy(desc(sql`sum(${tokensExpr})`));
   return rows.map((r) => ({
@@ -181,19 +197,21 @@ export async function getUsageByModel(f: UsageFilters): Promise<UsageBreakdownRo
   }));
 }
 
-/** Distinct models seen in the last 90 days — drives the model filter dropdown. */
-export async function listUsedModels(): Promise<string[]> {
+/** Distinct models seen in the last 90 days (scoped) — drives the model filter dropdown. */
+export async function listUsedModels(viewer: Viewer): Promise<string[]> {
   const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const rows = await getDb()
     .selectDistinct({ model: usageEvents.model })
     .from(usageEvents)
-    .where(gte(usageEvents.createdAt, since))
+    .where(and(gte(usageEvents.createdAt, since), scopeToOwner(viewer, usageEvents.apiKeyId)))
     .orderBy(usageEvents.model);
   return rows.map((r) => r.model).filter((m): m is string => !!m);
 }
 
-export async function getLogDetail(id: string) {
+export async function getLogDetail(viewer: Viewer, id: string) {
   const db = getDb();
+  // Owner scope ANDs with the id, so an editor requesting another user's event id
+  // gets no row (→ the page 404s) rather than someone else's content.
   const [event] = await db
     .select({
       id: usageEvents.id,
@@ -213,7 +231,7 @@ export async function getLogDetail(id: string) {
     })
     .from(usageEvents)
     .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
-    .where(eq(usageEvents.id, id))
+    .where(and(eq(usageEvents.id, id), scopeToOwner(viewer, usageEvents.apiKeyId)))
     .limit(1);
   if (!event) return null;
   const [content] = await db
@@ -229,7 +247,7 @@ export async function getLogDetail(id: string) {
   return { event, content: content ?? null };
 }
 
-export async function getRecentLogs(limit = 100) {
+export async function getRecentLogs(viewer: Viewer, limit = 100) {
   return getDb()
     .select({
       id: usageEvents.id,
@@ -247,8 +265,37 @@ export async function getRecentLogs(limit = 100) {
     })
     .from(usageEvents)
     .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
+    .where(scopeToOwner(viewer, usageEvents.apiKeyId))
     .orderBy(desc(usageEvents.createdAt))
     .limit(limit);
+}
+
+// ---- Users (admin-only screen) ----------------------------------------------
+
+export interface AdminUserRow {
+  id: string;
+  email: string;
+  role: UserRole;
+  status: UserStatus;
+  createdAt: Date;
+  keyCount: number;
+}
+
+export async function listUsers(): Promise<AdminUserRow[]> {
+  const rows = await getDb()
+    .select({
+      id: users.id,
+      email: users.email,
+      role: users.role,
+      status: users.status,
+      createdAt: users.createdAt,
+      keyCount: sql<string>`count(${apiKeys.id})`,
+    })
+    .from(users)
+    .leftJoin(apiKeys, eq(apiKeys.ownerUserId, users.id))
+    .groupBy(users.id)
+    .orderBy(users.createdAt);
+  return rows.map((r) => ({ ...r, keyCount: Number(r.keyCount) }));
 }
 
 // ---- Model eval --------------------------------------------------------------
@@ -279,9 +326,13 @@ export interface KeyEval {
 }
 
 /** Latest eval run per key (keyed by apiKeyId) for the keys list / eval panel. */
-export async function getKeyEvals(): Promise<Record<string, KeyEval>> {
+export async function getKeyEvals(viewer: Viewer): Promise<Record<string, KeyEval>> {
   const db = getDb();
-  const runs = await db.select().from(evalRuns).orderBy(desc(evalRuns.createdAt));
+  const runs = await db
+    .select()
+    .from(evalRuns)
+    .where(scopeToOwner(viewer, evalRuns.apiKeyId))
+    .orderBy(desc(evalRuns.createdAt));
   const latestByKey = new Map<string, (typeof runs)[number]>();
   for (const r of runs) if (!latestByKey.has(r.apiKeyId)) latestByKey.set(r.apiKeyId, r);
 

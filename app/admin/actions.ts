@@ -1,25 +1,34 @@
 'use server';
 
 /**
- * Admin mutations (Server Actions). Each asserts admin auth (defense in depth
- * behind the proxy gate), writes Postgres, and records an audit entry. Config
- * lives on the key and is read fresh per request, so there's no cache to bust.
+ * Admin/editor mutations (Server Actions). Each authorizes via lib/auth/viewer
+ * (admin everywhere; editors only on keys they own), writes Postgres, and records
+ * an audit entry attributed to the acting user. Config lives on the key and is
+ * read fresh per request, so there's no cache to bust.
  */
 import { revalidatePath } from 'next/cache';
 import { and, eq } from 'drizzle-orm';
 import { getDb } from '@/db/client';
-import { apiKeys, appSettings, auditLog, evalRuns, evalSamples, type KeyParams } from '@/db/schema';
-import { assertAdmin } from '@/lib/admin/guard';
+import { apiKeys, appSettings, auditLog, evalRuns, evalSamples, users, type KeyParams } from '@/db/schema';
+import { assertAdmin, assertUser, assertCanManageKey, assertCanManageRun } from '@/lib/auth/viewer';
 import { issueKey } from '@/lib/auth/api-key';
 import { getSettings } from '@/lib/admin/settings';
 
-async function audit(action: string, target: string, after: unknown): Promise<void> {
+async function audit(actor: string, action: string, target: string, after: unknown): Promise<void> {
   await getDb()
     .insert(auditLog)
-    .values({ actor: 'admin', action, target, after: after as object });
+    .values({ actor, action, target, after: after as object });
 }
 
-// ---- Global settings --------------------------------------------------------
+/** Validate an admin-chosen owner: '' / null → unassigned; otherwise must be a real user. */
+async function resolveOwner(ownerUserId: string | null | undefined): Promise<string | null> {
+  if (!ownerUserId) return null;
+  const [u] = await getDb().select({ id: users.id }).from(users).where(eq(users.id, ownerUserId)).limit(1);
+  if (!u) throw new Error('Owner user not found');
+  return u.id;
+}
+
+// ---- Global settings (admin-only) -------------------------------------------
 
 export interface SettingsInput {
   judgeModel: string;
@@ -27,7 +36,7 @@ export interface SettingsInput {
 }
 
 export async function updateSettings(input: SettingsInput): Promise<void> {
-  await assertAdmin();
+  const viewer = await assertAdmin();
   const judgeModel = input.judgeModel.trim();
   if (!judgeModel) throw new Error('Judge model is required');
   const notifyEmail = input.notifyEmail?.trim() || null;
@@ -41,7 +50,7 @@ export async function updateSettings(input: SettingsInput): Promise<void> {
       target: appSettings.id,
       set: { judgeModel, notifyEmail, updatedAt: new Date() },
     });
-  await audit('settings.update', 'global', { judgeModel, notifyEmail });
+  await audit(viewer.email, 'settings.update', 'global', { judgeModel, notifyEmail });
   revalidatePath('/admin/settings');
 }
 
@@ -54,6 +63,8 @@ export interface KeyFormInput {
   monthlyTokenCap: number | null;
   rpmLimit: number | null;
   logContent: boolean;
+  /** Admin-only: the key's owner (admin or editor), or null = unassigned. Ignored for editors. */
+  ownerUserId?: string | null;
 }
 
 /**
@@ -96,17 +107,27 @@ function validateKeyInput(input: KeyFormInput): void {
 }
 
 export async function createKey(input: KeyFormInput): Promise<{ fullKey: string }> {
-  await assertAdmin();
+  const viewer = await assertUser();
   validateKeyInput(input);
-  const { fullKey, id } = await issueKey(input);
-  await audit('key.create', id, { name: input.name, model: input.model });
+  // Editors always own what they create; admins choose (defaults to unassigned).
+  const ownerUserId =
+    viewer.role === 'editor' ? viewer.userId : await resolveOwner(input.ownerUserId ?? null);
+  const { fullKey, id } = await issueKey({ ...input, ownerUserId });
+  await audit(viewer.email, 'key.create', id, { name: input.name, model: input.model, ownerUserId });
   revalidatePath('/admin/keys');
   return { fullKey };
 }
 
 export async function updateKey(input: KeyFormInput & { id: string }): Promise<void> {
-  await assertAdmin();
+  const { viewer, ownerUserId: currentOwner } = await assertCanManageKey(input.id);
   validateKeyInput(input);
+
+  // Only admins may reassign ownership; editors' owner is left untouched.
+  let newOwner = currentOwner;
+  if (viewer.role === 'admin' && input.ownerUserId !== undefined) {
+    newOwner = await resolveOwner(input.ownerUserId);
+  }
+
   await getDb()
     .update(apiKeys)
     .set({
@@ -118,20 +139,24 @@ export async function updateKey(input: KeyFormInput & { id: string }): Promise<v
       monthlyTokenCap: input.monthlyTokenCap,
       rpmLimit: input.rpmLimit,
       logContent: input.logContent,
+      ownerUserId: newOwner,
     })
     .where(eq(apiKeys.id, input.id));
-  await audit('key.update', input.id, { name: input.name, model: input.model });
+  await audit(viewer.email, 'key.update', input.id, { name: input.name, model: input.model });
+  if (newOwner !== currentOwner) {
+    await audit(viewer.email, 'key.reassign', input.id, { from: currentOwner, to: newOwner });
+  }
   revalidatePath('/admin/keys');
 }
 
 export async function revokeKey(id: string): Promise<void> {
-  await assertAdmin();
+  const { viewer } = await assertCanManageKey(id);
   await getDb()
     .update(apiKeys)
     .set({ status: 'revoked', revokedAt: new Date() })
     .where(eq(apiKeys.id, id));
   // Revocation is instant: verifyKey() reads `status` fresh on every request.
-  await audit('key.revoke', id, null);
+  await audit(viewer.email, 'key.revoke', id, null);
   revalidatePath('/admin/keys');
 }
 
@@ -144,24 +169,18 @@ export interface StartEvalInput {
 }
 
 export async function startEvalRun(input: StartEvalInput): Promise<void> {
-  await assertAdmin();
+  const { viewer, model, status } = await assertCanManageKey(input.apiKeyId);
   const challengerModel = input.challengerModel.trim();
   if (!challengerModel) throw new Error('Challenger model is required');
   const targetN =
     Number.isInteger(input.targetN) && input.targetN > 0 ? Math.min(input.targetN, 1000) : 100;
 
-  const db = getDb();
-  const [key] = await db
-    .select({ model: apiKeys.model, status: apiKeys.status })
-    .from(apiKeys)
-    .where(eq(apiKeys.id, input.apiKeyId))
-    .limit(1);
-  if (!key) throw new Error('Key not found');
-  if (key.status !== 'active') throw new Error('Key is not active');
-  if (challengerModel === key.model) {
+  if (status !== 'active') throw new Error('Key is not active');
+  if (challengerModel === model) {
     throw new Error('Challenger must differ from the current model');
   }
 
+  const db = getDb();
   const [active] = await db
     .select({ id: evalRuns.id })
     .from(evalRuns)
@@ -173,7 +192,7 @@ export async function startEvalRun(input: StartEvalInput): Promise<void> {
   try {
     await db.insert(evalRuns).values({
       apiKeyId: input.apiKeyId,
-      championModel: key.model,
+      championModel: model,
       challengerModel,
       judgeModel: settings.judgeModel,
       targetN,
@@ -186,8 +205,8 @@ export async function startEvalRun(input: StartEvalInput): Promise<void> {
     }
     throw e;
   }
-  await audit('eval.start', input.apiKeyId, {
-    championModel: key.model,
+  await audit(viewer.email, 'eval.start', input.apiKeyId, {
+    championModel: model,
     challengerModel,
     judgeModel: settings.judgeModel,
     targetN,
@@ -196,7 +215,7 @@ export async function startEvalRun(input: StartEvalInput): Promise<void> {
 }
 
 export async function cancelEvalRun(runId: string): Promise<void> {
-  await assertAdmin();
+  const { viewer } = await assertCanManageRun(runId);
   const db = getDb();
   const cancelled = await db
     .update(evalRuns)
@@ -207,6 +226,6 @@ export async function cancelEvalRun(runId: string): Promise<void> {
   if (cancelled.length > 0) {
     await db.delete(evalSamples).where(eq(evalSamples.runId, runId));
   }
-  await audit('eval.cancel', runId, null);
+  await audit(viewer.email, 'eval.cancel', runId, null);
   revalidatePath('/admin/keys');
 }

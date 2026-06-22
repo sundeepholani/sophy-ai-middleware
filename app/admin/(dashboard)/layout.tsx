@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import { isAuthenticated, currentUser } from '@/lib/auth/admin-session';
+import { getViewer } from '@/lib/auth/viewer';
 import { Nav } from '@/components/admin/nav';
 import { LogoutButton } from '@/components/admin/logout-button';
 import { Toaster } from '@/components/ui/sonner';
@@ -11,9 +11,11 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  if (!(await isAuthenticated())) redirect('/admin/login');
-  const user = await currentUser();
-  const initial = (user?.email?.[0] ?? 'A').toUpperCase();
+  // Require a real, still-active user (DB-validated). Legacy single-admin cookies and
+  // deactivated users → null → bounce to login, so every page below has a live Viewer.
+  const user = await getViewer();
+  if (!user) redirect('/admin/login');
+  const initial = (user.email[0] ?? 'A').toUpperCase();
 
   return (
     <div className="min-h-screen bg-muted/40">
@@ -28,12 +30,12 @@ export default async function DashboardLayout({
             </span>
           </div>
           <div className="flex-1">
-            <Nav />
+            <Nav role={user.role} />
           </div>
           <div className="flex items-center gap-3">
             <LogoutButton />
             <div
-              title={user?.email ?? undefined}
+              title={user.email}
               className="grid h-8 w-8 place-items-center rounded-full bg-secondary text-xs font-semibold text-secondary-foreground"
             >
               {initial}

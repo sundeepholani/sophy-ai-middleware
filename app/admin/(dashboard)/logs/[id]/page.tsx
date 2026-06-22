@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getLogDetail } from '@/lib/admin/queries';
+import { requireViewer } from '@/lib/auth/viewer';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
@@ -24,7 +25,8 @@ export default async function LogDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const detail = await getLogDetail(id);
+  const viewer = await requireViewer();
+  const detail = await getLogDetail(viewer, id);
   if (!detail) notFound();
 
   const { event, content } = detail;

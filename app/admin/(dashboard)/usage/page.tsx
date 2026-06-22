@@ -8,6 +8,7 @@ import {
   type UsageBreakdownRow,
   type UsageFilters,
 } from '@/lib/admin/queries';
+import { requireViewer } from '@/lib/auth/viewer';
 import { UsageChart } from '@/components/admin/usage-chart';
 import { UsageFilters as UsageFilterBar } from '@/components/admin/usage-filters';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -35,14 +36,15 @@ export default async function UsagePage({
   const keyId = sp.key || undefined;
   const model = sp.model || undefined;
   const filters: UsageFilters = { sinceDays, keyId, model };
+  const viewer = await requireViewer();
 
   const [series, totals, byKey, byModel, keys, models] = await Promise.all([
-    getUsageSeries(filters),
-    getUsageTotals(filters),
-    getUsageByKey(filters),
-    getUsageByModel(filters),
-    listKeys(),
-    listUsedModels(),
+    getUsageSeries(viewer, filters),
+    getUsageTotals(viewer, filters),
+    getUsageByKey(viewer, filters),
+    getUsageByModel(viewer, filters),
+    listKeys(viewer),
+    listUsedModels(viewer),
   ]);
 
   return (

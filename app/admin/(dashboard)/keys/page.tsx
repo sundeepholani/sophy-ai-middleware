@@ -1,12 +1,20 @@
-import { listKeys, getKeyEvals } from '@/lib/admin/queries';
+import { listKeys, getKeyEvals, listUsers } from '@/lib/admin/queries';
 import { getSettings } from '@/lib/admin/settings';
+import { requireViewer } from '@/lib/auth/viewer';
 import { listGatewayModels, type AvailableModel } from '@/lib/gateway/models';
 import { KeysManager } from '@/components/admin/keys-manager';
 
 export const dynamic = 'force-dynamic';
 
 export default async function KeysPage() {
-  const [keys, evals, settings] = await Promise.all([listKeys(), getKeyEvals(), getSettings()]);
+  const viewer = await requireViewer();
+  const [keys, evals, settings] = await Promise.all([
+    listKeys(viewer),
+    getKeyEvals(viewer),
+    getSettings(),
+  ]);
+  // Owner picker is admin-only; editors always own what they create.
+  const users = viewer.role === 'admin' ? (await listUsers()).map((u) => ({ id: u.id, email: u.email })) : [];
   // Best-effort model list; the form falls back to free text if unavailable.
   let models: AvailableModel[] = [];
   let modelsUnavailable = false;
@@ -31,6 +39,8 @@ export default async function KeysPage() {
         modelsUnavailable={modelsUnavailable}
         evals={evals}
         judgeModel={settings.judgeModel}
+        role={viewer.role}
+        users={users}
       />
     </div>
   );
