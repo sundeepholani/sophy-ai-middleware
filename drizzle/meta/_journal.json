@@ -29,6 +29,13 @@
       "when": 1781783037434,
       "tag": "0003_premium_kate_bishop",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1782102556482,
+      "tag": "0004_windy_next_avengers",
+      "breakpoints": true
     }
   ]
 }

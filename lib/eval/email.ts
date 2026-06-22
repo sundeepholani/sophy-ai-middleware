@@ -1,13 +1,13 @@
 /**
- * Eval summary email via ZeptoMail.
- *
- * Feature-gated: sending is a no-op (returns false) unless ZEPTOMAIL_TOKEN and
- * ZEPTOMAIL_FROM are set. Until then, finalization still completes the run and
- * stores the summary — only the email is skipped.
+ * Eval summary email: formats the run summary into HTML and sends via the shared
+ * transactional sender (lib/email/send). Feature-gated at the sender — when email
+ * isn't configured the send is a no-op and finalization still completes.
  */
 import type { EvalSummary } from '@/lib/eval/aggregate';
+import { sendEmail, escapeHtml } from '@/lib/email/send';
 
-const ZEPTOMAIL_ENDPOINT = 'https://api.zeptomail.com/v1.1/email';
+/** Back-compat alias — eval finalization sends through the shared sender. */
+export { sendEmail as sendEvalEmail };
 
 function fmtUsd(n: number | null): string {
   return n == null ? '—' : `$${n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '.0')}`;
@@ -68,41 +68,4 @@ export function formatEvalEmail(args: {
   </div>`;
 
   return { subject, html };
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-/** Returns true if the email was sent; false if email isn't configured. Throws only on a hard send failure. */
-export async function sendEvalEmail(to: string, subject: string, html: string): Promise<boolean> {
-  const token = process.env.ZEPTOMAIL_TOKEN;
-  const from = process.env.ZEPTOMAIL_FROM;
-  if (!token || !from) {
-    console.warn('[eval] email not configured (ZEPTOMAIL_TOKEN/ZEPTOMAIL_FROM unset) — skipping send');
-    return false;
-  }
-  const res = await fetch(ZEPTOMAIL_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      accept: 'application/json',
-      authorization: `Zoho-enczapikey ${token}`,
-    },
-    body: JSON.stringify({
-      from: { address: from },
-      to: [{ email_address: { address: to } }],
-      subject,
-      htmlbody: html,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`ZeptoMail send failed: ${res.status} ${body.slice(0, 300)}`);
-  }
-  return true;
 }

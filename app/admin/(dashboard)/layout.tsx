@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import { isAdminAuthed } from '@/lib/auth/admin-session';
+import { isAuthenticated, currentUser } from '@/lib/auth/admin-session';
 import { Nav } from '@/components/admin/nav';
 import { LogoutButton } from '@/components/admin/logout-button';
 import { Toaster } from '@/components/ui/sonner';
@@ -11,7 +11,9 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  if (!(await isAdminAuthed())) redirect('/admin/login');
+  if (!(await isAuthenticated())) redirect('/admin/login');
+  const user = await currentUser();
+  const initial = (user?.email?.[0] ?? 'A').toUpperCase();
 
   return (
     <div className="min-h-screen bg-muted/40">
@@ -30,8 +32,11 @@ export default async function DashboardLayout({
           </div>
           <div className="flex items-center gap-3">
             <LogoutButton />
-            <div className="grid h-8 w-8 place-items-center rounded-full bg-secondary text-xs font-semibold text-secondary-foreground">
-              A
+            <div
+              title={user?.email ?? undefined}
+              className="grid h-8 w-8 place-items-center rounded-full bg-secondary text-xs font-semibold text-secondary-foreground"
+            >
+              {initial}
             </div>
           </div>
         </div>

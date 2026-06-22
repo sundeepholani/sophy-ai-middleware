@@ -57,10 +57,8 @@ export const env = {
   keyHashPepper: () => requireEnv('KEY_HASH_PEPPER'),
   /** iron-session cookie password (>= 32 chars). */
   sessionPassword: () => requireEnv('SESSION_PASSWORD'),
-  /** bcrypt hash of the single admin password. */
-  adminPasswordHash: () => requireEnv('ADMIN_PASSWORD_HASH'),
-  /** Admin username (defaults to "admin"). */
-  adminUsername: () => optionalEnv('ADMIN_USERNAME') ?? 'admin',
+  /** Email seeded as the first admin on bootstrap (passwordless login thereafter). */
+  bootstrapAdminEmail: () => optionalEnv('BOOTSTRAP_ADMIN_EMAIL'),
   /** Shared secret guarding cron endpoints. */
   cronSecret: () => requireEnv('CRON_SECRET'),
 
