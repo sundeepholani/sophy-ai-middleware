@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
+import { ModelCombobox } from '@/components/admin/model-combobox';
 import {
   Dialog,
   DialogContent,
@@ -17,13 +18,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 
 type Summary = NonNullable<KeyEval['summary']>;
 
@@ -380,27 +374,13 @@ function StartForm({
         <Label htmlFor="challenger" className="text-xs">
           Challenger model
         </Label>
-        {options.length > 0 ? (
-          <Select value={challenger} onValueChange={(v) => v != null && setChallenger(v)}>
-            <SelectTrigger id="challenger" className="w-full">
-              <SelectValue placeholder="Select a model" />
-            </SelectTrigger>
-            <SelectContent>
-              {options.map((m) => (
-                <SelectItem key={m.id} value={m.id}>
-                  {m.id}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        ) : (
-          <Input
-            id="challenger"
-            placeholder="anthropic/claude-sonnet-4.6"
-            value={challenger}
-            onChange={(e) => setChallenger(e.target.value)}
-          />
-        )}
+        <ModelCombobox
+          id="challenger"
+          value={challenger}
+          onValueChange={setChallenger}
+          models={options.map((m) => m.id)}
+          placeholder="anthropic/claude-sonnet-4.6"
+        />
       </div>
 
       <div className="space-y-1">

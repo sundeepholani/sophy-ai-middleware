@@ -8,6 +8,7 @@ import type { KeyRow, KeyEval } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
 import type { SessionRole } from '@/lib/auth/session-config';
 import { EvalDialog } from '@/components/admin/eval-dialog';
+import { ModelCombobox } from '@/components/admin/model-combobox';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -338,11 +339,6 @@ function KeyForm({
   const [ownerUserId, setOwnerUserId] = useState(initial?.ownerUserId ?? '');
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  // Saved model that's no longer in the live catalog — surface it so it stays selectable.
-  const initialModel = initial?.model ?? null;
-  const staleModel =
-    initialModel && !models.some((m) => m.id === initialModel) ? initialModel : null;
-
   function submit() {
     if (!name.trim()) return toast.error('Name is required');
     if (!model.trim()) return toast.error('Model is required');
@@ -457,43 +453,14 @@ function KeyForm({
         <Label htmlFor={`${uid}-model`} className="text-xs">
           Model
         </Label>
-        {models.length > 0 ? (
-          <Select
-            value={model}
-            onValueChange={(v) => {
-              if (v != null) setModel(v);
-            }}
-          >
-            <SelectTrigger id={`${uid}-model`} className="w-full">
-              <SelectValue placeholder="Select a model" />
-            </SelectTrigger>
-            <SelectContent>
-              {models.map((m) => (
-                <SelectItem key={m.id} value={m.id}>
-                  {m.id}
-                </SelectItem>
-              ))}
-              {staleModel && (
-                <SelectItem value={staleModel}>{staleModel} (unavailable)</SelectItem>
-              )}
-            </SelectContent>
-          </Select>
-        ) : (
-          <>
-            <Input
-              id={`${uid}-model`}
-              placeholder="anthropic/claude-sonnet-4.6"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-            />
-            {modelsUnavailable && (
-              <p className="text-xs text-muted-foreground">
-                Couldn’t load the model list from the gateway — enter the model id as free text
-                (e.g. <code>anthropic/claude-sonnet-4.6</code>).
-              </p>
-            )}
-          </>
-        )}
+        <ModelCombobox
+          id={`${uid}-model`}
+          value={model}
+          onValueChange={setModel}
+          models={models.map((m) => m.id)}
+          modelsUnavailable={modelsUnavailable}
+          placeholder="anthropic/claude-sonnet-4.6"
+        />
       </div>
 
       {role === 'admin' && (
