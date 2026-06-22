@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { getRecentLogs } from '@/lib/admin/queries';
 import { requireViewer } from '@/lib/auth/viewer';
+import { LocalTime } from '@/components/admin/local-time';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -42,7 +43,7 @@ export default async function LogsPage() {
             {logs.map((l) => (
               <TableRow key={l.id}>
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
-                  {new Date(l.createdAt).toLocaleString()}
+                  <LocalTime value={l.createdAt.toISOString()} />
                 </TableCell>
                 <TableCell className="font-medium">{l.keyName ?? l.apiKeyId.slice(0, 8)}</TableCell>
                 <TableCell className="font-mono text-xs">{l.model ?? '—'}</TableCell>
