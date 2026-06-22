@@ -41,17 +41,25 @@ function inviteHtml(url: string): string {
   </div>`;
 }
 
-async function sendInvite(email: string, userId: string): Promise<void> {
+/**
+ * Mint the invite sign-in link and try to email it. Returns the link so the admin
+ * can always share it directly — email delivery to a brand-new address is the
+ * least reliable step (ZeptoMail test-mode recipient limits, spam, etc.), and the
+ * admin shouldn't be blocked on it.
+ */
+async function sendInvite(email: string, userId: string): Promise<{ inviteUrl: string | null; emailed: boolean }> {
+  const origin = await requestOrigin();
+  if (!origin) return { inviteUrl: null, emailed: false };
+  const raw = await createLoginToken(userId, email);
+  const inviteUrl = buildVerifyUrl(origin, raw);
+  let emailed = false;
   try {
-    const origin = await requestOrigin();
-    if (!origin) return;
-    const raw = await createLoginToken(userId, email);
-    const url = buildVerifyUrl(origin, raw);
-    const sent = await sendEmail(email, "You've been invited to Sophy", inviteHtml(url));
-    if (!sent && !env.isProd()) console.info(`[invite] DEV sign-in link for ${email}: ${url}`);
+    emailed = await sendEmail(email, "You've been invited to Sophy", inviteHtml(inviteUrl));
+    if (!emailed) console.warn(`[invite] email not sent (ZeptoMail unconfigured) for ${email}`);
   } catch (err) {
-    console.error('[invite] send failed', err);
+    console.error(`[invite] email send failed for ${email}:`, err);
   }
+  return { inviteUrl, emailed };
 }
 
 // Constant key serializing all admin-floor mutations. Without it, two concurrent
@@ -77,7 +85,9 @@ async function setUserFieldWithAdminFloor(id: string, patch: Partial<typeof user
   });
 }
 
-export async function createUser(input: { email: string; role: UserRole }): Promise<void> {
+export async function createUser(
+  input: { email: string; role: UserRole },
+): Promise<{ inviteUrl: string | null; emailed: boolean }> {
   const viewer = await assertAdmin();
   const email = normalizeEmail(input.email);
   if (!email || !EMAIL_RE.test(email)) throw new Error('Enter a valid email address');
@@ -91,8 +101,9 @@ export async function createUser(input: { email: string; role: UserRole }): Prom
   if (!row) throw new Error('A user with that email already exists');
 
   await audit(viewer.email, 'user.create', row.id, { email, role });
-  await sendInvite(email, row.id);
+  const { inviteUrl, emailed } = await sendInvite(email, row.id);
   revalidatePath('/admin/users');
+  return { inviteUrl, emailed };
 }
 
 export async function setUserStatus(input: { id: string; active: boolean }): Promise<void> {
