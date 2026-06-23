@@ -144,6 +144,14 @@ export function UsageShareChart({
   const [dim, setDim] = useState<UsageDimension>('key');
   const [metric, setMetric] = useState<Metric>('cost');
   const [mode, setMode] = useState<Mode>('absolute');
+  const [hover, setHover] = useState<{
+    x: number;
+    y: number;
+    cat: string;
+    day: string;
+    value: number;
+    pct: number;
+  } | null>(null);
   const { legend, columns, days } = useMemo(() => shape(data[dim], metric), [data, dim, metric]);
 
   const empty = columns.every((c) => c.total <= 0);
@@ -188,16 +196,33 @@ export function UsageShareChart({
               absolute mode scales to the busiest day, so segments anchor to the
               bottom (justify-end) and short days leave a gap on top. */}
           <div className="min-w-0 flex-1">
-            <div className="flex h-64 items-stretch gap-px overflow-hidden rounded-md border bg-muted/20">
+            {/* p-2 insets the bars so the rounded border never clips them. */}
+            <div
+              className="flex h-64 items-stretch gap-px rounded-md border bg-muted/20 p-2"
+              onMouseLeave={() => setHover(null)}
+            >
               {columns.map((c) => (
-                <div key={c.day} className="flex h-full min-w-0 flex-1 flex-col justify-end" title={c.day}>
-                  {c.segments.map((s) => (
-                    <div
-                      key={s.cat}
-                      style={{ height: `${mode === 'share' ? s.pct : s.abs}%`, backgroundColor: s.color }}
-                      title={`${c.day} · ${s.cat === OTHER ? 'Other' : s.cat}: ${fmt(metric, s.value)} (${s.pct.toFixed(1)}%)`}
-                    />
-                  ))}
+                <div key={c.day} className="flex h-full min-w-0 flex-1 flex-col justify-end">
+                  {c.segments.map((s) => {
+                    const label = s.cat === OTHER ? 'Other' : s.cat;
+                    return (
+                      <div
+                        key={s.cat}
+                        className="w-full transition-opacity hover:opacity-80"
+                        style={{ height: `${mode === 'share' ? s.pct : s.abs}%`, backgroundColor: s.color }}
+                        onMouseMove={(e) =>
+                          setHover({
+                            x: e.clientX,
+                            y: e.clientY,
+                            cat: label,
+                            day: c.day,
+                            value: s.value,
+                            pct: s.pct,
+                          })
+                        }
+                      />
+                    );
+                  })}
                 </div>
               ))}
             </div>
@@ -228,6 +253,19 @@ export function UsageShareChart({
               </li>
             ))}
           </ol>
+        </div>
+      )}
+
+      {/* Cursor-following tooltip with the hovered bar's value + share. */}
+      {hover && (
+        <div
+          className="pointer-events-none fixed z-50 rounded-md bg-foreground px-2 py-1 text-xs text-background shadow-md"
+          style={{ left: hover.x, top: hover.y, transform: 'translate(10px, calc(-100% - 10px))' }}
+        >
+          <div className="font-medium">{hover.cat}</div>
+          <div className="opacity-80">
+            {hover.day} · {fmt(metric, hover.value)} · {hover.pct.toFixed(1)}%
+          </div>
         </div>
       )}
     </div>
