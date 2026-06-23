@@ -22,7 +22,7 @@ export async function GET(req: Request): Promise<Response> {
   return Response.json(
     {
       object: 'list',
-      data: [{ id: key.model, object: 'model', created: 0, owned_by: 'ai-middleware' }],
+      data: [{ id: key.model, object: 'model', created: 0, owned_by: 'sophy' }],
     },
     { headers: { 'cache-control': 'no-store' } },
   );
