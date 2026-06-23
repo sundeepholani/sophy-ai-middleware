@@ -60,12 +60,16 @@ export interface KeyFormInput {
   systemPrompt: string | null;
   params: KeyParams;
   outputSchema: Record<string, unknown> | null;
-  monthlyTokenCap: number | null;
+  /** Admin-only monthly USD budget; null = unlimited. Ignored for editors (forced to the default). */
+  monthlyCostCapUsd?: number | null;
   rpmLimit: number | null;
   logContent: boolean;
   /** Admin-only: the key's owner (admin or editor), or null = unassigned. Ignored for editors. */
   ownerUserId?: string | null;
 }
+
+/** New keys default to a $100/month budget unless an admin overrides it. */
+const DEFAULT_COST_CAP_USD = 100;
 
 /**
  * Server-side guard mirroring the form's client checks, so a crafted action
@@ -76,17 +80,15 @@ function validateKeyInput(input: KeyFormInput): void {
   if (!input.name.trim()) throw new Error('Name is required');
   if (!input.model.trim()) throw new Error('Model is required');
 
-  const { outputSchema, monthlyTokenCap, rpmLimit, params } = input;
+  const { outputSchema, monthlyCostCapUsd, rpmLimit, params } = input;
   if (outputSchema !== null && (typeof outputSchema !== 'object' || Array.isArray(outputSchema))) {
     throw new Error('Output schema must be a JSON object');
   }
-  for (const [label, v] of [
-    ['Monthly token cap', monthlyTokenCap],
-    ['Rate limit', rpmLimit],
-  ] as const) {
-    if (v !== null && (!Number.isInteger(v) || v <= 0)) {
-      throw new Error(`${label} must be a positive whole number`);
-    }
+  if (rpmLimit !== null && (!Number.isInteger(rpmLimit) || rpmLimit <= 0)) {
+    throw new Error('Rate limit must be a positive whole number');
+  }
+  if (monthlyCostCapUsd != null && (!Number.isFinite(monthlyCostCapUsd) || monthlyCostCapUsd <= 0)) {
+    throw new Error('Monthly cost budget must be a positive amount');
   }
   const { temperature, topP, maxOutputTokens } = params;
   if (
@@ -112,8 +114,20 @@ export async function createKey(input: KeyFormInput): Promise<{ fullKey: string 
   // Editors always own what they create; admins choose (defaults to unassigned).
   const ownerUserId =
     viewer.role === 'editor' ? viewer.userId : await resolveOwner(input.ownerUserId ?? null);
-  const { fullKey, id } = await issueKey({ ...input, ownerUserId });
-  await audit(viewer.email, 'key.create', id, { name: input.name, model: input.model, ownerUserId });
+  // Budget is admin-controlled; editors always get the default. New keys default to $100
+  // when no budget is supplied, but an admin who explicitly sends null means "unlimited"
+  // (matching updateKey) — so distinguish "absent" (undefined) from "explicitly null".
+  const monthlyCostCapUsd =
+    viewer.role === 'editor' || input.monthlyCostCapUsd === undefined
+      ? DEFAULT_COST_CAP_USD
+      : input.monthlyCostCapUsd;
+  const { fullKey, id } = await issueKey({ ...input, ownerUserId, monthlyCostCapUsd });
+  await audit(viewer.email, 'key.create', id, {
+    name: input.name,
+    model: input.model,
+    ownerUserId,
+    monthlyCostCapUsd,
+  });
   revalidatePath('/admin/keys');
   return { fullKey };
 }
@@ -136,10 +150,11 @@ export async function updateKey(input: KeyFormInput & { id: string }): Promise<v
       systemPrompt: input.systemPrompt,
       params: input.params,
       outputSchema: input.outputSchema,
-      monthlyTokenCap: input.monthlyTokenCap,
       rpmLimit: input.rpmLimit,
       logContent: input.logContent,
       ownerUserId: newOwner,
+      // Only admins may change the budget; editors' cap is left untouched.
+      ...(viewer.role === 'admin' ? { monthlyCostCapUsd: input.monthlyCostCapUsd ?? null } : {}),
     })
     .where(eq(apiKeys.id, input.id));
   await audit(viewer.email, 'key.update', input.id, { name: input.name, model: input.model });

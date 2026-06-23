@@ -91,9 +91,9 @@ export async function recordUsage(input: RecordUsageInput): Promise<void> {
   } catch (err) {
     console.error('[usage] failed to insert usage_event', err);
   }
-  // Quota is derived from the sum of usage_events for the period (see
-  // lib/counters.ts#quotaUsed) — the insert above IS the charge. No separate
-  // counter to update.
+  // The monthly cost budget is derived from the sum of cost_usd in usage_events
+  // for the period (see lib/counters.ts#costUsedThisMonth) — the insert above IS
+  // the charge. No separate counter to update.
 }
 
 // ---- Request content logging (per-key, separate retention) -----------------

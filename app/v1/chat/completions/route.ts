@@ -8,7 +8,7 @@
  * system messages) -> reject tool calls -> call the AI Gateway -> map to OpenAI.
  */
 import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
-import { checkRateLimit, quotaUsed } from '@/lib/counters';
+import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
 import { toModelMessages, resolveParams } from '@/lib/gateway/openai-map';
 import { handleNonStreaming, handleStreaming, type CallContext } from '@/lib/gateway/call';
 import { assertOwnedBlobs, extractReferencedUrls } from '@/lib/files/blob';
@@ -65,10 +65,10 @@ export async function POST(req: Request): Promise<Response> {
       headers: { 'retry-after': String(retryAfter) },
     });
   }
-  if (key.monthlyTokenCap != null) {
-    const used = await quotaUsed(key.id);
-    if (used >= key.monthlyTokenCap) {
-      return openAiError(402, 'insufficient_quota', 'Monthly token quota exceeded.', {
+  if (key.monthlyCostCapUsd != null) {
+    const used = await costUsedThisMonth(key.id);
+    if (used >= key.monthlyCostCapUsd) {
+      return openAiError(402, 'insufficient_quota', 'Monthly cost budget exceeded.', {
         code: 'quota_exceeded',
       });
     }

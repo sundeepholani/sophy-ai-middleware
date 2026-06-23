@@ -8,7 +8,7 @@
  * (`previous_response_id`) and tools are rejected with a clear 400.
  */
 import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
-import { checkRateLimit, quotaUsed } from '@/lib/counters';
+import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
 import { resolveParams } from '@/lib/gateway/openai-map';
 import { type CallContext } from '@/lib/gateway/call';
 import {
@@ -77,10 +77,10 @@ export async function POST(req: Request): Promise<Response> {
       headers: { 'retry-after': String(retryAfter) },
     });
   }
-  if (key.monthlyTokenCap != null) {
-    const used = await quotaUsed(key.id);
-    if (used >= key.monthlyTokenCap) {
-      return openAiError(402, 'insufficient_quota', 'Monthly token quota exceeded.', {
+  if (key.monthlyCostCapUsd != null) {
+    const used = await costUsedThisMonth(key.id);
+    if (used >= key.monthlyCostCapUsd) {
+      return openAiError(402, 'insufficient_quota', 'Monthly cost budget exceeded.', {
         code: 'quota_exceeded',
       });
     }

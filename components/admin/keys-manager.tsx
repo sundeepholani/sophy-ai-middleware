@@ -56,9 +56,11 @@ function posIntOrNull(s: string): number | null | 'invalid' {
   const n = Number(t);
   return Number.isInteger(n) && n > 0 ? n : 'invalid';
 }
-function quotaLabel(k: KeyRow): string {
-  const cap = k.monthlyTokenCap != null ? `${k.monthlyTokenCap.toLocaleString()} tok/mo` : '∞';
+function quotaLabel(k: KeyRow, role: SessionRole): string {
   const rpm = k.rpmLimit != null ? `${k.rpmLimit}/min` : '∞';
+  // The monthly spend budget is admin-controlled and hidden from editors.
+  if (role !== 'admin') return rpm;
+  const cap = k.monthlyCostCapUsd != null ? `$${k.monthlyCostCapUsd.toLocaleString()}/mo` : '∞';
   return `${cap} · ${rpm}`;
 }
 
@@ -158,7 +160,7 @@ export function KeysManager({
                   {k.ownerEmail ?? <span className="italic">Unassigned</span>}
                 </TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
-                  {quotaLabel(k)}
+                  {quotaLabel(k, role)}
                 </TableCell>
                 <TableCell>
                   <Badge variant={k.status === 'active' ? 'default' : 'destructive'}>
@@ -343,7 +345,9 @@ function KeyForm({
   const [temperature, setTemperature] = useState(initial?.params.temperature?.toString() ?? '');
   const [maxTokens, setMaxTokens] = useState(initial?.params.maxOutputTokens?.toString() ?? '');
   const [topP, setTopP] = useState(initial?.params.topP?.toString() ?? '');
-  const [tokenCap, setTokenCap] = useState(initial?.monthlyTokenCap?.toString() ?? '');
+  const [costCap, setCostCap] = useState(
+    initial ? (initial.monthlyCostCapUsd != null ? String(initial.monthlyCostCapUsd) : '') : '100',
+  );
   const [rpm, setRpm] = useState(initial?.rpmLimit?.toString() ?? '');
   const [logContent, setLogContent] = useState(initial?.logContent ?? true);
   const [schemaText, setSchemaText] = useState(
@@ -371,11 +375,23 @@ function KeyForm({
       outputSchema = parsed as Record<string, unknown>;
     }
 
-    // Quota fields: positive whole numbers (blank = no limit).
-    const cap = posIntOrNull(tokenCap);
-    if (cap === 'invalid') return toast.error('Monthly token cap must be a positive whole number');
+    // Rate limit: positive whole number (blank = no limit).
     const rpmV = posIntOrNull(rpm);
     if (rpmV === 'invalid') return toast.error('Rate limit must be a positive whole number');
+
+    // Monthly cost budget ($): admin-only; blank = unlimited; decimals allowed.
+    let costCapV: number | null | undefined;
+    if (role === 'admin') {
+      if (costCap.trim()) {
+        const n = Number(costCap);
+        if (!Number.isFinite(n) || n <= 0) {
+          return toast.error('Monthly budget must be a positive amount');
+        }
+        costCapV = n;
+      } else {
+        costCapV = null; // unlimited
+      }
+    }
 
     // Temperature: optional, 0–2 inclusive.
     let temp: number | undefined;
@@ -420,7 +436,7 @@ function KeyForm({
         topP: topPV,
       },
       outputSchema,
-      monthlyTokenCap: cap,
+      monthlyCostCapUsd: costCapV,
       rpmLimit: rpmV,
       logContent,
       // Owner is admin-only; the server forces self-ownership for editors regardless.
@@ -524,17 +540,20 @@ function KeyForm({
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <div className="space-y-1">
-          <Label htmlFor={`${uid}-cap`} className="text-xs">
-            Monthly token cap (blank = ∞)
-          </Label>
-          <Input
-            id={`${uid}-cap`}
-            value={tokenCap}
-            inputMode="numeric"
-            onChange={(e) => setTokenCap(e.target.value)}
-          />
-        </div>
+        {/* Monthly spend budget is admin-controlled; editors never see or set it. */}
+        {role === 'admin' && (
+          <div className="space-y-1">
+            <Label htmlFor={`${uid}-cap`} className="text-xs">
+              Monthly budget ($, blank = ∞)
+            </Label>
+            <Input
+              id={`${uid}-cap`}
+              value={costCap}
+              inputMode="decimal"
+              onChange={(e) => setCostCap(e.target.value)}
+            />
+          </div>
+        )}
         <div className="space-y-1">
           <Label htmlFor={`${uid}-rpm`} className="text-xs">
             Rate limit (req/min, blank = none)

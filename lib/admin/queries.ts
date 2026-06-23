@@ -54,7 +54,7 @@ export interface KeyRow {
   systemPrompt: string | null;
   params: KeyParams;
   outputSchema: Record<string, unknown> | null;
-  monthlyTokenCap: number | null;
+  monthlyCostCapUsd: number | null;
   rpmLimit: number | null;
   logContent: boolean;
   status: string;
@@ -73,7 +73,7 @@ export async function listKeys(viewer: Viewer): Promise<KeyRow[]> {
       systemPrompt: apiKeys.systemPrompt,
       params: apiKeys.params,
       outputSchema: apiKeys.outputSchema,
-      monthlyTokenCap: apiKeys.monthlyTokenCap,
+      monthlyCostCapUsd: apiKeys.monthlyCostCapUsd,
       rpmLimit: apiKeys.rpmLimit,
       logContent: apiKeys.logContent,
       status: apiKeys.status,
