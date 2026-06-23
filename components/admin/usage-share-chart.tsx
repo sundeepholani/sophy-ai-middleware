@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import type { UsageStackRow, UsageDimension } from '@/lib/admin/queries';
 
 type Metric = 'cost' | 'requests' | 'tokens';
+type Mode = 'share' | 'absolute';
 
 const OTHER = '__other__';
 const TOP_N = 9;
@@ -80,6 +81,8 @@ function shape(rows: UsageStackRow[], metric: Metric) {
     m.set(bucket, (m.get(bucket) ?? 0) + val(r));
     dayTotal.set(r.day, (dayTotal.get(r.day) ?? 0) + val(r));
   }
+  // Busiest day — the full-height reference for absolute mode.
+  const maxTotal = Math.max(0, ...days.map((d) => dayTotal.get(d) ?? 0));
 
   // Stack bottom→top by rank, Other on top — so render order is top→bottom = reversed.
   const order = [...topCats, ...(hasOther ? [OTHER] : [])];
@@ -91,7 +94,12 @@ function shape(rows: UsageStackRow[], metric: Metric) {
     const segments = renderOrder
       .map((cat) => ({ cat, value: m?.get(cat) ?? 0, color: colorOf(cat) }))
       .filter((s) => s.value > 0)
-      .map((s) => ({ ...s, pct: total > 0 ? (s.value / total) * 100 : 0 }));
+      .map((s) => ({
+        ...s,
+        // share% within the day, and absolute% of the busiest day
+        pct: total > 0 ? (s.value / total) * 100 : 0,
+        abs: maxTotal > 0 ? (s.value / maxTotal) * 100 : 0,
+      }));
     return { day: d, total, segments };
   });
 
@@ -132,8 +140,10 @@ export function UsageShareChart({
 }: {
   data: Record<UsageDimension, UsageStackRow[]>;
 }) {
-  const [dim, setDim] = useState<UsageDimension>('model');
+  // Defaults: by API key, absolute values, cost.
+  const [dim, setDim] = useState<UsageDimension>('key');
   const [metric, setMetric] = useState<Metric>('cost');
+  const [mode, setMode] = useState<Mode>('absolute');
   const { legend, columns, days } = useMemo(() => shape(data[dim], metric), [data, dim, metric]);
 
   const empty = columns.every((c) => c.total <= 0);
@@ -149,31 +159,43 @@ export function UsageShareChart({
             { value: 'key', label: 'By API key' },
           ]}
         />
-        <Segmented
-          value={metric}
-          onChange={setMetric}
-          options={[
-            { value: 'cost', label: 'Cost' },
-            { value: 'requests', label: 'Requests' },
-            { value: 'tokens', label: 'Tokens' },
-          ]}
-        />
+        <div className="flex flex-wrap items-center gap-2">
+          <Segmented
+            value={metric}
+            onChange={setMetric}
+            options={[
+              { value: 'cost', label: 'Cost' },
+              { value: 'requests', label: 'Requests' },
+              { value: 'tokens', label: 'Tokens' },
+            ]}
+          />
+          <Segmented
+            value={mode}
+            onChange={setMode}
+            options={[
+              { value: 'share', label: 'Share %' },
+              { value: 'absolute', label: 'Absolute' },
+            ]}
+          />
+        </div>
       </div>
 
       {empty ? (
         <p className="py-12 text-center text-sm text-muted-foreground">No usage in this range.</p>
       ) : (
         <div className="flex flex-col gap-4 lg:flex-row">
-          {/* Chart: each column is a full-height (definite) flex box so segment
-              percentages resolve; segments stack top→bottom. */}
+          {/* Each column is a full-height (definite) flex box so segment heights
+              resolve as percentages. Share mode fills each column to 100%;
+              absolute mode scales to the busiest day, so segments anchor to the
+              bottom (justify-end) and short days leave a gap on top. */}
           <div className="min-w-0 flex-1">
             <div className="flex h-64 items-stretch gap-px overflow-hidden rounded-md border bg-muted/20">
               {columns.map((c) => (
-                <div key={c.day} className="flex h-full min-w-0 flex-1 flex-col" title={c.day}>
+                <div key={c.day} className="flex h-full min-w-0 flex-1 flex-col justify-end" title={c.day}>
                   {c.segments.map((s) => (
                     <div
                       key={s.cat}
-                      style={{ height: `${s.pct}%`, backgroundColor: s.color }}
+                      style={{ height: `${mode === 'share' ? s.pct : s.abs}%`, backgroundColor: s.color }}
                       title={`${c.day} · ${s.cat === OTHER ? 'Other' : s.cat}: ${fmt(metric, s.value)} (${s.pct.toFixed(1)}%)`}
                     />
                   ))}
@@ -182,12 +204,12 @@ export function UsageShareChart({
             </div>
             <div className="mt-1 flex justify-between text-xs text-muted-foreground">
               <span>{days[0]}</span>
-              <span>share of {metric} / day</span>
+              <span>{mode === 'share' ? `share of ${metric}` : metric} / day</span>
               <span>{days[days.length - 1]}</span>
             </div>
           </div>
 
-          {/* Legend: ranked, with overall share over the whole range. */}
+          {/* Legend: ranked over the whole range — % in share mode, totals in absolute mode. */}
           <ol className="w-full shrink-0 space-y-1.5 text-sm lg:w-64">
             {legend.map((l, i) => (
               <li key={l.label} className="flex items-center gap-2">
@@ -202,7 +224,7 @@ export function UsageShareChart({
                   {l.display}
                 </span>
                 <span className="shrink-0 tabular-nums text-muted-foreground">
-                  {l.pct.toFixed(1)}%
+                  {mode === 'share' ? `${l.pct.toFixed(1)}%` : fmt(metric, l.value)}
                 </span>
               </li>
             ))}
