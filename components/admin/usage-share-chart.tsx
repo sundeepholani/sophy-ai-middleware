@@ -150,34 +150,33 @@ export function UsageShareChart({
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      {/* All toggles left-aligned; each toggle's default option is listed first (leftmost). */}
+      <div className="flex flex-wrap items-center gap-2">
         <Segmented
           value={dim}
           onChange={setDim}
           options={[
-            { value: 'model', label: 'By model' },
             { value: 'key', label: 'By API key' },
+            { value: 'model', label: 'By model' },
           ]}
         />
-        <div className="flex flex-wrap items-center gap-2">
-          <Segmented
-            value={metric}
-            onChange={setMetric}
-            options={[
-              { value: 'cost', label: 'Cost' },
-              { value: 'requests', label: 'Requests' },
-              { value: 'tokens', label: 'Tokens' },
-            ]}
-          />
-          <Segmented
-            value={mode}
-            onChange={setMode}
-            options={[
-              { value: 'share', label: 'Share %' },
-              { value: 'absolute', label: 'Absolute' },
-            ]}
-          />
-        </div>
+        <Segmented
+          value={metric}
+          onChange={setMetric}
+          options={[
+            { value: 'cost', label: 'Cost' },
+            { value: 'requests', label: 'Requests' },
+            { value: 'tokens', label: 'Tokens' },
+          ]}
+        />
+        <Segmented
+          value={mode}
+          onChange={setMode}
+          options={[
+            { value: 'absolute', label: 'Absolute' },
+            { value: 'share', label: 'Share %' },
+          ]}
+        />
       </div>
 
       {empty ? (
