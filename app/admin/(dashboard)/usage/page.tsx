@@ -72,7 +72,7 @@ export default async function UsagePage({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Tokens per day</CardTitle>
+          <CardTitle className="text-base">Cost per day</CardTitle>
         </CardHeader>
         <CardContent>
           <UsageChart data={series} />
