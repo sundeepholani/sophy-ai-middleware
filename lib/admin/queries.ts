@@ -125,6 +125,62 @@ export async function getUsageSeries(viewer: Viewer, f: UsageFilters) {
   }));
 }
 
+export type UsageDimension = 'model' | 'key';
+
+/** One (day, category) cell for the stacked share chart. */
+export interface UsageStackRow {
+  day: string;
+  cat: string;
+  requests: number;
+  tokens: number;
+  cost: number;
+}
+
+/**
+ * Per-day usage broken down by category — model id or key name — for the
+ * stacked share chart. Same range/key/model filters and owner-scoping as the
+ * other usage queries. The client ranks categories, buckets the long tail into
+ * "Other", and normalizes each day to 100%.
+ */
+export async function getUsageStacked(
+  viewer: Viewer,
+  f: UsageFilters,
+  dim: UsageDimension,
+): Promise<UsageStackRow[]> {
+  const day = sql<string>`to_char(date_trunc('day', ${usageEvents.createdAt}), 'YYYY-MM-DD')`;
+  const dayTrunc = sql`date_trunc('day', ${usageEvents.createdAt})`;
+  const agg = {
+    requests: sql<string>`count(*)`,
+    tokens: sql<string>`coalesce(sum(${tokensExpr}),0)`,
+    cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
+  };
+
+  const rows =
+    dim === 'model'
+      ? await getDb()
+          .select({ day, cat: usageEvents.model, ...agg })
+          .from(usageEvents)
+          .where(usageWhere(viewer, f))
+          .groupBy(dayTrunc, usageEvents.model)
+          .orderBy(dayTrunc)
+      : await getDb()
+          // Label by key name; fall back to the id for any orphaned event.
+          .select({ day, cat: sql<string>`coalesce(${apiKeys.name}, ${usageEvents.apiKeyId})`, ...agg })
+          .from(usageEvents)
+          .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
+          .where(usageWhere(viewer, f))
+          .groupBy(dayTrunc, usageEvents.apiKeyId, apiKeys.name)
+          .orderBy(dayTrunc);
+
+  return rows.map((r) => ({
+    day: r.day,
+    cat: r.cat ?? 'unknown',
+    requests: Number(r.requests),
+    tokens: Number(r.tokens),
+    cost: Number(r.cost),
+  }));
+}
+
 export async function getUsageTotals(viewer: Viewer, f: UsageFilters) {
   const [agg] = await getDb()
     .select({

@@ -1,5 +1,5 @@
 import {
-  getUsageSeries,
+  getUsageStacked,
   getUsageTotals,
   getUsageByKey,
   getUsageByModel,
@@ -9,7 +9,7 @@ import {
   type UsageFilters,
 } from '@/lib/admin/queries';
 import { requireViewer } from '@/lib/auth/viewer';
-import { UsageChart } from '@/components/admin/usage-chart';
+import { UsageShareChart } from '@/components/admin/usage-share-chart';
 import { UsageFilters as UsageFilterBar } from '@/components/admin/usage-filters';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -38,8 +38,9 @@ export default async function UsagePage({
   const filters: UsageFilters = { sinceDays, keyId, model };
   const viewer = await requireViewer();
 
-  const [series, totals, byKey, byModel, keys, models] = await Promise.all([
-    getUsageSeries(viewer, filters),
+  const [stackedModel, stackedKey, totals, byKey, byModel, keys, models] = await Promise.all([
+    getUsageStacked(viewer, filters, 'model'),
+    getUsageStacked(viewer, filters, 'key'),
     getUsageTotals(viewer, filters),
     getUsageByKey(viewer, filters),
     getUsageByModel(viewer, filters),
@@ -72,10 +73,10 @@ export default async function UsagePage({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Cost per day</CardTitle>
+          <CardTitle className="text-base">Usage share over time</CardTitle>
         </CardHeader>
         <CardContent>
-          <UsageChart data={series} />
+          <UsageShareChart data={{ model: stackedModel, key: stackedKey }} />
         </CardContent>
       </Card>
 
