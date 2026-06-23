@@ -2,8 +2,8 @@
 
 import { useState, useTransition } from 'react';
 import { toast } from 'sonner';
-import { UserPlus } from 'lucide-react';
-import { createUser, setUserStatus, setUserRole } from '@/app/admin/users-actions';
+import { UserPlus, Mail } from 'lucide-react';
+import { createUser, setUserStatus, setUserRole, resendInvite } from '@/app/admin/users-actions';
 import type { AdminUserRow } from '@/lib/admin/queries';
 import type { UserRole } from '@/db/schema';
 import { Button } from '@/components/ui/button';
@@ -100,6 +100,66 @@ export function UsersManager({ users, selfId }: { users: AdminUserRow[]; selfId:
   );
 }
 
+/** Shows the emailed status + the one-time sign-in link with a copy fallback. */
+function InviteResult({
+  email,
+  inviteUrl,
+  emailed,
+  added = false,
+  onDone,
+}: {
+  email: string;
+  inviteUrl: string | null;
+  emailed: boolean;
+  added?: boolean;
+  onDone: () => void;
+}) {
+  async function copyLink() {
+    if (!inviteUrl) return;
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      toast.success('Link copied');
+    } catch {
+      toast.error('Copy failed — select the link and copy it manually');
+    }
+  }
+  return (
+    <div className="space-y-3">
+      <p className="text-sm">
+        {added && (
+          <>
+            <span className="font-medium">{email}</span> was added.{' '}
+          </>
+        )}
+        {emailed ? (
+          <>
+            A sign-in link was emailed to <span className="font-medium">{added ? 'them' : email}</span>.
+          </>
+        ) : (
+          <>
+            Email delivery isn’t confirmed — copy the one-time link below and share it with{' '}
+            <span className="font-medium">{email}</span>.
+          </>
+        )}
+      </p>
+      {inviteUrl && (
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">One-time sign-in link (expires in 15 minutes):</p>
+          <code className="block max-h-28 select-all overflow-auto rounded-md bg-muted p-2 text-xs break-all">
+            {inviteUrl}
+          </code>
+        </div>
+      )}
+      <div className="flex justify-end gap-2">
+        <Button variant="outline" onClick={onDone}>
+          Done
+        </Button>
+        {inviteUrl && <Button onClick={copyLink}>Copy link</Button>}
+      </div>
+    </div>
+  );
+}
+
 function InviteForm({ onDone }: { onDone: () => void }) {
   const [isPending, startTransition] = useTransition();
   const [email, setEmail] = useState('');
@@ -118,40 +178,15 @@ function InviteForm({ onDone }: { onDone: () => void }) {
     });
   }
 
-  async function copyLink() {
-    if (!result?.inviteUrl) return;
-    try {
-      await navigator.clipboard.writeText(result.inviteUrl);
-      toast.success('Link copied');
-    } catch {
-      toast.error('Copy failed — select the link and copy it manually');
-    }
-  }
-
   if (result) {
     return (
-      <div className="space-y-3">
-        <p className="text-sm">
-          <span className="font-medium">{result.email}</span> was added.{' '}
-          {result.emailed
-            ? 'A sign-in link was emailed to them.'
-            : 'Email delivery isn’t confirmed — share the sign-in link below directly.'}
-        </p>
-        {result.inviteUrl && (
-          <div className="space-y-2">
-            <p className="text-xs text-muted-foreground">One-time sign-in link (expires in 15 minutes):</p>
-            <code className="block max-h-28 select-all overflow-auto rounded-md bg-muted p-2 text-xs break-all">
-              {result.inviteUrl}
-            </code>
-          </div>
-        )}
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={onDone}>
-            Done
-          </Button>
-          {result.inviteUrl && <Button onClick={copyLink}>Copy link</Button>}
-        </div>
-      </div>
+      <InviteResult
+        email={result.email}
+        inviteUrl={result.inviteUrl}
+        emailed={result.emailed}
+        added
+        onDone={onDone}
+      />
     );
   }
 
@@ -199,6 +234,19 @@ function InviteForm({ onDone }: { onDone: () => void }) {
 function UserRowItem({ u, isSelf }: { u: AdminUserRow; isSelf: boolean }) {
   const [isPending, startTransition] = useTransition();
   const active = u.status === 'active';
+  const [invite, setInvite] = useState<{ email: string; inviteUrl: string | null; emailed: boolean } | null>(
+    null,
+  );
+
+  function resend() {
+    startTransition(async () => {
+      try {
+        setInvite(await resendInvite({ id: u.id }));
+      } catch (e) {
+        toast.error(errMsg(e));
+      }
+    });
+  }
 
   function changeRole(role: UserRole) {
     if (role === u.role) return;
@@ -249,7 +297,13 @@ function UserRowItem({ u, isSelf }: { u: AdminUserRow; isSelf: boolean }) {
       <TableCell>
         <Badge variant={active ? 'default' : 'secondary'}>{u.status}</Badge>
       </TableCell>
-      <TableCell className="text-right">
+      <TableCell className="space-x-1 text-right">
+        {active && (
+          <Button size="sm" variant="ghost" disabled={isPending} onClick={resend} title="Re-send sign-in link">
+            <Mail className="h-4 w-4" />
+            Resend invite
+          </Button>
+        )}
         <Button
           size="sm"
           variant="ghost"
@@ -259,6 +313,24 @@ function UserRowItem({ u, isSelf }: { u: AdminUserRow; isSelf: boolean }) {
         >
           {active ? 'Deactivate' : 'Reactivate'}
         </Button>
+        <Dialog open={invite != null} onOpenChange={(o) => !o && setInvite(null)}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>Sign-in link</DialogTitle>
+              <DialogDescription>
+                A fresh one-time link was generated — any previous link for this user is now invalid.
+              </DialogDescription>
+            </DialogHeader>
+            {invite && (
+              <InviteResult
+                email={invite.email}
+                inviteUrl={invite.inviteUrl}
+                emailed={invite.emailed}
+                onDone={() => setInvite(null)}
+              />
+            )}
+          </DialogContent>
+        </Dialog>
       </TableCell>
     </TableRow>
   );

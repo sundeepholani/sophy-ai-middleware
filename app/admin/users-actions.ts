@@ -131,3 +131,28 @@ export async function setUserRole(input: { id: string; role: UserRole }): Promis
   await audit(viewer.email, 'user.role', input.id, { role });
   revalidatePath('/admin/users');
 }
+
+/**
+ * Re-send the sign-in (activation) link to an existing user — mints a FRESH
+ * one-time token (which invalidates any prior unconsumed link) and emails it,
+ * returning the link so the admin can share it directly if email isn't confirmed.
+ * Only for active users: the verify step re-checks status, so a link to an
+ * inactive user would never work.
+ */
+export async function resendInvite(
+  input: { id: string },
+): Promise<{ email: string; inviteUrl: string | null; emailed: boolean }> {
+  const viewer = await assertAdmin();
+  const [user] = await getDb()
+    .select({ email: users.email, status: users.status })
+    .from(users)
+    .where(eq(users.id, input.id))
+    .limit(1);
+  if (!user) throw new Error('User not found');
+  if (user.status !== 'active') {
+    throw new Error('Reactivate the user before sending a sign-in link');
+  }
+  const { inviteUrl, emailed } = await sendInvite(user.email, input.id);
+  await audit(viewer.email, 'user.invite', input.id, { email: user.email, emailed });
+  return { email: user.email, inviteUrl, emailed };
+}
