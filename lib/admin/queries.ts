@@ -165,7 +165,9 @@ export async function getUsageStacked(
           .orderBy(dayTrunc)
       : await getDb()
           // Label by key name; fall back to the id for any orphaned event.
-          .select({ day, cat: sql<string>`coalesce(${apiKeys.name}, ${usageEvents.apiKeyId})`, ...agg })
+          // api_key_id is uuid, so cast to text before coalescing with the text name
+          // (Postgres rejects coalesce(text, uuid)).
+          .select({ day, cat: sql<string>`coalesce(${apiKeys.name}, ${usageEvents.apiKeyId}::text)`, ...agg })
           .from(usageEvents)
           .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
           .where(usageWhere(viewer, f))
