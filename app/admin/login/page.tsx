@@ -46,7 +46,7 @@ export default function LoginPage() {
         <CardHeader>
           <div className="mb-2 flex items-center gap-2">
             <div className="grid h-8 w-8 place-items-center rounded-md bg-primary text-sm font-bold text-primary-foreground">
-              ai
+              S
             </div>
             <CardTitle className="text-lg">Sophy</CardTitle>
           </div>

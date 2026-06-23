@@ -1,7 +1,7 @@
-# AI Middleware
+# Sophy
 
 A central **AI gateway proxy** for your organization. Client systems stop holding
-their own OpenAI/Anthropic keys and instead call this middleware with a key it
+their own OpenAI/Anthropic keys and instead call Sophy with a key it
 issues. **Each key carries its own model + system prompt + quota**, all editable
 from a UI with **no client change and no redeploy**. You also get central
 usage/cost visibility.

@@ -8,8 +8,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI Middleware",
-  description: "Central AI gateway proxy: own API keys, UI-driven routing, prompts, quota.",
+  title: "Sophy",
+  description: "Sophy — central AI gateway proxy: own API keys, UI-driven routing, prompts, quota.",
 };
 
 export default function RootLayout({

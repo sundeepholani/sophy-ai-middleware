@@ -23,10 +23,10 @@ export default async function DashboardLayout({
         <div className="mx-auto flex h-16 w-full max-w-7xl items-center gap-3 px-4 sm:gap-6 sm:px-6 lg:px-8">
           <div className="flex shrink-0 items-center gap-2">
             <div className="grid h-7 w-7 place-items-center rounded-md bg-primary text-sm font-bold text-primary-foreground">
-              ai
+              S
             </div>
             <span className="hidden whitespace-nowrap text-sm font-semibold tracking-tight sm:inline">
-              AI Middleware
+              Sophy
             </span>
           </div>
           <div className="flex-1">
