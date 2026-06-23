@@ -73,11 +73,39 @@ function gatewayProviderOptions(ctx: CallContext) {
   };
 }
 
+/**
+ * Anthropic prompt caching. Marking the last message as an ephemeral cache
+ * breakpoint makes the provider cache the whole prefix (system prompt + prior
+ * turns); the next turn re-reads it at ~0.1x input cost instead of reprocessing
+ * the full transcript. Verified through the AI Gateway: a marked call writes the
+ * prefix to cache and the next identical-prefix call reads it.
+ *
+ * Gated to multi-turn requests (≥2 messages): there the prefix is re-read by the
+ * next turn within Anthropic's ~5-min cache TTL, so the read savings dwarf the
+ * one-time 1.25x write — whereas a one-shot call would never re-read it and
+ * would just pay the write premium. OpenAI/DeepSeek cache automatically and
+ * ignore this marker (provider options are namespaced), so it's safe to leave
+ * it scoped to Anthropic only.
+ */
+export function withPromptCache(model: string, messages: ModelMessage[]): ModelMessage[] {
+  if (providerOf(model) !== 'anthropic' || messages.length < 2) return messages;
+  const last = messages[messages.length - 1];
+  const anthropic = (last.providerOptions?.anthropic ?? {}) as Record<string, unknown>;
+  const marked = {
+    ...last,
+    providerOptions: {
+      ...last.providerOptions,
+      anthropic: { ...anthropic, cacheControl: { type: 'ephemeral' } },
+    },
+  } as ModelMessage;
+  return [...messages.slice(0, -1), marked];
+}
+
 export function commonCall(ctx: CallContext, messages: ModelMessage[]) {
   return {
     model: ctx.model,
     system: buildSystem(ctx.systemPrompt),
-    messages,
+    messages: withPromptCache(ctx.model, messages),
     temperature: ctx.params.temperature,
     topP: ctx.params.topP,
     maxOutputTokens: ctx.params.maxOutputTokens,
