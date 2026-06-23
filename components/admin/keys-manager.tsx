@@ -153,7 +153,7 @@ export function KeysManager({
               <TableRow key={k.id}>
                 <TableCell className="font-medium">{k.name}</TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">
-                  {k.keyPrefix}…{k.keyLast4}
+                  …{k.keyLast4}
                 </TableCell>
                 <TableCell className="font-mono text-xs">{k.model}</TableCell>
                 <TableCell className="text-xs text-muted-foreground">
