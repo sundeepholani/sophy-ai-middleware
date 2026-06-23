@@ -140,9 +140,10 @@ export function UsageShareChart({
 }: {
   data: Record<UsageDimension, UsageStackRow[]>;
 }) {
-  const [dim, setDim] = useState<UsageDimension>('model');
+  // Defaults: by API key, absolute values, cost.
+  const [dim, setDim] = useState<UsageDimension>('key');
   const [metric, setMetric] = useState<Metric>('cost');
-  const [mode, setMode] = useState<Mode>('share');
+  const [mode, setMode] = useState<Mode>('absolute');
   const { legend, columns, days } = useMemo(() => shape(data[dim], metric), [data, dim, metric]);
 
   const empty = columns.every((c) => c.total <= 0);
