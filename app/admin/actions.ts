@@ -10,9 +10,16 @@ import { revalidatePath } from 'next/cache';
 import { and, eq } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import { apiKeys, appSettings, auditLog, evalRuns, evalSamples, users, type KeyParams } from '@/db/schema';
-import { assertAdmin, assertUser, assertCanManageKey, assertCanManageRun } from '@/lib/auth/viewer';
+import {
+  assertAdmin,
+  assertUser,
+  assertCanManageKey,
+  assertCanManageRun,
+  requireViewer,
+} from '@/lib/auth/viewer';
 import { issueKey } from '@/lib/auth/api-key';
 import { getSettings } from '@/lib/admin/settings';
+import { getKeyEvals, type KeyEval } from '@/lib/admin/queries';
 
 async function audit(actor: string, action: string, target: string, after: unknown): Promise<void> {
   await getDb()
@@ -243,4 +250,16 @@ export async function cancelEvalRun(runId: string): Promise<void> {
   }
   await audit(viewer.email, 'eval.cancel', runId, null);
   revalidatePath('/admin/keys');
+}
+
+/**
+ * Latest eval state for one key. The keys page only carries a page-load snapshot,
+ * so the eval modal calls this on open (and while a run is judging) to show
+ * judgments the background cron produced since. Owner-scoped via getKeyEvals — a
+ * viewer who can't see the key gets null.
+ */
+export async function refreshKeyEval(apiKeyId: string): Promise<KeyEval | null> {
+  const viewer = await requireViewer();
+  const all = await getKeyEvals(viewer, apiKeyId);
+  return all[apiKeyId] ?? null;
 }

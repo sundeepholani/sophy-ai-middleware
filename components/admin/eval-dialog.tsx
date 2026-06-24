@@ -1,11 +1,13 @@
 'use client';
 
-import { useState, useTransition } from 'react';
+import { useState, useEffect, useTransition } from 'react';
 import { toast } from 'sonner';
-import { startEvalRun, cancelEvalRun } from '@/app/admin/actions';
+import { startEvalRun, cancelEvalRun, refreshKeyEval } from '@/app/admin/actions';
 import type { KeyEval } from '@/lib/admin/queries';
+import type { EvalRunStatus } from '@/db/schema';
 import type { AvailableModel } from '@/lib/gateway/models';
 import { effectiveWinner } from '@/lib/eval/confidence';
+import { deblindReason, shortModel } from '@/lib/eval/deblind';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -38,20 +40,51 @@ function usd(n: number | null): string {
 export function EvalDialog({
   keyRow,
   models,
-  current,
+  initialStatus,
   judgeModel,
   open,
   onOpenChange,
 }: {
   keyRow: { id: string; name: string; model: string };
   models: AvailableModel[];
-  current: KeyEval | null;
+  /** Latest run status from the keys page (cheap hint); the full body loads on open. */
+  initialStatus?: EvalRunStatus;
   judgeModel: string;
   open: boolean;
   onOpenChange: (o: boolean) => void;
 }) {
-  const running = current?.status === 'running';
-  const completed = current?.status === 'completed' && current.summary;
+  // The keys page only passes each key's latest-run STATUS (cheap). The full eval
+  // body — judgments, summary, costs — is fetched here when the modal opens, and
+  // re-fetched every 10s while a run is judging, so the panel is never stale.
+  // The dialog is remounted per key (key={id} at the call site).
+  const [fetched, setFetched] = useState<KeyEval | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const status = fetched?.status ?? initialStatus ?? null;
+  const running = status === 'running';
+  const completed = fetched?.status === 'completed' && fetched.summary;
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    const tick = async () => {
+      try {
+        const fresh = await refreshKeyEval(keyRow.id);
+        if (active) {
+          setFetched(fresh);
+          setLoaded(true);
+        }
+      } catch {
+        /* keep showing the last good data; the poll retries while running */
+      }
+    };
+    tick(); // fetch the full eval the moment the modal opens
+    if (!running) return () => void (active = false);
+    const id = setInterval(tick, 10_000); // live updates while the judge is scoring
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [open, keyRow.id, running]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -64,16 +97,18 @@ export function EvalDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {running ? (
-          <RunningView current={current!} onDone={() => onOpenChange(false)} />
+        {!loaded ? (
+          <p className="py-10 text-center text-sm text-muted-foreground">Loading eval…</p>
+        ) : fetched?.status === 'running' ? (
+          <RunningView current={fetched} onDone={() => onOpenChange(false)} />
         ) : (
           <>
-            {completed && <CompletedView current={current!} />}
+            {completed && <CompletedView current={fetched!} />}
             <StartForm
               keyRow={keyRow}
               models={models}
               judgeModel={judgeModel}
-              hasPrevious={!!current}
+              hasPrevious={!!fetched}
               onDone={() => onOpenChange(false)}
             />
           </>
@@ -81,35 +116,6 @@ export function EvalDialog({
       </DialogContent>
     </Dialog>
   );
-}
-
-/** Short, scannable model name for dense rows (drop the provider prefix). */
-function shortModel(m: string): string {
-  return m.split('/').pop() || m;
-}
-
-/**
- * The judge grades blind: it sees the two outputs as "Response A"/"Response B"
- * in a randomized order (orderSwapped ⇒ the challenger was shown as "A"), so its
- * reason references bare A/B that mean different models from one sample to the
- * next. Rewrite those to the actual model names so each reason is directly
- * readable. New reasons say "Response A" in full (exact remap); older bare-letter
- * reasons are remapped best-effort.
- */
-function deblindReason(
-  reason: string,
-  orderSwapped: boolean,
-  championModel: string,
-  challengerModel: string,
-): string {
-  if (!reason) return reason;
-  const a = shortModel(orderSwapped ? challengerModel : championModel);
-  const b = shortModel(orderSwapped ? championModel : challengerModel);
-  return reason
-    .replace(/\bResponse A\b/g, a)
-    .replace(/\bResponse B\b/g, b)
-    .replace(/\bA\b/g, a)
-    .replace(/\bB\b/g, b);
 }
 
 /**

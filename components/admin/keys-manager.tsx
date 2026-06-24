@@ -4,9 +4,10 @@ import { useId, useState, useTransition } from 'react';
 import { toast } from 'sonner';
 import { Plus, Pencil, FlaskConical, Ban } from 'lucide-react';
 import { createKey, updateKey, revokeKey, type KeyFormInput } from '@/app/admin/actions';
-import type { KeyRow, KeyEval } from '@/lib/admin/queries';
+import type { KeyRow } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
 import type { SessionRole } from '@/lib/auth/session-config';
+import type { EvalRunStatus } from '@/db/schema';
 import { EvalDialog } from '@/components/admin/eval-dialog';
 import { ModelCombobox } from '@/components/admin/model-combobox';
 import { Button } from '@/components/ui/button';
@@ -68,7 +69,7 @@ export function KeysManager({
   keys,
   models,
   modelsUnavailable = false,
-  evals = {},
+  evalStatuses = {},
   judgeModel,
   role,
   users,
@@ -76,7 +77,7 @@ export function KeysManager({
   keys: KeyRow[];
   models: AvailableModel[];
   modelsUnavailable?: boolean;
-  evals?: Record<string, KeyEval>;
+  evalStatuses?: Record<string, EvalRunStatus>;
   judgeModel: string;
   role: SessionRole;
   users: { id: string; email: string }[];
@@ -187,7 +188,7 @@ export function KeysManager({
                       onClick={() => setEvalKey(k)}
                     >
                       <FlaskConical className="h-3.5 w-3.5" />
-                      {evals[k.id]?.status === 'running' && (
+                      {evalStatuses[k.id] === 'running' && (
                         <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-primary" />
                       )}
                     </Button>
@@ -226,9 +227,10 @@ export function KeysManager({
       {/* Eval modal */}
       {evalKey && (
         <EvalDialog
+          key={evalKey.id}
           keyRow={{ id: evalKey.id, name: evalKey.name, model: evalKey.model }}
           models={models}
-          current={evals[evalKey.id] ?? null}
+          initialStatus={evalStatuses[evalKey.id]}
           judgeModel={judgeModel}
           open={evalKey != null}
           onOpenChange={(o) => !o && setEvalKey(null)}

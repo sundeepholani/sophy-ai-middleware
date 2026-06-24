@@ -11,6 +11,7 @@ export interface JudgedSample {
   winner: EvalWinner;
   confidence: number;
   reason: string;
+  orderSwapped: boolean;
   championCostUsd: number | null;
   challengerCostUsd: number | null;
   championLatencyMs: number | null;
@@ -35,7 +36,7 @@ export interface EvalSummary {
   projectedMonthlyCostDeltaUsd: number | null; // challenger − champion at current volume
   recommendation: EvalRecommendation;
   headline: string;
-  examples: { winner: EvalWinner; confidence: number; reason: string }[];
+  examples: { winner: EvalWinner; confidence: number; reason: string; orderSwapped: boolean }[];
 }
 
 function mean(xs: number[]): number | null {
@@ -121,7 +122,12 @@ export function summarize(
   const examples = [
     ...decisiveSamples.filter((x) => x.w === 'challenger').slice(0, 2),
     ...decisiveSamples.filter((x) => x.w === 'champion').slice(0, 2),
-  ].map((x) => ({ winner: x.w, confidence: x.s.confidence, reason: x.s.reason }));
+  ].map((x) => ({
+    winner: x.w,
+    confidence: x.s.confidence,
+    reason: x.s.reason,
+    orderSwapped: x.s.orderSwapped,
+  }));
 
   return {
     total,
