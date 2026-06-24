@@ -10,7 +10,7 @@
 import { put, del } from '@vercel/blob';
 import { inArray, lt } from 'drizzle-orm';
 import { getDb } from '@/db/client';
-import { blobUploads } from '@/db/schema';
+import { blobUploads, kbDocuments } from '@/db/schema';
 import { env } from '@/lib/env';
 import type { OpenAIMessage } from '@/lib/http/openai';
 
@@ -59,6 +59,67 @@ export async function uploadClientFile(input: {
 
   return {
     id: blob.url,
+    url: blob.url,
+    pathname: blob.pathname,
+    filename: input.filename,
+    bytes: input.data.byteLength,
+    contentType: input.contentType,
+  };
+}
+
+export interface UploadedKbDocument {
+  id: string;
+  url: string;
+  pathname: string;
+  filename: string;
+  bytes: number;
+  contentType: string;
+}
+
+/**
+ * Upload a KB source document to Blob and record it in `kb_documents` as
+ * `pending` (the cron ingests it later). Deliberately NOT recorded in
+ * `blob_uploads`, so `sweepStaleUploads` never deletes a knowledgebase file.
+ * KB files live under their own `kb/<kbId>/` namespace.
+ */
+export async function uploadKbDocument(input: {
+  kbId: string;
+  filename: string;
+  contentType: string;
+  data: ArrayBuffer;
+}): Promise<UploadedKbDocument> {
+  // Build the blob key from a sanitized single path segment so a hostile
+  // filename ("../…", control chars, absurd length) can't escape the
+  // kb/<kbId>/ namespace. The original filename is kept in kb_documents for
+  // display; the blob key only needs to be safe and unique (addRandomSuffix).
+  const safeName =
+    (input.filename || 'document')
+      .split('/')
+      .pop()!
+      .replace(/[^\w.\- ]+/g, '_')
+      .slice(0, 200) || 'document';
+  const blob = await put(`kb/${input.kbId}/${safeName}`, input.data, {
+    access: 'public',
+    token: env.blobReadWriteToken(),
+    contentType: input.contentType,
+    addRandomSuffix: true,
+  });
+
+  const [row] = await getDb()
+    .insert(kbDocuments)
+    .values({
+      kbId: input.kbId,
+      filename: input.filename,
+      pathname: blob.pathname,
+      url: blob.url,
+      contentType: input.contentType,
+      bytes: input.data.byteLength,
+      status: 'pending',
+    })
+    .returning({ id: kbDocuments.id });
+
+  return {
+    id: row.id,
     url: blob.url,
     pathname: blob.pathname,
     filename: input.filename,
