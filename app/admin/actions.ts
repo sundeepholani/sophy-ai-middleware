@@ -9,7 +9,16 @@
 import { revalidatePath } from 'next/cache';
 import { and, eq } from 'drizzle-orm';
 import { getDb } from '@/db/client';
-import { apiKeys, appSettings, auditLog, evalRuns, evalSamples, users, type KeyParams } from '@/db/schema';
+import {
+  apiKeys,
+  appSettings,
+  auditLog,
+  evalRuns,
+  evalSamples,
+  users,
+  knowledgebases,
+  type KeyParams,
+} from '@/db/schema';
 import {
   assertAdmin,
   assertUser,
@@ -33,6 +42,24 @@ async function resolveOwner(ownerUserId: string | null | undefined): Promise<str
   const [u] = await getDb().select({ id: users.id }).from(users).where(eq(users.id, ownerUserId)).limit(1);
   if (!u) throw new Error('Owner user not found');
   return u.id;
+}
+
+/**
+ * Validate a chosen knowledgebase: '' / null → none; otherwise must be a real KB.
+ * v1 decision (intentional): KBs are a SHARED, admin-curated, single-org resource,
+ * so any operator who can manage a key may attach ANY KB to it — there is no
+ * per-owner KB scoping (the schema carries ownerUserId for a future tightening).
+ * If KBs ever become team/tenant-private, gate this to admin or scope by owner.
+ */
+async function resolveKnowledgebase(id: string | null | undefined): Promise<string | null> {
+  if (!id) return null;
+  const [kb] = await getDb()
+    .select({ id: knowledgebases.id })
+    .from(knowledgebases)
+    .where(eq(knowledgebases.id, id))
+    .limit(1);
+  if (!kb) throw new Error('Knowledgebase not found');
+  return kb.id;
 }
 
 // ---- Global settings (admin-only) -------------------------------------------
@@ -73,6 +100,8 @@ export interface KeyFormInput {
   logContent: boolean;
   /** Admin-only: the key's owner (admin or editor), or null = unassigned. Ignored for editors. */
   ownerUserId?: string | null;
+  /** Attached knowledgebase for RAG grounding, or null = none. */
+  knowledgebaseId?: string | null;
 }
 
 /** New keys default to a $100/month budget unless an admin overrides it. */
@@ -128,7 +157,8 @@ export async function createKey(input: KeyFormInput): Promise<{ fullKey: string 
     viewer.role === 'editor' || input.monthlyCostCapUsd === undefined
       ? DEFAULT_COST_CAP_USD
       : input.monthlyCostCapUsd;
-  const { fullKey, id } = await issueKey({ ...input, ownerUserId, monthlyCostCapUsd });
+  const knowledgebaseId = await resolveKnowledgebase(input.knowledgebaseId ?? null);
+  const { fullKey, id } = await issueKey({ ...input, ownerUserId, monthlyCostCapUsd, knowledgebaseId });
   await audit(viewer.email, 'key.create', id, {
     name: input.name,
     model: input.model,
@@ -149,6 +179,23 @@ export async function updateKey(input: KeyFormInput & { id: string }): Promise<v
     newOwner = await resolveOwner(input.ownerUserId);
   }
 
+  // Knowledgebase: anyone who can manage the key may attach/detach one. Only
+  // change it when the field is present (undefined = leave as-is).
+  const kbId =
+    input.knowledgebaseId !== undefined ? await resolveKnowledgebase(input.knowledgebaseId) : undefined;
+
+  // Read the prior KB only when we might change it, so we can audit the change
+  // (attaching/detaching a KB changes what data the key can surface).
+  let priorKb: string | null = null;
+  if (kbId !== undefined) {
+    const [row] = await getDb()
+      .select({ kb: apiKeys.knowledgebaseId })
+      .from(apiKeys)
+      .where(eq(apiKeys.id, input.id))
+      .limit(1);
+    priorKb = row?.kb ?? null;
+  }
+
   await getDb()
     .update(apiKeys)
     .set({
@@ -160,6 +207,7 @@ export async function updateKey(input: KeyFormInput & { id: string }): Promise<v
       rpmLimit: input.rpmLimit,
       logContent: input.logContent,
       ownerUserId: newOwner,
+      ...(kbId !== undefined ? { knowledgebaseId: kbId } : {}),
       // Only admins may change the budget; editors' cap is left untouched.
       ...(viewer.role === 'admin' ? { monthlyCostCapUsd: input.monthlyCostCapUsd ?? null } : {}),
     })
@@ -167,6 +215,9 @@ export async function updateKey(input: KeyFormInput & { id: string }): Promise<v
   await audit(viewer.email, 'key.update', input.id, { name: input.name, model: input.model });
   if (newOwner !== currentOwner) {
     await audit(viewer.email, 'key.reassign', input.id, { from: currentOwner, to: newOwner });
+  }
+  if (kbId !== undefined && kbId !== priorKb) {
+    await audit(viewer.email, 'key.kb', input.id, { from: priorKb, to: kbId });
   }
   revalidatePath('/admin/keys');
 }

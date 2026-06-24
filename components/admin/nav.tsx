@@ -2,7 +2,15 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, KeyRound, BarChart3, ScrollText, Settings, Users } from 'lucide-react';
+import {
+  LayoutDashboard,
+  KeyRound,
+  BarChart3,
+  ScrollText,
+  Settings,
+  Users,
+  Library,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { SessionRole } from '@/lib/auth/session-config';
 
@@ -11,6 +19,7 @@ const ITEMS = [
   { href: '/admin/keys', label: 'API Keys', icon: KeyRound },
   { href: '/admin/usage', label: 'Usage', icon: BarChart3 },
   { href: '/admin/logs', label: 'Logs', icon: ScrollText },
+  { href: '/admin/knowledgebases', label: 'Knowledgebases', icon: Library, adminOnly: true },
   { href: '/admin/users', label: 'Users', icon: Users, adminOnly: true },
   { href: '/admin/settings', label: 'Settings', icon: Settings, adminOnly: true },
 ];

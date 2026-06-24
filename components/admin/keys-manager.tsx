@@ -73,6 +73,7 @@ export function KeysManager({
   judgeModel,
   role,
   users,
+  knowledgebases = [],
 }: {
   keys: KeyRow[];
   models: AvailableModel[];
@@ -81,6 +82,7 @@ export function KeysManager({
   judgeModel: string;
   role: SessionRole;
   users: { id: string; email: string }[];
+  knowledgebases?: { id: string; name: string }[];
 }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<KeyRow | null>(null);
@@ -122,6 +124,7 @@ export function KeysManager({
               modelsUnavailable={modelsUnavailable}
               role={role}
               users={users}
+              knowledgebases={knowledgebases}
               onIssued={setIssued}
               onDone={() => setCreateOpen(false)}
             />
@@ -218,6 +221,7 @@ export function KeysManager({
               modelsUnavailable={modelsUnavailable}
               role={role}
               users={users}
+              knowledgebases={knowledgebases}
               onDone={() => setEditing(null)}
             />
           )}
@@ -326,6 +330,7 @@ function KeyForm({
   modelsUnavailable = false,
   role,
   users,
+  knowledgebases,
   onIssued,
   onDone,
 }: {
@@ -336,6 +341,7 @@ function KeyForm({
   modelsUnavailable?: boolean;
   role: SessionRole;
   users: { id: string; email: string }[];
+  knowledgebases: { id: string; name: string }[];
   onIssued?: (key: string) => void;
   onDone?: () => void;
 }) {
@@ -356,6 +362,7 @@ function KeyForm({
     initial?.outputSchema ? JSON.stringify(initial.outputSchema, null, 2) : '',
   );
   const [ownerUserId, setOwnerUserId] = useState(initial?.ownerUserId ?? '');
+  const [knowledgebaseId, setKnowledgebaseId] = useState(initial?.knowledgebaseId ?? '');
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   function submit() {
@@ -443,6 +450,7 @@ function KeyForm({
       logContent,
       // Owner is admin-only; the server forces self-ownership for editors regardless.
       ownerUserId: role === 'admin' ? ownerUserId || null : undefined,
+      knowledgebaseId: knowledgebaseId || null,
     };
     startTransition(async () => {
       try {
@@ -523,6 +531,39 @@ function KeyForm({
           </Select>
           <p className="text-xs text-muted-foreground">
             Who can manage this key. Unassigned keys keep serving traffic.
+          </p>
+        </div>
+      )}
+
+      {knowledgebases.length > 0 && (
+        <div className="space-y-1">
+          <Label htmlFor={`${uid}-kb`} className="text-xs">
+            Knowledgebase
+          </Label>
+          <Select
+            items={[
+              { label: 'None', value: 'none' },
+              ...knowledgebases.map((k) => ({ label: k.name, value: k.id })),
+            ]}
+            value={knowledgebaseId || 'none'}
+            onValueChange={(v) => {
+              if (v != null) setKnowledgebaseId(v === 'none' ? '' : (v as string));
+            }}
+          >
+            <SelectTrigger id={`${uid}-kb`} className="w-full">
+              <SelectValue placeholder="None" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">None</SelectItem>
+              {knowledgebases.map((k) => (
+                <SelectItem key={k.id} value={k.id}>
+                  {k.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Ground this key’s answers in the knowledgebase’s documents (retrieved per request).
           </p>
         </div>
       )}

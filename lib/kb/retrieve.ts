@@ -9,10 +9,10 @@
  * embedding error, query error) degrades to "no context" and the call proceeds
  * ungrounded.
  */
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { ModelMessage } from 'ai';
 import { getDb } from '@/db/client';
-import { kbChunks, knowledgebases } from '@/db/schema';
+import { kbChunks, kbDocuments, knowledgebases } from '@/db/schema';
 import { embedQuery } from '@/lib/kb/embed';
 
 const TOP_K = 6;
@@ -83,10 +83,16 @@ export async function retrieveContext(
     });
     const vec = JSON.stringify(embedding); // pgvector text input: "[...]"
 
+    // Join the parent document and require status='ingested' so we only ever
+    // serve chunks that belong to a still-existing, fully-ingested document.
+    // This makes a deleted document's chunks unservable even if the ingest cron
+    // raced the delete and inserted them after the row was gone (no orphan leak),
+    // and skips a doc that's only half-ingested.
     const rows = await db
       .select({ content: kbChunks.content })
       .from(kbChunks)
-      .where(eq(kbChunks.kbId, knowledgebaseId)) // strict per-KB scope
+      .innerJoin(kbDocuments, eq(kbChunks.documentId, kbDocuments.id))
+      .where(and(eq(kbChunks.kbId, knowledgebaseId), eq(kbDocuments.status, 'ingested'))) // strict per-KB scope
       .orderBy(sql`${kbChunks.embedding} <=> ${vec}::vector`) // cosine distance
       .limit(topK);
 
