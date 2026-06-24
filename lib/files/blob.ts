@@ -42,7 +42,18 @@ export async function uploadClientFile(input: {
   contentType: string;
   data: ArrayBuffer;
 }): Promise<UploadedFile> {
-  const blob = await put(`uploads/${input.keyId}/${input.filename}`, input.data, {
+  // Build the blob key from a sanitized single path segment so a hostile
+  // filename ("../<otherKeyId>/…", control chars, absurd length) can't escape
+  // the uploads/<keyId>/ namespace. The original filename is kept in
+  // blob_uploads / returned for display; the blob key only needs to be safe and
+  // unique (addRandomSuffix).
+  const safeName =
+    (input.filename || 'document')
+      .split('/')
+      .pop()!
+      .replace(/[^\w.\- ]+/g, '_')
+      .slice(0, 200) || 'document';
+  const blob = await put(`uploads/${input.keyId}/${safeName}`, input.data, {
     access: 'public',
     token: env.blobReadWriteToken(),
     contentType: input.contentType,
