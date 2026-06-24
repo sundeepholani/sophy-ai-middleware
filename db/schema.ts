@@ -21,6 +21,7 @@ import {
   numeric,
   boolean,
   date,
+  vector,
   index,
   uniqueIndex,
   primaryKey,
@@ -113,6 +114,8 @@ export const apiKeys = pgTable(
     status: text('status').$type<KeyStatus>().notNull().default('active'),
     /** Owning operator (admin or editor); null = unassigned. Never gates proxy traffic. */
     ownerUserId: uuid('owner_user_id'),
+    /** Attached knowledgebase for RAG grounding; null = no KB. References knowledgebases.id. */
+    knowledgebaseId: uuid('knowledgebase_id'),
     expiresAt: timestamp('expires_at', { withTimezone: true }),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
@@ -121,6 +124,7 @@ export const apiKeys = pgTable(
   (t) => [
     index('api_keys_status_idx').on(t.status),
     index('api_keys_owner_idx').on(t.ownerUserId),
+    index('api_keys_kb_idx').on(t.knowledgebaseId),
   ],
 );
 
@@ -304,6 +308,76 @@ export const evalSamples = pgTable(
     judgedAt: timestamp('judged_at', { withTimezone: true }),
   },
   (t) => [index('eval_samples_run_status_idx').on(t.runId, t.status)],
+);
+
+// ---- Knowledgebases (per-key files-backed RAG) ------------------------------
+
+/** Ingestion lifecycle for an uploaded document. */
+export type KbDocStatus = 'pending' | 'ingested' | 'failed';
+
+/**
+ * A shared, attachable knowledgebase. A KB owns a set of documents (and their
+ * embedded chunks); any number of API keys can point at it via
+ * `apiKeys.knowledgebaseId`. The embedding model is fixed per-KB because the
+ * chunk vector column has a locked dimension — switching it means re-embedding.
+ */
+export const knowledgebases = pgTable(
+  'knowledgebases',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: text('name').notNull(),
+    /** Full gateway embedding model id; dimension is locked to this choice (1536). */
+    embeddingModel: text('embedding_model').notNull().default('openai/text-embedding-3-small'),
+    /** Owning operator (admin or editor); null = unassigned. Mirrors apiKeys.ownerUserId. */
+    ownerUserId: uuid('owner_user_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('knowledgebases_owner_idx').on(t.ownerUserId)],
+);
+
+/** A source file uploaded into a KB; ingested asynchronously by the cron. */
+export const kbDocuments = pgTable(
+  'kb_documents',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    kbId: uuid('kb_id').notNull(),
+    filename: text('filename').notNull(),
+    // Vercel Blob location (own namespace under kb/<kbId>/…; never swept).
+    pathname: text('pathname').notNull(),
+    url: text('url').notNull(),
+    contentType: text('content_type'),
+    bytes: bigint('bytes', { mode: 'number' }),
+    status: text('status').$type<KbDocStatus>().notNull().default('pending'),
+    chunkCount: integer('chunk_count').notNull().default(0),
+    errorMessage: text('error_message'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    ingestedAt: timestamp('ingested_at', { withTimezone: true }),
+  },
+  (t) => [index('kb_documents_kb_status_idx').on(t.kbId, t.status)],
+);
+
+/**
+ * One embedded chunk of a document. `kbId` is denormalized so retrieval can
+ * scope to a KB with a single indexed predicate. The HNSW index on `embedding`
+ * (cosine ops) backs the `<=>` nearest-neighbour search at query time.
+ */
+export const kbChunks = pgTable(
+  'kb_chunks',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    kbId: uuid('kb_id').notNull(),
+    documentId: uuid('document_id').notNull(),
+    chunkIndex: integer('chunk_index').notNull(),
+    content: text('content').notNull(),
+    embedding: vector('embedding', { dimensions: 1536 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('kb_chunks_kb_idx').on(t.kbId),
+    index('kb_chunks_document_idx').on(t.documentId),
+    // Approximate nearest-neighbour over cosine distance for retrieval.
+    index('kb_chunks_embedding_hnsw').using('hnsw', t.embedding.op('vector_cosine_ops')),
+  ],
 );
 
 // ---- Audit ------------------------------------------------------------------

@@ -43,6 +43,13 @@
       "when": 1782127286985,
       "tag": "0005_aspiring_odin",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1782297589597,
+      "tag": "0006_supreme_silvermane",
+      "breakpoints": true
     }
   ]
 }
