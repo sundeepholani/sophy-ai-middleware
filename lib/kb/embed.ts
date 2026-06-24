@@ -45,11 +45,21 @@ export async function embedTexts(
   return { embeddings, tokens: usage?.tokens ?? null };
 }
 
-/** Embed a single query string (retrieval path). */
+/**
+ * Embed a single query string (retrieval path). Callers on the live request path
+ * should pass a short abortSignal + maxRetries:0 so a slow/hung gateway degrades
+ * to "no context" fast instead of stalling the user-visible response.
+ */
 export async function embedQuery(
   modelId: string,
   value: string,
+  opts?: { abortSignal?: AbortSignal; maxRetries?: number },
 ): Promise<{ embedding: number[]; tokens: number | null }> {
-  const { embedding, usage } = await embed({ model: embeddingModel(modelId), value });
+  const { embedding, usage } = await embed({
+    model: embeddingModel(modelId),
+    value,
+    abortSignal: opts?.abortSignal,
+    maxRetries: opts?.maxRetries,
+  });
   return { embedding, tokens: usage?.tokens ?? null };
 }

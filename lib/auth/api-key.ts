@@ -34,6 +34,8 @@ export interface KeyConfigInput {
   logContent?: boolean;
   /** Owning operator (admin or editor); null = unassigned. Set by the caller. */
   ownerUserId?: string | null;
+  /** Attached knowledgebase for RAG grounding; null = none. */
+  knowledgebaseId?: string | null;
 }
 
 export interface VerifiedKey {
@@ -47,6 +49,8 @@ export interface VerifiedKey {
   rpmLimit: number | null;
   logContent: boolean;
   status: KeyStatus;
+  /** Attached knowledgebase id, or null. Drives query-time RAG retrieval. */
+  knowledgebaseId: string | null;
 }
 
 function hmac(fullKey: string): string {
@@ -94,6 +98,7 @@ export async function issueKey(
       rpmLimit: input.rpmLimit ?? null,
       logContent: input.logContent ?? true,
       ownerUserId: input.ownerUserId ?? null,
+      knowledgebaseId: input.knowledgebaseId ?? null,
     })
     .returning({ id: apiKeys.id });
   return { fullKey: gen.fullKey, id: row.id, prefix: gen.prefix, last4: gen.last4 };
@@ -139,6 +144,7 @@ export async function verifyKey(presented: string): Promise<VerifiedKey | null> 
     rpmLimit: row.rpmLimit,
     logContent: row.logContent,
     status: row.status,
+    knowledgebaseId: row.knowledgebaseId,
   };
 }
 

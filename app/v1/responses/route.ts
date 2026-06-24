@@ -11,6 +11,7 @@ import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
 import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
 import { resolveParams } from '@/lib/gateway/openai-map';
 import { type CallContext } from '@/lib/gateway/call';
+import { systemPromptWithKb } from '@/lib/kb/retrieve';
 import {
   handleResponsesNonStreaming,
   handleResponsesStreaming,
@@ -105,12 +106,14 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  // 6) Assemble the call from the key's config (structured iff the key has a schema).
+  // 6) Assemble the call from the key's config (structured iff the key has a
+  // schema). If the key has a knowledgebase, embed the latest user message and
+  // fold the top-k matches into the system prompt; non-KB keys pay nothing here.
   const structured = key.outputSchema != null;
   const ctx: CallContext = {
     keyId: key.id,
     model: key.model,
-    systemPrompt: key.systemPrompt,
+    systemPrompt: await systemPromptWithKb(key.systemPrompt, key.knowledgebaseId, messages),
     params: resolveParams(key.params),
     structured,
     schema: key.outputSchema,
