@@ -12,6 +12,7 @@ import { usageEvents, usageRollups, requestLogs } from '@/db/schema';
 import { acquireLock, releaseLock } from '@/lib/counters';
 import { sweepStaleUploads } from '@/lib/files/blob';
 import { processEvalRuns } from '@/lib/eval/process';
+import { processKbIngestion } from '@/lib/kb/ingest';
 import { env } from '@/lib/env';
 
 const REQUEST_LOG_RETENTION_DAYS = 30;
@@ -63,6 +64,7 @@ async function rollupRecentDays(): Promise<number> {
 }
 
 export async function GET(req: Request): Promise<Response> {
+  const startedAt = Date.now();
   const auth = req.headers.get('authorization');
   if (auth !== `Bearer ${env.cronSecret()}`) {
     return Response.json({ error: 'unauthorized' }, { status: 401 });
@@ -79,6 +81,9 @@ export async function GET(req: Request): Promise<Response> {
     const cutoff = new Date(Date.now() - REQUEST_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000);
     const purged = await getDb().delete(requestLogs).where(lt(requestLogs.createdAt, cutoff));
     const evals = await processEvalRuns({ batch: 25 });
+    // Give KB whatever budget is left, stopping ~30s before the 300s hard kill
+    // (and inside the 280s lock TTL) so it never gets killed mid-document.
+    const kb = await processKbIngestion({ batch: 5, deadlineMs: startedAt + 270_000 });
     return Response.json({
       ok: true,
       rolledRows: rolled,
@@ -86,6 +91,8 @@ export async function GET(req: Request): Promise<Response> {
       purgedRequestLogs: purged.rowCount ?? 0,
       evalsJudged: evals.judged,
       evalRunsFinalized: evals.finalized,
+      kbIngested: kb.ingested,
+      kbFailed: kb.failed,
     });
   } catch (err) {
     console.error('[cron] rollup failed', err);

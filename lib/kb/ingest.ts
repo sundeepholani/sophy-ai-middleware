@@ -1,0 +1,120 @@
+/**
+ * KB ingestion, driven by the cron. For each pending document: download the
+ * blob, extract text, chunk it, embed the chunks via the gateway, and insert
+ * kb_chunks — then mark the document ingested (or failed, with the reason).
+ *
+ * Bounded per invocation (batch) and idempotent: it only ever picks up
+ * `pending` docs and flips them to a terminal state, and it deletes any chunks
+ * left from a prior partial run before re-inserting — so a crash mid-ingest
+ * just gets retried cleanly on the next cron tick. The cron lock prevents
+ * overlapping invocations, so no extra per-doc claim is needed.
+ */
+import { asc, eq } from 'drizzle-orm';
+import { getDb } from '@/db/client';
+import { kbDocuments, kbChunks, knowledgebases } from '@/db/schema';
+import { extractText } from '@/lib/kb/extract';
+import { chunkText } from '@/lib/kb/chunk';
+import { embedTexts, EMBEDDING_DIM } from '@/lib/kb/embed';
+
+const DOWNLOAD_TIMEOUT_MS = 30_000;
+// Bound the paid embed call: a hung/slow gateway must not eat the whole cron
+// budget. On timeout this throws → the per-doc catch marks the doc 'failed'.
+const EMBED_TIMEOUT_MS = 120_000;
+const INSERT_BATCH = 200; // rows per insert, to bound statement size
+
+export async function processKbIngestion(opts?: { batch?: number; deadlineMs?: number }): Promise<{
+  ingested: number;
+  failed: number;
+}> {
+  const db = getDb();
+  const batch = opts?.batch ?? 5;
+  // Wall-clock budget shared with the rest of the cron. We never *start* a
+  // document we likely can't finish before the function is hard-killed — a
+  // mid-doc kill would just leave it 'pending' and re-do (and re-bill) the
+  // whole thing next tick. Stopping early is clean: the doc is retried later.
+  const deadlineMs = opts?.deadlineMs ?? Infinity;
+
+  const pending = await db
+    .select({
+      id: kbDocuments.id,
+      kbId: kbDocuments.kbId,
+      url: kbDocuments.url,
+      filename: kbDocuments.filename,
+      contentType: kbDocuments.contentType,
+      embeddingModel: knowledgebases.embeddingModel,
+    })
+    .from(kbDocuments)
+    .innerJoin(knowledgebases, eq(kbDocuments.kbId, knowledgebases.id))
+    .where(eq(kbDocuments.status, 'pending'))
+    .orderBy(asc(kbDocuments.createdAt)) // oldest first → deterministic progress
+    .limit(batch);
+
+  let ingested = 0;
+  let failed = 0;
+
+  for (const doc of pending) {
+    if (Date.now() >= deadlineMs) break; // out of budget — leave the rest pending
+    try {
+      // Idempotency: clear any chunks from a prior partial run for this doc.
+      await db.delete(kbChunks).where(eq(kbChunks.documentId, doc.id));
+
+      const res = await fetch(doc.url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+      if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
+      const data = await res.arrayBuffer();
+
+      const text = await extractText({ contentType: doc.contentType ?? '', data });
+      const chunks = chunkText(text);
+      if (chunks.length === 0) throw new Error('no extractable text');
+
+      const { embeddings, tokens } = await embedTexts(doc.embeddingModel, chunks, {
+        abortSignal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
+        maxRetries: 1,
+      });
+      if (embeddings.length !== chunks.length) {
+        throw new Error(`embedding count mismatch: ${embeddings.length} vs ${chunks.length}`);
+      }
+      for (const e of embeddings) {
+        if (!Array.isArray(e) || e.length !== EMBEDDING_DIM) {
+          throw new Error(`unexpected embedding dim ${e?.length} (want ${EMBEDDING_DIM})`);
+        }
+      }
+
+      const rows = chunks.map((content, i) => ({
+        kbId: doc.kbId,
+        documentId: doc.id,
+        chunkIndex: i,
+        content,
+        embedding: embeddings[i],
+      }));
+      for (let i = 0; i < rows.length; i += INSERT_BATCH) {
+        await db.insert(kbChunks).values(rows.slice(i, i + INSERT_BATCH));
+      }
+
+      await db
+        .update(kbDocuments)
+        .set({
+          status: 'ingested',
+          chunkCount: chunks.length,
+          ingestedAt: new Date(),
+          errorMessage: null,
+        })
+        .where(eq(kbDocuments.id, doc.id));
+      ingested++;
+      console.info(
+        `[kb] ingested ${doc.filename} (${doc.id}): ${chunks.length} chunks, ${tokens ?? '?'} embed tokens`,
+      );
+    } catch (err) {
+      await db
+        .update(kbDocuments)
+        .set({
+          status: 'failed',
+          errorMessage: err instanceof Error ? err.message.slice(0, 500) : String(err),
+        })
+        .where(eq(kbDocuments.id, doc.id));
+      failed++;
+      console.error(`[kb] ingestion failed for ${doc.id}`, err);
+    }
+  }
+
+  return { ingested, failed };
+}
