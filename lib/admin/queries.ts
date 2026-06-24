@@ -6,7 +6,7 @@
  * subquery (empty-set-correct), and `and()`/`.where()` ignore the undefined an
  * admin produces — so admins pass through unfiltered with no branching.
  */
-import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import {
   apiKeys,
@@ -15,11 +15,14 @@ import {
   evalRuns,
   evalSamples,
   users,
+  knowledgebases,
+  kbDocuments,
   type KeyParams,
   type EvalRunStatus,
   type EvalWinner,
   type UserRole,
   type UserStatus,
+  type KbDocStatus,
 } from '@/db/schema';
 import type { EvalSummary } from '@/lib/eval/aggregate';
 import { scopeToOwner, type Viewer } from '@/lib/auth/viewer';
@@ -60,6 +63,7 @@ export interface KeyRow {
   status: string;
   ownerUserId: string | null;
   ownerEmail: string | null;
+  knowledgebaseId: string | null;
 }
 
 export async function listKeys(viewer: Viewer): Promise<KeyRow[]> {
@@ -79,6 +83,7 @@ export async function listKeys(viewer: Viewer): Promise<KeyRow[]> {
       status: apiKeys.status,
       ownerUserId: apiKeys.ownerUserId,
       ownerEmail: users.email,
+      knowledgebaseId: apiKeys.knowledgebaseId,
     })
     .from(apiKeys)
     .leftJoin(users, eq(apiKeys.ownerUserId, users.id))
@@ -489,4 +494,94 @@ export async function getKeyEvals(viewer: Viewer, onlyKeyId?: string): Promise<R
     };
   }
   return out;
+}
+
+// ---- Knowledgebases ----------------------------------------------------------
+
+export interface KnowledgebaseRow {
+  id: string;
+  name: string;
+  embeddingModel: string;
+  ownerUserId: string | null;
+  createdAt: Date;
+  documentCount: number;
+  attachedKeyCount: number;
+}
+
+/**
+ * All knowledgebases with their document + attached-key counts. KB management is
+ * admin-only in v1 (the page guards it), so this lists everything — no owner
+ * scoping. Counts come from separate grouped queries (not joins) to avoid the
+ * cartesian inflation two left-joins on the same id would cause.
+ */
+export async function listKnowledgebases(): Promise<KnowledgebaseRow[]> {
+  const db = getDb();
+  const kbs = await db
+    .select({
+      id: knowledgebases.id,
+      name: knowledgebases.name,
+      embeddingModel: knowledgebases.embeddingModel,
+      ownerUserId: knowledgebases.ownerUserId,
+      createdAt: knowledgebases.createdAt,
+    })
+    .from(knowledgebases)
+    .orderBy(desc(knowledgebases.createdAt));
+  if (kbs.length === 0) return [];
+
+  const docCounts = await db
+    .select({ kbId: kbDocuments.kbId, n: sql<string>`count(*)` })
+    .from(kbDocuments)
+    .groupBy(kbDocuments.kbId);
+  const keyCounts = await db
+    .select({ kbId: apiKeys.knowledgebaseId, n: sql<string>`count(*)` })
+    .from(apiKeys)
+    .where(isNotNull(apiKeys.knowledgebaseId))
+    .groupBy(apiKeys.knowledgebaseId);
+
+  const docMap = new Map(docCounts.map((r) => [r.kbId, Number(r.n)]));
+  const keyMap = new Map(keyCounts.map((r) => [r.kbId, Number(r.n)]));
+  return kbs.map((k) => ({
+    ...k,
+    documentCount: docMap.get(k.id) ?? 0,
+    attachedKeyCount: keyMap.get(k.id) ?? 0,
+  }));
+}
+
+/** Lightweight {id,name} list for the key-form knowledgebase picker. */
+export async function listKnowledgebaseOptions(): Promise<{ id: string; name: string }[]> {
+  return getDb()
+    .select({ id: knowledgebases.id, name: knowledgebases.name })
+    .from(knowledgebases)
+    .orderBy(knowledgebases.name);
+}
+
+export interface KbDocumentRow {
+  id: string;
+  filename: string;
+  status: KbDocStatus;
+  chunkCount: number;
+  bytes: number | null;
+  contentType: string | null;
+  errorMessage: string | null;
+  createdAt: Date;
+  ingestedAt: Date | null;
+}
+
+/** Documents in a knowledgebase, newest first. */
+export async function listKbDocuments(kbId: string): Promise<KbDocumentRow[]> {
+  return getDb()
+    .select({
+      id: kbDocuments.id,
+      filename: kbDocuments.filename,
+      status: kbDocuments.status,
+      chunkCount: kbDocuments.chunkCount,
+      bytes: kbDocuments.bytes,
+      contentType: kbDocuments.contentType,
+      errorMessage: kbDocuments.errorMessage,
+      createdAt: kbDocuments.createdAt,
+      ingestedAt: kbDocuments.ingestedAt,
+    })
+    .from(kbDocuments)
+    .where(eq(kbDocuments.kbId, kbId))
+    .orderBy(desc(kbDocuments.createdAt));
 }

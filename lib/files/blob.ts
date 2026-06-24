@@ -180,6 +180,19 @@ export async function assertOwnedBlobs(keyId: string, urls: string[]): Promise<b
   return true;
 }
 
+/**
+ * Delete blob objects by URL (best-effort). Used when an admin deletes a KB
+ * document or knowledgebase — the DB rows are removed by the caller; this just
+ * reclaims the underlying storage. Never throws (a failed delete leaves an
+ * orphan object, which is harmless and out of any namespace we read).
+ */
+export async function deleteBlobObjects(urls: string[]): Promise<void> {
+  if (urls.length === 0) return;
+  await del(urls, { token: env.blobReadWriteToken() }).catch((err) =>
+    console.error('[blob] del failed', err),
+  );
+}
+
 /** Idempotent cron sweep: delete uploads older than N hours. Returns count. */
 export async function sweepStaleUploads(olderThanHours: number): Promise<number> {
   const cutoff = new Date(Date.now() - olderThanHours * 60 * 60 * 1000);
