@@ -362,6 +362,8 @@ export interface EvalJudgment {
   winner: EvalWinner;
   confidence: number;
   reason: string;
+  /** true ⇒ the challenger was shown to the judge as "Response A" (for de-blinding the reason). */
+  orderSwapped: boolean;
 }
 
 export interface KeyEval {
@@ -402,6 +404,7 @@ export async function getKeyEvals(viewer: Viewer): Promise<Record<string, KeyEva
           winner: evalSamples.winner,
           confidence: evalSamples.confidence,
           judgeReason: evalSamples.judgeReason,
+          orderSwapped: evalSamples.orderSwapped,
         })
         .from(evalSamples)
         .where(and(inArray(evalSamples.runId, ids), eq(evalSamples.status, 'judged')))
@@ -414,6 +417,7 @@ export async function getKeyEvals(viewer: Viewer): Promise<Record<string, KeyEva
       winner: (s.winner ?? 'tie') as EvalWinner,
       confidence: s.confidence != null ? Number(s.confidence) : 0,
       reason: s.judgeReason ?? '',
+      orderSwapped: s.orderSwapped,
     });
     judgmentsByRun.set(s.runId, list);
   }

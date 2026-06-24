@@ -40,7 +40,9 @@ const JUDGE_SYSTEM =
   'instruction-following, factual accuracy, and relevance. Explicitly IGNORE response length and ' +
   'verbosity, and do not prefer a response because of its position (A or B). If a response is ' +
   'required to be valid JSON and is not, it loses. If the two are equivalent in quality, answer ' +
-  '"tie". Respond only with the structured verdict (winner, confidence 0-1, one-sentence reason).';
+  '"tie". In the reason, refer to the candidates only as "Response A" and "Response B" in full — ' +
+  'never as a bare "A" or "B". Respond only with the structured verdict (winner, confidence 0-1, ' +
+  'one-sentence reason).';
 
 function renderContent(content: unknown): string {
   if (typeof content === 'string') return content;
