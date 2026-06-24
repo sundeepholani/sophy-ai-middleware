@@ -89,6 +89,30 @@ function shortModel(m: string): string {
 }
 
 /**
+ * The judge grades blind: it sees the two outputs as "Response A"/"Response B"
+ * in a randomized order (orderSwapped ⇒ the challenger was shown as "A"), so its
+ * reason references bare A/B that mean different models from one sample to the
+ * next. Rewrite those to the actual model names so each reason is directly
+ * readable. New reasons say "Response A" in full (exact remap); older bare-letter
+ * reasons are remapped best-effort.
+ */
+function deblindReason(
+  reason: string,
+  orderSwapped: boolean,
+  championModel: string,
+  challengerModel: string,
+): string {
+  if (!reason) return reason;
+  const a = shortModel(orderSwapped ? challengerModel : championModel);
+  const b = shortModel(orderSwapped ? championModel : challengerModel);
+  return reason
+    .replace(/\bResponse A\b/g, a)
+    .replace(/\bResponse B\b/g, b)
+    .replace(/\bA\b/g, a)
+    .replace(/\bB\b/g, b);
+}
+
+/**
  * Per-side presentation, keyed off the judge's winner. We surface the *actual
  * model names* (not "champion"/"challenger") so the operator reads the comparison
  * in concrete terms. Colors are shared by the win bar and the row badges so a
@@ -212,7 +236,9 @@ function JudgmentsList({
               <Badge variant="outline" className={`shrink-0 ${meta.badge}`}>
                 {meta.label}
               </Badge>
-              <span className="text-muted-foreground">{j.reason || '—'}</span>
+              <span className="text-muted-foreground">
+                {deblindReason(j.reason, j.orderSwapped, championModel, challengerModel) || '—'}
+              </span>
             </div>
           );
         })}
