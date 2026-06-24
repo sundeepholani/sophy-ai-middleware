@@ -260,6 +260,6 @@ export async function cancelEvalRun(runId: string): Promise<void> {
  */
 export async function refreshKeyEval(apiKeyId: string): Promise<KeyEval | null> {
   const viewer = await requireViewer();
-  const all = await getKeyEvals(viewer);
+  const all = await getKeyEvals(viewer, apiKeyId);
   return all[apiKeyId] ?? null;
 }

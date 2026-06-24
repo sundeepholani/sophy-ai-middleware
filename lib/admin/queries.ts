@@ -385,13 +385,38 @@ export interface KeyEval {
   completedAt: Date | null;
 }
 
-/** Latest eval run per key (keyed by apiKeyId) for the keys list / eval panel. */
-export async function getKeyEvals(viewer: Viewer): Promise<Record<string, KeyEval>> {
+/**
+ * Latest eval-run STATUS per key (cheap — no samples, no cost aggregation). The
+ * keys table uses this for the "running" dot and to hint the modal's initial
+ * view; the full eval body is fetched lazily when the modal opens (getKeyEvals).
+ */
+export async function getEvalStatuses(viewer: Viewer): Promise<Record<string, EvalRunStatus>> {
+  const rows = await getDb()
+    .select({ apiKeyId: evalRuns.apiKeyId, status: evalRuns.status })
+    .from(evalRuns)
+    .where(scopeToOwner(viewer, evalRuns.apiKeyId))
+    .orderBy(desc(evalRuns.createdAt));
+  const out: Record<string, EvalRunStatus> = {};
+  for (const r of rows) if (!(r.apiKeyId in out)) out[r.apiKeyId] = r.status; // first row = latest run
+  return out;
+}
+
+/**
+ * Full eval state per key (judgments, summary, costs). Heavy — loads judged
+ * samples — so it's fetched lazily per key when the eval modal opens, not at
+ * page render. Pass `onlyKeyId` to scope to a single key.
+ */
+export async function getKeyEvals(viewer: Viewer, onlyKeyId?: string): Promise<Record<string, KeyEval>> {
   const db = getDb();
   const runs = await db
     .select()
     .from(evalRuns)
-    .where(scopeToOwner(viewer, evalRuns.apiKeyId))
+    .where(
+      and(
+        scopeToOwner(viewer, evalRuns.apiKeyId),
+        onlyKeyId ? eq(evalRuns.apiKeyId, onlyKeyId) : undefined,
+      ),
+    )
     .orderBy(desc(evalRuns.createdAt));
   const latestByKey = new Map<string, (typeof runs)[number]>();
   for (const r of runs) if (!latestByKey.has(r.apiKeyId)) latestByKey.set(r.apiKeyId, r);

@@ -1,4 +1,4 @@
-import { listKeys, getKeyEvals, listUsers } from '@/lib/admin/queries';
+import { listKeys, getEvalStatuses, listUsers } from '@/lib/admin/queries';
 import { getSettings } from '@/lib/admin/settings';
 import { requireViewer } from '@/lib/auth/viewer';
 import { listGatewayModels, type AvailableModel } from '@/lib/gateway/models';
@@ -8,9 +8,9 @@ export const dynamic = 'force-dynamic';
 
 export default async function KeysPage() {
   const viewer = await requireViewer();
-  const [keys, evals, settings] = await Promise.all([
+  const [keys, evalStatuses, settings] = await Promise.all([
     listKeys(viewer),
-    getKeyEvals(viewer),
+    getEvalStatuses(viewer),
     getSettings(),
   ]);
   // Owner picker is admin-only; editors always own what they create.
@@ -37,7 +37,7 @@ export default async function KeysPage() {
         keys={keys}
         models={models}
         modelsUnavailable={modelsUnavailable}
-        evals={evals}
+        evalStatuses={evalStatuses}
         judgeModel={settings.judgeModel}
         role={viewer.role}
         users={users}

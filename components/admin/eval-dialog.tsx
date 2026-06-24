@@ -4,6 +4,7 @@ import { useState, useEffect, useTransition } from 'react';
 import { toast } from 'sonner';
 import { startEvalRun, cancelEvalRun, refreshKeyEval } from '@/app/admin/actions';
 import type { KeyEval } from '@/lib/admin/queries';
+import type { EvalRunStatus } from '@/db/schema';
 import type { AvailableModel } from '@/lib/gateway/models';
 import { effectiveWinner } from '@/lib/eval/confidence';
 import { deblindReason, shortModel } from '@/lib/eval/deblind';
@@ -39,28 +40,28 @@ function usd(n: number | null): string {
 export function EvalDialog({
   keyRow,
   models,
-  current,
+  initialStatus,
   judgeModel,
   open,
   onOpenChange,
 }: {
   keyRow: { id: string; name: string; model: string };
   models: AvailableModel[];
-  current: KeyEval | null;
+  /** Latest run status from the keys page (cheap hint); the full body loads on open. */
+  initialStatus?: EvalRunStatus;
   judgeModel: string;
   open: boolean;
   onOpenChange: (o: boolean) => void;
 }) {
-  // `current` is a snapshot taken when the keys page server-rendered. Fetch the
-  // latest on open (and poll while a run is judging) so judgments the background
-  // cron produced after page load appear without a full reload.
-  // Track only freshly-fetched data; `data` falls back to the page-load snapshot
-  // until the first fetch lands. The dialog is remounted per key (key={id} at the
-  // call site), so `fetched` always belongs to this key.
+  // The keys page only passes each key's latest-run STATUS (cheap). The full eval
+  // body — judgments, summary, costs — is fetched here when the modal opens, and
+  // re-fetched every 10s while a run is judging, so the panel is never stale.
+  // The dialog is remounted per key (key={id} at the call site).
   const [fetched, setFetched] = useState<KeyEval | null>(null);
-  const data = fetched ?? current;
-  const running = data?.status === 'running';
-  const completed = data?.status === 'completed' && data.summary;
+  const [loaded, setLoaded] = useState(false);
+  const status = fetched?.status ?? initialStatus ?? null;
+  const running = status === 'running';
+  const completed = fetched?.status === 'completed' && fetched.summary;
 
   useEffect(() => {
     if (!open) return;
@@ -68,12 +69,15 @@ export function EvalDialog({
     const tick = async () => {
       try {
         const fresh = await refreshKeyEval(keyRow.id);
-        if (active && fresh) setFetched(fresh);
+        if (active) {
+          setFetched(fresh);
+          setLoaded(true);
+        }
       } catch {
-        /* keep the last good data on a transient failure */
+        /* keep showing the last good data; the poll retries while running */
       }
     };
-    tick(); // fresh fetch the moment the modal opens
+    tick(); // fetch the full eval the moment the modal opens
     if (!running) return () => void (active = false);
     const id = setInterval(tick, 10_000); // live updates while the judge is scoring
     return () => {
@@ -93,16 +97,18 @@ export function EvalDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {running ? (
-          <RunningView current={data!} onDone={() => onOpenChange(false)} />
+        {!loaded ? (
+          <p className="py-10 text-center text-sm text-muted-foreground">Loading eval…</p>
+        ) : fetched?.status === 'running' ? (
+          <RunningView current={fetched} onDone={() => onOpenChange(false)} />
         ) : (
           <>
-            {completed && <CompletedView current={data!} />}
+            {completed && <CompletedView current={fetched!} />}
             <StartForm
               keyRow={keyRow}
               models={models}
               judgeModel={judgeModel}
-              hasPrevious={!!data}
+              hasPrevious={!!fetched}
               onDone={() => onOpenChange(false)}
             />
           </>
