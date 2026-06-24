@@ -4,6 +4,7 @@
  * isn't configured the send is a no-op and finalization still completes.
  */
 import type { EvalSummary } from '@/lib/eval/aggregate';
+import { deblindReason, shortModel } from '@/lib/eval/deblind';
 import { sendEmail, escapeHtml } from '@/lib/email/send';
 
 /** Back-compat alias — eval finalization sends through the shared sender. */
@@ -42,10 +43,13 @@ export function formatEvalEmail(args: {
       : `${s.projectedMonthlyCostDeltaUsd < 0 ? '−' : '+'}$${Math.abs(s.projectedMonthlyCostDeltaUsd).toFixed(2)}/mo`;
 
   const examples = s.examples
-    .map(
-      (e) =>
-        `<li><b>${e.winner === 'challenger' ? 'Challenger' : 'Champion'} won</b>: ${escapeHtml(e.reason)}</li>`,
-    )
+    .map((e) => {
+      const winnerModel = shortModel(
+        e.winner === 'challenger' ? args.challengerModel : args.championModel,
+      );
+      const reason = deblindReason(e.reason, e.orderSwapped, args.championModel, args.challengerModel);
+      return `<li><b>${escapeHtml(winnerModel)} won</b>: ${escapeHtml(reason)}</li>`;
+    })
     .join('');
 
   const html = `

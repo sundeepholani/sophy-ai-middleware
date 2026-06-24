@@ -1,11 +1,12 @@
 'use client';
 
-import { useState, useTransition } from 'react';
+import { useState, useEffect, useTransition } from 'react';
 import { toast } from 'sonner';
-import { startEvalRun, cancelEvalRun } from '@/app/admin/actions';
+import { startEvalRun, cancelEvalRun, refreshKeyEval } from '@/app/admin/actions';
 import type { KeyEval } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
 import { effectiveWinner } from '@/lib/eval/confidence';
+import { deblindReason, shortModel } from '@/lib/eval/deblind';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -50,8 +51,36 @@ export function EvalDialog({
   open: boolean;
   onOpenChange: (o: boolean) => void;
 }) {
-  const running = current?.status === 'running';
-  const completed = current?.status === 'completed' && current.summary;
+  // `current` is a snapshot taken when the keys page server-rendered. Fetch the
+  // latest on open (and poll while a run is judging) so judgments the background
+  // cron produced after page load appear without a full reload.
+  // Track only freshly-fetched data; `data` falls back to the page-load snapshot
+  // until the first fetch lands. The dialog is remounted per key (key={id} at the
+  // call site), so `fetched` always belongs to this key.
+  const [fetched, setFetched] = useState<KeyEval | null>(null);
+  const data = fetched ?? current;
+  const running = data?.status === 'running';
+  const completed = data?.status === 'completed' && data.summary;
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    const tick = async () => {
+      try {
+        const fresh = await refreshKeyEval(keyRow.id);
+        if (active && fresh) setFetched(fresh);
+      } catch {
+        /* keep the last good data on a transient failure */
+      }
+    };
+    tick(); // fresh fetch the moment the modal opens
+    if (!running) return () => void (active = false);
+    const id = setInterval(tick, 10_000); // live updates while the judge is scoring
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [open, keyRow.id, running]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -65,15 +94,15 @@ export function EvalDialog({
         </DialogHeader>
 
         {running ? (
-          <RunningView current={current!} onDone={() => onOpenChange(false)} />
+          <RunningView current={data!} onDone={() => onOpenChange(false)} />
         ) : (
           <>
-            {completed && <CompletedView current={current!} />}
+            {completed && <CompletedView current={data!} />}
             <StartForm
               keyRow={keyRow}
               models={models}
               judgeModel={judgeModel}
-              hasPrevious={!!current}
+              hasPrevious={!!data}
               onDone={() => onOpenChange(false)}
             />
           </>
@@ -81,35 +110,6 @@ export function EvalDialog({
       </DialogContent>
     </Dialog>
   );
-}
-
-/** Short, scannable model name for dense rows (drop the provider prefix). */
-function shortModel(m: string): string {
-  return m.split('/').pop() || m;
-}
-
-/**
- * The judge grades blind: it sees the two outputs as "Response A"/"Response B"
- * in a randomized order (orderSwapped ⇒ the challenger was shown as "A"), so its
- * reason references bare A/B that mean different models from one sample to the
- * next. Rewrite those to the actual model names so each reason is directly
- * readable. New reasons say "Response A" in full (exact remap); older bare-letter
- * reasons are remapped best-effort.
- */
-function deblindReason(
-  reason: string,
-  orderSwapped: boolean,
-  championModel: string,
-  challengerModel: string,
-): string {
-  if (!reason) return reason;
-  const a = shortModel(orderSwapped ? challengerModel : championModel);
-  const b = shortModel(orderSwapped ? championModel : challengerModel);
-  return reason
-    .replace(/\bResponse A\b/g, a)
-    .replace(/\bResponse B\b/g, b)
-    .replace(/\bA\b/g, a)
-    .replace(/\bB\b/g, b);
 }
 
 /**

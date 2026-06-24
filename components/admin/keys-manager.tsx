@@ -226,6 +226,7 @@ export function KeysManager({
       {/* Eval modal */}
       {evalKey && (
         <EvalDialog
+          key={evalKey.id}
           keyRow={{ id: evalKey.id, name: evalKey.name, model: evalKey.model }}
           models={models}
           current={evals[evalKey.id] ?? null}
