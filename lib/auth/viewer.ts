@@ -6,6 +6,7 @@
  * by every server action, and scopeToOwner() is the single source of truth used
  * by every read query — so a new surface can't accidentally leak across owners.
  */
+import { cache } from 'react';
 import { eq, inArray, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { getDb } from '@/db/client';
@@ -20,8 +21,13 @@ export type Viewer = CurrentUser; // { userId, role, email }
  * request — so deactivation and role changes take effect immediately (like key
  * revocation), not only when the 8h cookie expires. (Legacy single-admin cookies
  * have no userId → null → must re-login via magic link.)
+ *
+ * cache() dedupes this within a single server request, so the layout and the page
+ * (and every guard) share ONE user read per render instead of each hitting the DB.
+ * It memoizes per-request only — a new request still re-reads, so role/status
+ * changes remain immediate.
  */
-export async function getViewer(): Promise<Viewer | null> {
+export const getViewer = cache(async (): Promise<Viewer | null> => {
   const s = await currentUser();
   if (!s) return null;
   const [u] = await getDb()
@@ -31,7 +37,7 @@ export async function getViewer(): Promise<Viewer | null> {
     .limit(1);
   if (!u || u.status !== 'active') return null;
   return { userId: s.userId, role: u.role, email: s.email };
-}
+});
 
 export async function requireViewer(): Promise<Viewer> {
   const v = await getViewer();
