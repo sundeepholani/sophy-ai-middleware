@@ -26,7 +26,7 @@ import {
   assertCanManageRun,
   requireViewer,
 } from '@/lib/auth/viewer';
-import { issueKey } from '@/lib/auth/api-key';
+import { issueKey, generateKey } from '@/lib/auth/api-key';
 import { getSettings } from '@/lib/admin/settings';
 import { getKeyEvals, type KeyEval } from '@/lib/admin/queries';
 
@@ -231,6 +231,46 @@ export async function revokeKey(id: string): Promise<void> {
   // Revocation is instant: verifyKey() reads `status` fresh on every request.
   await audit(viewer.email, 'key.revoke', id, null);
   revalidatePath('/admin/keys');
+}
+
+/**
+ * Rotate a key's secret: mint a fresh full key and swap the stored
+ * prefix/hash/last4 on the SAME row — so all config, usage history, owner, and
+ * any attached knowledgebase are preserved, but the old secret stops working
+ * immediately (verifyKey() reads the hash fresh every request; there is no
+ * grace window). The new full key is returned once, like issuance. Only active
+ * keys can be rotated (rotating a revoked key would silently un-revoke it).
+ */
+export async function rotateKey(id: string): Promise<{ fullKey: string }> {
+  const { viewer, status } = await assertCanManageKey(id);
+  if (status !== 'active') throw new Error('Only an active key can be rotated');
+
+  // Retry on the (astronomically rare) key_prefix unique-constraint collision so
+  // rotation is self-healing, mirroring startEvalRun's 23505 handling.
+  let issued: ReturnType<typeof generateKey> | null = null;
+  for (let attempt = 0; attempt < 3 && !issued; attempt++) {
+    const gen = generateKey();
+    try {
+      const res = await getDb()
+        .update(apiKeys)
+        .set({ keyPrefix: gen.prefix, keyHash: gen.hash, keyLast4: gen.last4 })
+        .where(and(eq(apiKeys.id, id), eq(apiKeys.status, 'active')))
+        .returning({ id: apiKeys.id });
+      if (res.length === 0) break; // revoked/deleted out from under us — don't retry
+      issued = gen;
+    } catch (e) {
+      // Fresh prefix collided with another key — try again with new randomness.
+      if (e && typeof e === 'object' && 'code' in e && (e as { code?: string }).code === '23505') {
+        continue;
+      }
+      throw e;
+    }
+  }
+  if (!issued) throw new Error('Key not found or not active');
+
+  await audit(viewer.email, 'key.rotate', id, { keyPrefix: issued.prefix, keyLast4: issued.last4 });
+  revalidatePath('/admin/keys');
+  return { fullKey: issued.fullKey };
 }
 
 // ---- Model eval runs --------------------------------------------------------
