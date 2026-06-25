@@ -2,8 +2,8 @@
 
 import { useId, useState, useTransition } from 'react';
 import { toast } from 'sonner';
-import { Plus, Pencil, FlaskConical, Ban } from 'lucide-react';
-import { createKey, updateKey, revokeKey, type KeyFormInput } from '@/app/admin/actions';
+import { Plus, Pencil, FlaskConical, Ban, RotateCw } from 'lucide-react';
+import { createKey, updateKey, revokeKey, rotateKey, type KeyFormInput } from '@/app/admin/actions';
 import type { KeyRow } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
 import type { SessionRole } from '@/lib/auth/session-config';
@@ -87,6 +87,9 @@ export function KeysManager({
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<KeyRow | null>(null);
   const [issued, setIssued] = useState<string | null>(null);
+  // Whether the revealed key came from a rotation (vs. a fresh create) — only
+  // affects the reveal dialog's wording.
+  const [rotated, setRotated] = useState(false);
   const [evalKey, setEvalKey] = useState<KeyRow | null>(null);
 
   async function copyIssued() {
@@ -125,7 +128,10 @@ export function KeysManager({
               role={role}
               users={users}
               knowledgebases={knowledgebases}
-              onIssued={setIssued}
+              onIssued={(k) => {
+                setRotated(false);
+                setIssued(k);
+              }}
               onDone={() => setCreateOpen(false)}
             />
           </DialogContent>
@@ -196,6 +202,16 @@ export function KeysManager({
                       )}
                     </Button>
                   )}
+                  {k.status === 'active' && (
+                    <RotateButton
+                      id={k.id}
+                      name={k.name}
+                      onRotated={(key) => {
+                        setRotated(true);
+                        setIssued(key);
+                      }}
+                    />
+                  )}
                   {k.status === 'active' && <RevokeButton id={k.id} name={k.name} />}
                 </TableCell>
               </TableRow>
@@ -252,16 +268,24 @@ export function KeysManager({
       >
         <DialogContent showCloseButton={false} className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>API key created</DialogTitle>
+            <DialogTitle>{rotated ? 'API key rotated' : 'API key created'}</DialogTitle>
             <DialogDescription>
-              Copy this now — it is shown only once and cannot be retrieved later.
+              {rotated
+                ? 'The previous key has stopped working. Copy the new key now — it is shown only once and cannot be retrieved later.'
+                : 'Copy this now — it is shown only once and cannot be retrieved later.'}
             </DialogDescription>
           </DialogHeader>
           <code className="block select-all break-all rounded-md bg-muted p-3 text-sm">
             {issued}
           </code>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setIssued(null)}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setIssued(null);
+                setRotated(false);
+              }}
+            >
               I&apos;ve saved my key
             </Button>
             <Button onClick={copyIssued}>Copy</Button>
@@ -314,6 +338,67 @@ function RevokeButton({ id, name }: { id: string; name: string }) {
               }}
             >
               Revoke
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
+
+function RotateButton({
+  id,
+  name,
+  onRotated,
+}: {
+  id: string;
+  name: string;
+  onRotated: (fullKey: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [isPending, startTransition] = useTransition();
+  return (
+    <>
+      <Button
+        size="icon-sm"
+        variant="ghost"
+        aria-label="Rotate key"
+        title="Rotate"
+        onClick={() => setOpen(true)}
+      >
+        <RotateCw className="h-3.5 w-3.5" />
+      </Button>
+      <AlertDialog open={open} onOpenChange={setOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Rotate “{name}”?</AlertDialogTitle>
+            <AlertDialogDescription>
+              A new secret is generated and shown once. The current key stops working
+              immediately, so update anything using it right away. The model, prompt, quota,
+              owner, and any attached knowledgebase are kept.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={isPending}
+              onClick={(e) => {
+                e.preventDefault();
+                startTransition(async () => {
+                  try {
+                    const { fullKey } = await rotateKey(id);
+                    setOpen(false);
+                    onRotated(fullKey);
+                    toast.success('Key rotated');
+                  } catch (err) {
+                    toast.error(
+                      err instanceof Error && err.message ? err.message : 'Failed to rotate',
+                    );
+                  }
+                });
+              }}
+            >
+              Rotate
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
