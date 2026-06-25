@@ -10,6 +10,7 @@ import {
   Settings,
   Users,
   Library,
+  Boxes,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { SessionRole } from '@/lib/auth/session-config';
@@ -17,6 +18,7 @@ import type { SessionRole } from '@/lib/auth/session-config';
 const ITEMS = [
   { href: '/admin', label: 'Overview', icon: LayoutDashboard },
   { href: '/admin/keys', label: 'API Keys', icon: KeyRound },
+  { href: '/admin/models', label: 'Models', icon: Boxes },
   { href: '/admin/usage', label: 'Usage', icon: BarChart3 },
   { href: '/admin/logs', label: 'Logs', icon: ScrollText },
   { href: '/admin/knowledgebases', label: 'Knowledgebases', icon: Library, adminOnly: true },
