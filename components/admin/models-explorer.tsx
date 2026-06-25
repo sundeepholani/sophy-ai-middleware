@@ -80,11 +80,11 @@ export function ModelsExplorer({ models }: { models: AvailableModel[] }) {
         case 'type':
           return dir * (a.type.localeCompare(b.type) || a.id.localeCompare(b.id));
         case 'context':
-          return dir * (num(a.contextWindow) - num(b.contextWindow));
+          return dir * ((num(a.contextWindow) - num(b.contextWindow)) || a.id.localeCompare(b.id));
         case 'input':
-          return dir * (num(a.inputPerMTok) - num(b.inputPerMTok));
+          return dir * ((num(a.inputPerMTok) - num(b.inputPerMTok)) || a.id.localeCompare(b.id));
         case 'output':
-          return dir * (num(a.outputPerMTok) - num(b.outputPerMTok));
+          return dir * ((num(a.outputPerMTok) - num(b.outputPerMTok)) || a.id.localeCompare(b.id));
         default:
           return dir * (a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
       }

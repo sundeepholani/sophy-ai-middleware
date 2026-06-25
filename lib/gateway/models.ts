@@ -27,12 +27,12 @@ interface RawGatewayModel {
 }
 
 function perMillion(rate: string | undefined): number | null {
-  if (rate == null) return null;
+  if (rate == null || rate.trim() === '') return null; // unknown ≠ free($0)
   const n = Number(rate);
   return Number.isFinite(n) ? n * 1_000_000 : null;
 }
 
-async function fetchCatalog(): Promise<AvailableModel[]> {
+async function fetchFresh(): Promise<AvailableModel[]> {
   const headers: Record<string, string> = {};
   // The list is public, but sending the gateway key when present avoids any
   // unauthenticated rate limiting. OIDC (request path) also works unauthenticated.
@@ -42,8 +42,6 @@ async function fetchCatalog(): Promise<AvailableModel[]> {
   const res = await fetch(GATEWAY_MODELS_URL, {
     headers,
     signal: AbortSignal.timeout(10_000),
-    // The catalog changes infrequently — cache it for an hour across requests.
-    next: { revalidate: 3600 },
   });
   if (!res.ok) throw new Error(`gateway models request failed: ${res.status}`);
   const json = (await res.json()) as { data?: RawGatewayModel[]; models?: RawGatewayModel[] };
@@ -63,6 +61,25 @@ async function fetchCatalog(): Promise<AvailableModel[]> {
       tags: Array.isArray(m.tags) ? m.tags : [],
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// Module-level cache: the admin pages that read the catalog are force-dynamic,
+// which disables Next's fetch Data Cache — so we memoize here instead. The
+// catalog changes infrequently; a warm instance reuses it for an hour, and a
+// transient gateway failure falls back to the last good copy rather than throwing.
+const CATALOG_TTL_MS = 60 * 60 * 1000;
+let catalog: { at: number; data: AvailableModel[] } | null = null;
+
+async function fetchCatalog(): Promise<AvailableModel[]> {
+  if (catalog && Date.now() - catalog.at < CATALOG_TTL_MS) return catalog.data;
+  try {
+    const data = await fetchFresh();
+    catalog = { at: Date.now(), data };
+    return data;
+  } catch (err) {
+    if (catalog) return catalog.data; // serve stale on a transient gateway blip
+    throw err;
+  }
 }
 
 /** Every model in the catalog (all types), for the Models reference screen. */
