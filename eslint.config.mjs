@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Generated build output anywhere (e.g. nested git worktrees) and the
+    // harness's scratch worktree dir — never lint generated/scratch files.
+    "**/.next/**",
+    ".claude/**",
   ]),
 ]);
 

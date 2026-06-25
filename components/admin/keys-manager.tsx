@@ -10,6 +10,8 @@ import type { SessionRole } from '@/lib/auth/session-config';
 import type { EvalRunStatus } from '@/db/schema';
 import { EvalDialog } from '@/components/admin/eval-dialog';
 import { ModelCombobox } from '@/components/admin/model-combobox';
+import { CapabilityCheckboxes } from '@/components/admin/capability-checkboxes';
+import { modelHasAllTags, capabilityLabel } from '@/lib/gateway/capabilities';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -448,7 +450,18 @@ function KeyForm({
   );
   const [ownerUserId, setOwnerUserId] = useState(initial?.ownerUserId ?? '');
   const [knowledgebaseId, setKnowledgebaseId] = useState(initial?.knowledgebaseId ?? '');
+  // Client-side filter aid (not persisted): narrow the model picker to models
+  // that have ALL the ticked capabilities.
+  const [requiredCaps, setRequiredCaps] = useState<string[]>([]);
   const [showAdvanced, setShowAdvanced] = useState(false);
+
+  const filteredModels = requiredCaps.length
+    ? models.filter((m) => modelHasAllTags(m, requiredCaps))
+    : models;
+  const currentModel = models.find((m) => m.id === model);
+  const missingCaps = currentModel
+    ? requiredCaps.filter((c) => !currentModel.tags.includes(c))
+    : [];
 
   function submit() {
     if (!name.trim()) return toast.error('Name is required');
@@ -573,7 +586,7 @@ function KeyForm({
         />
       </div>
 
-      <div className="space-y-1">
+      <div className="space-y-1.5">
         <Label htmlFor={`${uid}-model`} className="text-xs">
           Model
         </Label>
@@ -581,10 +594,41 @@ function KeyForm({
           id={`${uid}-model`}
           value={model}
           onValueChange={setModel}
-          models={models.map((m) => m.id)}
+          models={filteredModels.map((m) => m.id)}
           modelsUnavailable={modelsUnavailable}
           placeholder="anthropic/claude-sonnet-4.6"
         />
+        {models.length > 0 && (
+          <div className="space-y-1.5 rounded-md border p-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground">
+                Filter by capability
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {filteredModels.length} of {models.length} models
+              </span>
+            </div>
+            <CapabilityCheckboxes
+              selected={requiredCaps}
+              onToggle={(tag) =>
+                setRequiredCaps((prev) =>
+                  prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
+                )
+              }
+              idPrefix={`${uid}-cap`}
+            />
+            {requiredCaps.length > 0 && filteredModels.length === 0 && (
+              <p className="text-xs text-muted-foreground">
+                No models provide all selected capabilities — clear some, or type a model id.
+              </p>
+            )}
+            {missingCaps.length > 0 && (
+              <p className="text-xs text-amber-600 dark:text-amber-500">
+                The selected model doesn’t provide: {missingCaps.map(capabilityLabel).join(', ')}.
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       {role === 'admin' && (
