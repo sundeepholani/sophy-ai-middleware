@@ -162,11 +162,7 @@ export function ModelsExplorer({ models }: { models: AvailableModel[] }) {
                       <span className="text-xs text-muted-foreground">—</span>
                     )}
                     {orderedTags(m.tags).map((t) => (
-                      <Badge
-                        key={t}
-                        variant={t === 'vision' ? 'default' : 'secondary'}
-                        className="text-xs font-normal"
-                      >
+                      <Badge key={t} variant="secondary" className="text-xs font-normal">
                         {capabilityLabel(t)}
                       </Badge>
                     ))}
