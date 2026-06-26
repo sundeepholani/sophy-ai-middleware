@@ -33,13 +33,25 @@ export default async function LogDetailPage({
   const { event, content } = detail;
   const messages = Array.isArray(content?.request) ? (content!.request as InboundMessage[]) : null;
 
+  // Build the metadata line from whatever is present so absent parts (e.g. a
+  // challenger call has no token counts) never leave an orphan separator.
+  const meta = [
+    event.inputTokens != null ? `${event.inputTokens} in · ${event.outputTokens} out` : null,
+    event.costUsd ? `$${Number(event.costUsd).toFixed(4)}` : null,
+    event.latencyMs != null ? `${event.latencyMs} ms` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   return (
     <div className="space-y-6">
       <div>
         <Link href="/admin/logs" className="text-sm text-primary hover:underline">
           ← Logs
         </Link>
-        <h1 className="mt-1 text-2xl font-semibold">Request detail</h1>
+        <h1 className="mt-1 text-2xl font-semibold">
+          {event.source === 'challenger' ? 'Eval challenger call' : 'Request detail'}
+        </h1>
         <p className="text-sm text-muted-foreground">
           <LocalTime value={event.createdAt.toISOString()} /> · key{' '}
           {event.keyName ?? event.apiKeyId.slice(0, 8)} ·{' '}
@@ -47,15 +59,29 @@ export default async function LogDetailPage({
         </p>
       </div>
 
+      {event.source === 'challenger' && (
+        <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm">
+          This is a model-eval <span className="font-medium">challenger</span> call — a shadow replay
+          of a captured request through <span className="font-mono">{event.model}</span>
+          {event.championModel && (
+            <>
+              {' '}
+              vs. champion <span className="font-mono">{event.championModel}</span>
+            </>
+          )}
+          . Its cost is tracked by the eval, not billed to the key.{' '}
+          <Link href="/admin/keys" className="text-primary hover:underline">
+            View evals
+          </Link>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <Badge variant={event.status === 'ok' ? 'default' : 'destructive'}>{event.status}</Badge>
+        {event.source === 'challenger' && <Badge variant="secondary">challenger</Badge>}
         {content?.surface && <Badge variant="outline">{content.surface}</Badge>}
         {event.streamed && <Badge variant="outline">stream</Badge>}
-        <span className="text-muted-foreground">
-          {event.inputTokens} in · {event.outputTokens} out
-          {event.costUsd ? ` · $${Number(event.costUsd).toFixed(4)}` : ''}
-          {event.latencyMs != null ? ` · ${event.latencyMs} ms` : ''}
-        </span>
+        {meta && <span className="text-muted-foreground">{meta}</span>}
       </div>
 
       {!content && (

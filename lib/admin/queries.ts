@@ -23,6 +23,8 @@ import {
   type UserRole,
   type UserStatus,
   type KbDocStatus,
+  type UsageStatus,
+  type ResponseKind,
 } from '@/db/schema';
 import type { EvalSummary } from '@/lib/eval/aggregate';
 import { scopeToOwner, type Viewer } from '@/lib/auth/viewer';
@@ -271,7 +273,37 @@ export async function listUsedModels(viewer: Viewer): Promise<string[]> {
   return rows.map((r) => r.model).filter((m): m is string => !!m);
 }
 
-export async function getLogDetail(viewer: Viewer, id: string) {
+export interface LogDetailEvent {
+  id: string;
+  source: LogSource;
+  createdAt: Date;
+  apiKeyId: string;
+  keyName: string | null;
+  provider: string | null;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: string | null;
+  latencyMs: number | null;
+  status: UsageStatus;
+  streamed: boolean;
+  responseKind: ResponseKind | null;
+  errorMessage: string | null;
+  /** Challenger calls only: the champion model and the eval run id. */
+  championModel: string | null;
+  evalRunId: string | null;
+}
+export interface LogDetailContent {
+  surface: string | null;
+  systemPrompt: string | null;
+  request: unknown;
+  response: string | null;
+}
+
+export async function getLogDetail(
+  viewer: Viewer,
+  id: string,
+): Promise<{ event: LogDetailEvent; content: LogDetailContent | null } | null> {
   const db = getDb();
   // Owner scope ANDs with the id, so an editor requesting another user's event id
   // gets no row (→ the page 404s) rather than someone else's content.
@@ -296,41 +328,187 @@ export async function getLogDetail(viewer: Viewer, id: string) {
     .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
     .where(and(eq(usageEvents.id, id), scopeToOwner(viewer, usageEvents.apiKeyId)))
     .limit(1);
-  if (!event) return null;
-  const [content] = await db
+  if (event) {
+    const [content] = await db
+      .select({
+        surface: requestLogs.surface,
+        systemPrompt: requestLogs.systemPrompt,
+        request: requestLogs.request,
+        response: requestLogs.response,
+      })
+      .from(requestLogs)
+      .where(eq(requestLogs.id, id))
+      .limit(1);
+    return {
+      event: { ...event, source: 'proxy', championModel: null, evalRunId: null },
+      content: content ?? null,
+    };
+  }
+
+  // Not a proxy request — try an eval challenger call (eval_samples row). uuids
+  // are random, so an id matches at most one of the two tables.
+  const [sample] = await db
     .select({
-      surface: requestLogs.surface,
-      systemPrompt: requestLogs.systemPrompt,
-      request: requestLogs.request,
-      response: requestLogs.response,
+      id: evalSamples.id,
+      createdAt: CHALLENGER_TS,
+      apiKeyId: evalRuns.apiKeyId,
+      keyName: apiKeys.name,
+      model: evalRuns.challengerModel,
+      championModel: evalRuns.championModel,
+      evalRunId: evalRuns.id,
+      costUsd: evalSamples.challengerCostUsd,
+      latencyMs: evalSamples.challengerLatencyMs,
+      sampleStatus: evalSamples.status,
+      errorMessage: evalSamples.errorMessage,
+      surface: evalSamples.surface,
+      systemPrompt: evalSamples.systemPrompt,
+      request: evalSamples.request,
+      response: evalSamples.challengerOutput,
+      structured: evalSamples.structured,
     })
-    .from(requestLogs)
-    .where(eq(requestLogs.id, id))
+    .from(evalSamples)
+    .innerJoin(evalRuns, eq(evalSamples.runId, evalRuns.id))
+    .leftJoin(apiKeys, eq(evalRuns.apiKeyId, apiKeys.id))
+    // Same gate as the list: only surface samples whose challenger was attempted
+    // ('pending' = not yet run → 404 rather than a misleading 'error' detail).
+    .where(
+      and(
+        eq(evalSamples.id, id),
+        inArray(evalSamples.status, ['judged', 'failed']),
+        scopeToOwner(viewer, evalRuns.apiKeyId),
+      ),
+    )
     .limit(1);
-  return { event, content: content ?? null };
+  if (!sample) return null;
+  return {
+    event: {
+      id: sample.id,
+      source: 'challenger',
+      createdAt: new Date(sample.createdAt),
+      apiKeyId: sample.apiKeyId,
+      keyName: sample.keyName,
+      provider: null,
+      model: sample.model,
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: sample.costUsd,
+      latencyMs: sample.latencyMs,
+      status: sample.sampleStatus === 'judged' ? 'ok' : 'error',
+      streamed: false,
+      responseKind: sample.structured ? 'structured' : 'text',
+      errorMessage: sample.errorMessage,
+      championModel: sample.championModel,
+      evalRunId: sample.evalRunId,
+    },
+    content: {
+      surface: sample.surface,
+      systemPrompt: sample.systemPrompt,
+      request: sample.request,
+      response: sample.response,
+    },
+  };
 }
 
-export async function getRecentLogs(viewer: Viewer, limit = 100) {
-  return getDb()
-    .select({
-      id: usageEvents.id,
-      createdAt: usageEvents.createdAt,
-      apiKeyId: usageEvents.apiKeyId,
-      keyName: apiKeys.name,
-      provider: usageEvents.provider,
-      model: usageEvents.model,
-      inputTokens: usageEvents.inputTokens,
-      outputTokens: usageEvents.outputTokens,
-      costUsd: usageEvents.costUsd,
-      status: usageEvents.status,
-      streamed: usageEvents.streamed,
-      responseKind: usageEvents.responseKind,
-    })
-    .from(usageEvents)
-    .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
-    .where(scopeToOwner(viewer, usageEvents.apiKeyId))
-    .orderBy(desc(usageEvents.createdAt))
-    .limit(limit);
+/** A request log row — either a live proxy request or an eval challenger call. */
+export type LogSource = 'proxy' | 'challenger';
+export interface LogListRow {
+  id: string;
+  source: LogSource;
+  createdAt: Date;
+  apiKeyId: string;
+  keyName: string | null;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: string | null;
+  status: UsageStatus;
+  streamed: boolean;
+  responseKind: ResponseKind | null;
+}
+
+// `coalesce(judged_at, created_at)` — when the challenger actually ran (judge
+// time), falling back to capture time. Typed as a string: drizzle date-maps
+// timestamp *columns* to Date, but a raw `sql` expression comes back as the raw
+// driver string, so callers must wrap it in `new Date(...)`.
+const CHALLENGER_TS = sql<string>`coalesce(${evalSamples.judgedAt}, ${evalSamples.createdAt})`;
+
+/**
+ * Recent request logs. Proxy requests come from usage_events; eval **challenger**
+ * calls come from eval_samples (their cost is shadow cost, deliberately kept out
+ * of usage_events / quota / the usage charts). The two sources are fetched
+ * separately, merged, and sliced — `source` lets the UI label challenger rows.
+ */
+export async function getRecentLogs(
+  viewer: Viewer,
+  limit = 100,
+  source?: LogSource,
+): Promise<LogListRow[]> {
+  const db = getDb();
+  const rows: LogListRow[] = [];
+
+  if (source !== 'challenger') {
+    const proxy = await db
+      .select({
+        id: usageEvents.id,
+        createdAt: usageEvents.createdAt,
+        apiKeyId: usageEvents.apiKeyId,
+        keyName: apiKeys.name,
+        model: usageEvents.model,
+        inputTokens: usageEvents.inputTokens,
+        outputTokens: usageEvents.outputTokens,
+        costUsd: usageEvents.costUsd,
+        status: usageEvents.status,
+        streamed: usageEvents.streamed,
+        responseKind: usageEvents.responseKind,
+      })
+      .from(usageEvents)
+      .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
+      .where(scopeToOwner(viewer, usageEvents.apiKeyId))
+      .orderBy(desc(usageEvents.createdAt))
+      .limit(limit);
+    for (const r of proxy) rows.push({ ...r, source: 'proxy' });
+  }
+
+  if (source !== 'proxy') {
+    const challenger = await db
+      .select({
+        id: evalSamples.id,
+        createdAt: CHALLENGER_TS,
+        apiKeyId: evalRuns.apiKeyId,
+        keyName: apiKeys.name,
+        model: evalRuns.challengerModel,
+        costUsd: evalSamples.challengerCostUsd,
+        sampleStatus: evalSamples.status,
+        structured: evalSamples.structured,
+      })
+      .from(evalSamples)
+      .innerJoin(evalRuns, eq(evalSamples.runId, evalRuns.id))
+      .leftJoin(apiKeys, eq(evalRuns.apiKeyId, apiKeys.id))
+      // 'judged'/'failed' = the challenger was attempted (pending = not yet run).
+      .where(
+        and(inArray(evalSamples.status, ['judged', 'failed']), scopeToOwner(viewer, evalRuns.apiKeyId)),
+      )
+      .orderBy(desc(CHALLENGER_TS))
+      .limit(limit);
+    for (const r of challenger)
+      rows.push({
+        id: r.id,
+        source: 'challenger',
+        createdAt: new Date(r.createdAt),
+        apiKeyId: r.apiKeyId,
+        keyName: r.keyName,
+        model: r.model,
+        inputTokens: null, // not captured for the challenger replay
+        outputTokens: null,
+        costUsd: r.costUsd,
+        status: r.sampleStatus === 'judged' ? 'ok' : 'error',
+        streamed: false,
+        responseKind: r.structured ? 'structured' : 'text',
+      });
+  }
+
+  rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  return rows.slice(0, limit);
 }
 
 // ---- Users (admin-only screen) ----------------------------------------------
