@@ -9,7 +9,7 @@
  */
 import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
 import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
-import { toModelMessages, resolveParams } from '@/lib/gateway/openai-map';
+import { toModelMessages, resolveParams, toAiToolSet } from '@/lib/gateway/openai-map';
 import { handleNonStreaming, handleStreaming, type CallContext } from '@/lib/gateway/call';
 import { systemPromptWithKb } from '@/lib/kb/retrieve';
 import { assertOwnedBlobs, extractReferencedUrls } from '@/lib/files/blob';
@@ -45,16 +45,27 @@ export async function POST(req: Request): Promise<Response> {
     });
   }
 
-  // 3) Reject tool/function calling (not supported — never silently drop).
-  if (
-    (Array.isArray(body.tools) && body.tools.length > 0) ||
-    (Array.isArray(body.functions) && body.functions.length > 0) ||
-    (body.tool_choice != null && body.tool_choice !== 'none')
-  ) {
-    return openAiError(400, 'invalid_request_error', 'Tool/function calling is not supported.', {
-      param: 'tools',
-      code: 'tools_unsupported',
-    });
+  // 3) Tools: client `tools` pass through to the model (Sophy returns the calls;
+  // it never executes them). The legacy top-level `functions` param is still
+  // unsupported — clients should use `tools`.
+  if (Array.isArray(body.functions) && body.functions.length > 0) {
+    return openAiError(
+      400,
+      'invalid_request_error',
+      'The legacy `functions` parameter is not supported — use `tools`.',
+      { param: 'functions', code: 'functions_unsupported' },
+    );
+  }
+  const aiTools = toAiToolSet(body.tools, body.tool_choice);
+  // A key with forced structured output can't also do tool calling — they
+  // compete for the model's output channel.
+  if (aiTools && key.outputSchema) {
+    return openAiError(
+      400,
+      'invalid_request_error',
+      'Tool calling is not available on a key configured for structured output.',
+      { param: 'tools', code: 'tools_unsupported' },
+    );
   }
 
   // 4) Rate limit + quota pre-check (limits come from the key).
@@ -107,6 +118,8 @@ export async function POST(req: Request): Promise<Response> {
     schema: key.outputSchema,
     includeUsage: body.stream_options?.include_usage === true,
     logContent: key.logContent,
+    tools: aiTools?.tools,
+    toolChoice: aiTools?.toolChoice,
   };
 
   // 7) Stream or buffer.

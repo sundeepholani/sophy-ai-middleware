@@ -61,11 +61,39 @@ export interface OpenAIFilePart {
 }
 export type OpenAIContentPart = OpenAITextPart | OpenAIImagePart | OpenAIFilePart;
 
+/** A function tool call emitted by the model (assistant message) or echoed back. */
+export interface OpenAIToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
 export interface OpenAIMessage {
   role: OpenAIRole;
   content: string | OpenAIContentPart[] | null;
   name?: string;
+  /** On an assistant turn: the tool calls the model previously made. */
+  tool_calls?: OpenAIToolCall[];
+  /** On a `tool` turn: which assistant tool call this result answers. */
+  tool_call_id?: string;
 }
+
+// ---- Tool definitions (client-supplied) ------------------------------------
+
+export interface OpenAIFunctionDef {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+export interface OpenAITool {
+  type: 'function';
+  function: OpenAIFunctionDef;
+}
+export type OpenAIToolChoice =
+  | 'auto'
+  | 'none'
+  | 'required'
+  | { type: 'function'; function: { name: string } };
 
 export interface OpenAIResponseFormat {
   type: 'text' | 'json_object' | 'json_schema';
@@ -86,10 +114,10 @@ export interface ChatCompletionRequest {
   stream?: boolean;
   stream_options?: { include_usage?: boolean };
   response_format?: OpenAIResponseFormat;
-  // Tool-calling fields — rejected in v1 (see plan).
-  tools?: unknown[];
+  tools?: OpenAITool[];
+  tool_choice?: OpenAIToolChoice;
+  // Legacy completions-style function calling — still rejected (use `tools`).
   functions?: unknown[];
-  tool_choice?: unknown;
   n?: number;
   user?: string;
 }
@@ -109,7 +137,7 @@ export interface ChatCompletion {
   model: string;
   choices: {
     index: number;
-    message: { role: 'assistant'; content: string };
+    message: { role: 'assistant'; content: string | null; tool_calls?: OpenAIToolCall[] };
     finish_reason: string;
   }[];
   usage: OpenAIUsage;
@@ -122,7 +150,16 @@ export interface ChatCompletionChunk {
   model: string;
   choices: {
     index: number;
-    delta: { role?: 'assistant'; content?: string };
+    delta: {
+      role?: 'assistant';
+      content?: string;
+      tool_calls?: {
+        index: number;
+        id?: string;
+        type?: 'function';
+        function?: { name?: string; arguments?: string };
+      }[];
+    };
     finish_reason: string | null;
   }[];
   usage?: OpenAIUsage | null;
