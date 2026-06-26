@@ -241,7 +241,8 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
         status: 'ok',
         gatewayRequestId: extractGatewayRequestId(event.providerMetadata),
       });
-      await logIf(event.text, 'ok');
+      const toolCallsOut = event.toolCalls?.length ? JSON.stringify(event.toolCalls) : '';
+      await logIf(event.text || toolCallsOut, 'ok');
       const eo = (event as { experimental_output?: unknown }).experimental_output;
       const championOut = ctx.structured && eo !== undefined ? JSON.stringify(eo) : event.text;
       if (!ctx.tools) {
@@ -268,6 +269,7 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
     text: string | null,
     usage: ReturnType<typeof mapResponsesUsage> | null,
     toolCalls?: ResponsesOutToolCall[],
+    output?: Record<string, unknown>[],
   ) =>
     buildResponseObject({
       id,
@@ -281,6 +283,7 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
       temperature: ctx.params.temperature,
       topP: ctx.params.topP,
       toolCalls,
+      output,
     });
 
   const stream = new ReadableStream<Uint8Array>({
@@ -295,6 +298,10 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
       let textIndex = -1;
       let nextIndex = 0;
       const toolCalls: ResponsesOutToolCall[] = [];
+      // Items in the exact order they were streamed (with their output_index), so
+      // response.completed's output[] matches the streamed indices even if a tool
+      // call precedes text.
+      const emitted: { index: number; item: Record<string, unknown> }[] = [];
       const openText = () => {
         if (textIndex >= 0) return;
         textIndex = nextIndex++;
@@ -344,6 +351,7 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
             emit('response.function_call_arguments.delta', { item_id: itemId, output_index: oi, delta: argsStr });
             emit('response.function_call_arguments.done', { item_id: itemId, output_index: oi, arguments: argsStr });
             emit('response.output_item.done', { output_index: oi, item: fc('completed') });
+            emitted.push({ index: oi, item: fc('completed') });
           } else if (part.type === 'error') {
             throw (part as { error: unknown }).error;
           }
@@ -356,16 +364,15 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
             content_index: 0,
             part: { type: 'output_text', text: acc, annotations: [], logprobs: [] },
           });
-          emit('response.output_item.done', {
-            output_index: textIndex,
-            item: {
-              id: mid,
-              type: 'message',
-              status: 'completed',
-              role: 'assistant',
-              content: [{ type: 'output_text', text: acc, annotations: [] }],
-            },
-          });
+          const messageItem = {
+            id: mid,
+            type: 'message',
+            status: 'completed',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: acc, annotations: [] }],
+          };
+          emit('response.output_item.done', { output_index: textIndex, item: messageItem });
+          emitted.push({ index: textIndex, item: messageItem });
         }
         let usage = { ...ZERO_USAGE };
         try {
@@ -373,8 +380,11 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
         } catch {
           /* keep zero */
         }
+        // Build completed output[] in streamed-index order so it matches the
+        // output_index the client saw on each streamed item.
+        const orderedOutput = emitted.sort((a, b) => a.index - b.index).map((e) => e.item);
         emit('response.completed', {
-          response: resp('completed', acc || null, mapResponsesUsage(usage), toolCalls.length ? toolCalls : undefined),
+          response: resp('completed', acc || null, mapResponsesUsage(usage), undefined, orderedOutput),
         });
         controller.close();
       } catch {

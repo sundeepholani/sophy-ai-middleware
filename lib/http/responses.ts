@@ -258,30 +258,41 @@ export interface BuildResponseArgs {
   temperature?: number;
   topP?: number;
   toolCalls?: ResponsesOutToolCall[];
+  /**
+   * Pre-built output[] in the exact order items were streamed. When provided it
+   * is used as-is (so the completed event's array order matches the streamed
+   * output_index); otherwise output is derived from text + toolCalls.
+   */
+  output?: Record<string, unknown>[];
 }
 
 /** Build the Responses `response` object (used for the buffered reply and for
  *  the `response` payload in created/in_progress/completed streaming events). */
 export function buildResponseObject(args: BuildResponseArgs): Record<string, unknown> {
-  const output: Record<string, unknown>[] = [];
-  if (args.text != null) {
-    output.push({
-      id: args.msgId,
-      type: 'message',
-      status: 'completed',
-      role: 'assistant',
-      content: [{ type: 'output_text', text: args.text, annotations: [] }],
-    });
-  }
-  for (const tc of args.toolCalls ?? []) {
-    output.push({
-      id: tc.id,
-      type: 'function_call',
-      status: 'completed',
-      call_id: tc.callId,
-      name: tc.name,
-      arguments: tc.arguments,
-    });
+  let output: Record<string, unknown>[];
+  if (args.output) {
+    output = args.output;
+  } else {
+    output = [];
+    if (args.text != null) {
+      output.push({
+        id: args.msgId,
+        type: 'message',
+        status: 'completed',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: args.text, annotations: [] }],
+      });
+    }
+    for (const tc of args.toolCalls ?? []) {
+      output.push({
+        id: tc.id,
+        type: 'function_call',
+        status: 'completed',
+        call_id: tc.callId,
+        name: tc.name,
+        arguments: tc.arguments,
+      });
+    }
   }
   return {
     id: args.id,
