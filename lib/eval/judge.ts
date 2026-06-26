@@ -6,9 +6,9 @@
  * system prompt, the user request, and two outputs labelled "Response A/B" in a
  * randomized order. We map A/B back to champion/challenger after the verdict.
  */
-import { generateText, Output, jsonSchema } from 'ai';
 import type { ModelMessage } from 'ai';
 import { extractGatewayCost } from '@/lib/usage/record';
+import { generateStructured } from '@/lib/gateway/structured';
 import { evalModel } from '@/lib/eval/model';
 import type { EvalWinner } from '@/db/schema';
 
@@ -86,19 +86,24 @@ export async function judge(args: {
     'Which response is better — "A", "B", or "tie"?',
   ].join('\n\n');
 
-  const result = await generateText({
-    model: evalModel(args.judgeModel),
-    system: JUDGE_SYSTEM,
-    prompt,
-    experimental_output: Output.object({ schema: jsonSchema(JUDGE_SCHEMA) }),
-    abortSignal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
-    providerOptions: { gateway: { tags: ['eval:judge'] } } as never,
-  });
-
-  // The JSON-schema constraints are only a provider hint (the AI SDK doesn't
-  // enforce them client-side), so guard the field that drives the verdict: a
-  // missing / out-of-enum winner must FAIL the sample, not silently count as 'B'.
-  const out = result.experimental_output as { winner?: unknown; confidence?: unknown; reason?: unknown };
+  // Tolerant structured generation so a non-native judge model (or a transient
+  // strict-mode hiccup) doesn't crash the sample (see lib/gateway/structured.ts).
+  // Our AJV validation enforces the schema — incl. the winner enum — so an invalid
+  // verdict fails the sample rather than silently counting as 'B'.
+  const result = await generateStructured(
+    {
+      model: evalModel(args.judgeModel),
+      system: JUDGE_SYSTEM,
+      prompt,
+      abortSignal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
+      providerOptions: { gateway: { tags: ['eval:judge'] } } as never,
+    },
+    JUDGE_SCHEMA,
+  );
+  if (!result.valid) {
+    throw new Error(`judge did not return a valid verdict: ${result.errors ?? 'unparseable output'}`);
+  }
+  const out = result.value as { winner?: unknown; confidence?: unknown; reason?: unknown };
   if (out.winner !== 'A' && out.winner !== 'B' && out.winner !== 'tie') {
     throw new Error(`judge returned an invalid winner: ${JSON.stringify(out.winner)}`);
   }

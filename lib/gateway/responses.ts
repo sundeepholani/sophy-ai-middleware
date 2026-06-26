@@ -19,6 +19,7 @@ import type { ModelMessage } from 'ai';
 import { waitUntil } from '@vercel/functions';
 import { randomUUID } from 'node:crypto';
 import { commonCall, type CallContext } from '@/lib/gateway/call';
+import { generateStructured } from '@/lib/gateway/structured';
 import { scheduleChampionCapture } from '@/lib/eval/capture';
 import { validateAgainstSchema } from '@/lib/gateway/openai-map';
 import {
@@ -103,38 +104,38 @@ export async function handleResponsesNonStreaming(
   try {
     let text: string;
     if (ctx.structured && ctx.schema) {
-      const result = await generateText({
-        ...commonCall(ctx, messages),
-        experimental_output: Output.object({ schema: jsonSchema(ctx.schema) }),
-      });
+      // Tolerant structured generation (see lib/gateway/structured.ts): native
+      // models unchanged; fence/pad-wrapping models are recovered; only genuinely
+      // unparseable output still 502s.
+      const result = await generateStructured(commonCall(ctx, messages), ctx.schema);
       const usage = normalizeUsage(result.usage);
-      const obj = result.experimental_output as unknown;
-      const check = validateAgainstSchema(obj, ctx.schema);
-      if (!check.valid) {
+      const costUsd = extractGatewayCost(result.providerMetadata);
+      const gatewayRequestId = extractGatewayRequestId(result.providerMetadata);
+      if (!result.valid) {
         await recordUsage({
           ...base,
           usage,
-          costUsd: extractGatewayCost(result.providerMetadata),
+          costUsd,
           latencyMs: Date.now() - start,
           status: 'validation_failed',
           responseKind: 'structured',
-          gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
-          errorMessage: check.errors,
+          gatewayRequestId,
+          errorMessage: result.errors,
         });
-        await logIf(JSON.stringify(obj), 'validation_failed');
+        await logIf(result.text, 'validation_failed');
         return openAiError(502, 'api_error', 'Model output failed schema validation.', {
           code: 'schema_validation_failed',
         });
       }
-      text = JSON.stringify(obj);
+      text = result.text;
       await recordUsage({
         ...base,
         usage,
-        costUsd: extractGatewayCost(result.providerMetadata),
+        costUsd,
         latencyMs: Date.now() - start,
         status: 'ok',
         responseKind: 'structured',
-        gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
+        gatewayRequestId,
       });
       await logIf(text, 'ok');
       scheduleChampionCapture(ctx, messages, 'responses', text, result.providerMetadata, start, eventId);
