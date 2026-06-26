@@ -2,18 +2,66 @@
  * Pure mapping helpers between the OpenAI wire format and the AI SDK, plus
  * param clamping and JSON-schema validation. No I/O — unit-testable.
  */
-import type { ModelMessage, FinishReason } from 'ai';
+import { tool, jsonSchema, type ModelMessage, type FinishReason, type ToolSet } from 'ai';
 import Ajv, { type ValidateFunction } from 'ajv';
 import addFormats from 'ajv-formats';
 import type {
   OpenAIMessage,
   OpenAIContentPart,
+  OpenAITool,
+  OpenAIToolChoice,
   ChatCompletion,
   ChatCompletionChunk,
   OpenAIUsage,
 } from '@/lib/http/openai';
 import type { KeyParams } from '@/db/schema';
 import type { NormalizedUsage } from '@/lib/usage/record';
+
+// ---- Tool conversion (OpenAI tool defs → AI SDK passthrough ToolSet) --------
+
+export type AiToolChoice = 'auto' | 'none' | 'required' | { type: 'tool'; toolName: string };
+export interface AiTools {
+  tools: ToolSet;
+  toolChoice?: AiToolChoice;
+}
+
+/**
+ * Build an AI SDK ToolSet from client-supplied OpenAI tool definitions. Each tool
+ * is defined with NO `execute` — so the model emits the call and the SDK returns
+ * it without running anything (the proxy never executes tools). Returns null when
+ * there are no tools.
+ */
+export function toAiToolSet(
+  tools: OpenAITool[] | undefined,
+  toolChoice: OpenAIToolChoice | undefined,
+): AiTools | null {
+  if (!Array.isArray(tools) || tools.length === 0) return null;
+  const set: ToolSet = {};
+  for (const t of tools) {
+    if (t?.type !== 'function' || !t.function?.name) continue;
+    set[t.function.name] = tool({
+      description: t.function.description,
+      inputSchema: jsonSchema((t.function.parameters ?? { type: 'object', properties: {} }) as never),
+    });
+  }
+  if (Object.keys(set).length === 0) return null;
+
+  let choice: AiToolChoice | undefined;
+  if (toolChoice === 'auto' || toolChoice === 'none' || toolChoice === 'required') {
+    choice = toolChoice;
+  } else if (toolChoice && typeof toolChoice === 'object' && toolChoice.type === 'function') {
+    choice = { type: 'tool', toolName: toolChoice.function.name };
+  }
+  return { tools: set, toolChoice: choice };
+}
+
+function safeJsonParse(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return {};
+  }
+}
 
 // ---- Message conversion -----------------------------------------------------
 
@@ -37,22 +85,63 @@ function partToModelPart(part: OpenAIContentPart) {
 
 /**
  * Convert OpenAI messages to AI SDK ModelMessages. Client-supplied system /
- * developer messages are DROPPED — the operator owns the system prompt. Tool
- * messages are dropped (tool calling is rejected upstream in v1).
+ * developer messages are DROPPED — the operator owns the system prompt.
+ * Tool-calling turns are preserved: an assistant message's `tool_calls` become
+ * tool-call parts, and `tool` messages become a tool-result message. OpenAI tool
+ * messages omit the tool name, so we recover it from the assistant `tool_calls`
+ * (matched by id).
  */
 export function toModelMessages(messages: OpenAIMessage[]): ModelMessage[] {
+  const toolNameById = new Map<string, string>();
+  for (const m of messages) {
+    if (m.role === 'assistant' && m.tool_calls) {
+      for (const tc of m.tool_calls) toolNameById.set(tc.id, tc.function.name);
+    }
+  }
+
   const out: ModelMessage[] = [];
   for (const m of messages) {
-    if (m.role === 'system' || m.role === 'developer' || m.role === 'tool') continue;
-    const content =
-      typeof m.content === 'string'
-        ? m.content
-        : (m.content ?? []).map(partToModelPart);
-    if (m.role === 'assistant') {
-      out.push({ role: 'assistant', content: content as never });
-    } else {
-      out.push({ role: 'user', content: content as never });
+    if (m.role === 'system' || m.role === 'developer') continue;
+
+    if (m.role === 'tool') {
+      const id = m.tool_call_id;
+      if (!id) continue;
+      const text =
+        typeof m.content === 'string'
+          ? m.content
+          : (m.content ?? []).map((p) => ('text' in p ? p.text : '')).join('');
+      out.push({
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: id,
+            toolName: toolNameById.get(id) ?? id,
+            output: { type: 'text', value: text },
+          },
+        ],
+      } as ModelMessage);
+      continue;
     }
+
+    if (m.role === 'assistant' && m.tool_calls?.length) {
+      const parts: unknown[] = [];
+      if (typeof m.content === 'string' && m.content) parts.push({ type: 'text', text: m.content });
+      for (const tc of m.tool_calls) {
+        parts.push({
+          type: 'tool-call',
+          toolCallId: tc.id,
+          toolName: tc.function.name,
+          input: safeJsonParse(tc.function.arguments),
+        });
+      }
+      out.push({ role: 'assistant', content: parts as never });
+      continue;
+    }
+
+    const content =
+      typeof m.content === 'string' ? m.content : (m.content ?? []).map(partToModelPart);
+    out.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: content as never });
   }
   return out;
 }
@@ -101,14 +190,22 @@ function toOpenAIUsage(u: NormalizedUsage): OpenAIUsage {
 
 // ---- Response mapping -------------------------------------------------------
 
+export interface OutToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
 export function toChatCompletion(args: {
   id: string;
   created: number;
   model: string;
   content: string;
+  toolCalls?: OutToolCall[];
   finishReason: FinishReason | undefined;
   usage: NormalizedUsage;
 }): ChatCompletion {
+  const hasTools = !!args.toolCalls && args.toolCalls.length > 0;
   return {
     id: args.id,
     object: 'chat.completion',
@@ -117,7 +214,20 @@ export function toChatCompletion(args: {
     choices: [
       {
         index: 0,
-        message: { role: 'assistant', content: args.content },
+        message: {
+          role: 'assistant',
+          // OpenAI sends content: null on a pure tool-call turn.
+          content: hasTools ? (args.content || null) : args.content,
+          ...(hasTools
+            ? {
+                tool_calls: args.toolCalls!.map((t) => ({
+                  id: t.id,
+                  type: 'function' as const,
+                  function: { name: t.name, arguments: t.arguments },
+                })),
+              }
+            : {}),
+        },
         finish_reason: mapFinishReason(args.finishReason),
       },
     ],
@@ -129,7 +239,7 @@ export function chunkFrame(args: {
   id: string;
   created: number;
   model: string;
-  delta: { role?: 'assistant'; content?: string };
+  delta: ChatCompletionChunk['choices'][number]['delta'];
   finishReason?: string | null;
 }): ChatCompletionChunk {
   return {

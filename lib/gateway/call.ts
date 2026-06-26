@@ -10,7 +10,7 @@
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { generateText, streamText, Output, jsonSchema } from 'ai';
-import type { ModelMessage, FinishReason } from 'ai';
+import type { ModelMessage, FinishReason, ToolSet } from 'ai';
 import { waitUntil } from '@vercel/functions';
 import {
   toChatCompletion,
@@ -21,6 +21,8 @@ import {
   sse,
   SSE_DONE,
   type ResolvedParams,
+  type AiToolChoice,
+  type OutToolCall,
 } from '@/lib/gateway/openai-map';
 import {
   recordUsage,
@@ -64,6 +66,9 @@ export interface CallContext {
   includeUsage: boolean;
   /** Whether to persist inbound/outbound message content for this request. */
   logContent: boolean;
+  /** Client-supplied tools (passthrough; no execute) — undefined = none. */
+  tools?: ToolSet;
+  toolChoice?: AiToolChoice;
 }
 
 function providerOf(model: string): string {
@@ -112,8 +117,22 @@ export function commonCall(ctx: CallContext, messages: ModelMessage[]) {
     temperature: ctx.params.temperature,
     topP: ctx.params.topP,
     maxOutputTokens: ctx.params.maxOutputTokens,
+    // Client tools are passed through (no execute → the model emits calls, the
+    // SDK returns them). Only set when present so non-tool calls are unchanged.
+    ...(ctx.tools ? { tools: ctx.tools, toolChoice: ctx.toolChoice } : {}),
     providerOptions: gatewayProviderOptions(ctx) as never,
   };
+}
+
+/** Map the AI SDK's returned tool calls to the OpenAI wire shape. */
+export function toOutToolCalls(
+  toolCalls: ReadonlyArray<{ toolCallId: string; toolName: string; input: unknown }>,
+): OutToolCall[] {
+  return toolCalls.map((tc) => ({
+    id: tc.toolCallId,
+    name: tc.toolName,
+    arguments: typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input ?? {}),
+  }));
 }
 
 // ---- Non-streaming ----------------------------------------------------------
@@ -193,6 +212,7 @@ export async function handleNonStreaming(
 
     const result = await generateText(commonCall(ctx, messages));
     const usage = normalizeUsage(result.usage);
+    const toolCalls = ctx.tools ? toOutToolCalls(result.toolCalls) : undefined;
     await recordUsage({
       ...base,
       usage,
@@ -202,14 +222,19 @@ export async function handleNonStreaming(
       responseKind: 'text',
       gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
     });
-    await logIf(result.text, 'ok');
-    scheduleChampionCapture(ctx, messages, 'chat', result.text, result.providerMetadata, start, eventId);
+    await logIf(result.text || (toolCalls?.length ? JSON.stringify(toolCalls) : ''), 'ok');
+    // Don't capture tool-call turns for eval — they're not a replayable final
+    // answer (the client owns the tool loop).
+    if (!ctx.tools) {
+      scheduleChampionCapture(ctx, messages, 'chat', result.text, result.providerMetadata, start, eventId);
+    }
     return Response.json(
       toChatCompletion({
         id,
         created,
         model: ctx.model,
         content: result.text,
+        toolCalls,
         finishReason: result.finishReason,
         usage,
       }),
@@ -270,7 +295,10 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
       });
       const eo = (event as { experimental_output?: unknown }).experimental_output;
       const championOut = ctx.structured && eo !== undefined ? JSON.stringify(eo) : event.text;
-      scheduleChampionCapture(ctx, messages, 'chat', championOut, event.providerMetadata, start, eventId);
+      // Tool-call turns aren't captured for eval (client owns the tool loop).
+      if (!ctx.tools) {
+        scheduleChampionCapture(ctx, messages, 'chat', championOut, event.providerMetadata, start, eventId);
+      }
     },
     onError: async ({ error }) => {
       await recordUsage({
@@ -294,8 +322,44 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
       const enqueue = (s: string) => controller.enqueue(encoder.encode(s));
       try {
         enqueue(sse(chunkFrame({ id, created, model, delta: { role: 'assistant' } })));
-        for await (const delta of result.textStream) {
-          if (delta) enqueue(sse(chunkFrame({ id, created, model, delta: { content: delta } })));
+        // Iterate the full stream so we can surface tool calls alongside text.
+        // Each tool call is emitted as one complete delta (id + name + full args);
+        // clients accumulate, so a single-shot delta is valid OpenAI SSE.
+        let toolIndex = 0;
+        let sawToolCall = false;
+        for await (const part of result.fullStream) {
+          if (part.type === 'text-delta') {
+            const text = (part as { text?: string }).text ?? '';
+            if (text) enqueue(sse(chunkFrame({ id, created, model, delta: { content: text } })));
+          } else if (part.type === 'tool-call') {
+            sawToolCall = true;
+            const tc = part as unknown as { toolCallId: string; toolName: string; input: unknown };
+            enqueue(
+              sse(
+                chunkFrame({
+                  id,
+                  created,
+                  model,
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: toolIndex++,
+                        id: tc.toolCallId,
+                        type: 'function',
+                        function: {
+                          name: tc.toolName,
+                          arguments:
+                            typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input ?? {}),
+                        },
+                      },
+                    ],
+                  },
+                }),
+              ),
+            );
+          } else if (part.type === 'error') {
+            throw (part as { error: unknown }).error;
+          }
         }
         let finishReason: FinishReason | undefined;
         try {
@@ -303,9 +367,8 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
         } catch {
           finishReason = undefined;
         }
-        enqueue(
-          sse(chunkFrame({ id, created, model, delta: {}, finishReason: mapFinishReason(finishReason) })),
-        );
+        const finalReason = sawToolCall ? 'tool_calls' : mapFinishReason(finishReason);
+        enqueue(sse(chunkFrame({ id, created, model, delta: {}, finishReason: finalReason })));
         if (ctx.includeUsage) {
           const usage = normalizeUsage(await result.totalUsage);
           enqueue(sse(usageChunkFrame({ id, created, model, usage })));
