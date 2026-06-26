@@ -462,7 +462,10 @@ export async function getKeyEvals(viewer: Viewer, onlyKeyId?: string): Promise<R
           avgChallenger: sql<string | null>`avg(${evalSamples.challengerCostUsd})`,
         })
         .from(evalSamples)
-        .where(inArray(evalSamples.runId, ids))
+        // Restrict to judged samples so both averages share one denominator:
+        // champion cost is written at capture (pending), challenger cost only at
+        // judge time — averaging over all samples would compare different populations.
+        .where(and(inArray(evalSamples.runId, ids), eq(evalSamples.status, 'judged')))
         .groupBy(evalSamples.runId)
     : [];
   const costByRun = new Map<string, { champ: number | null; chall: number | null }>();

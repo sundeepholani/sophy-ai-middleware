@@ -21,6 +21,12 @@ const DOWNLOAD_TIMEOUT_MS = 30_000;
 // budget. On timeout this throws → the per-doc catch marks the doc 'failed'.
 const EMBED_TIMEOUT_MS = 120_000;
 const INSERT_BATCH = 200; // rows per insert, to bound statement size
+// Worst-case wall-clock a single document can consume before its terminal status
+// flip: download ceiling + embed ceiling + slack for extract/chunk/insert. We use
+// this to gate the START of each doc (below) so we never begin one we can't finish
+// before the function's hard kill — a mid-doc kill clears the doc's chunks and
+// leaves it 'pending', forcing the whole (paid) download+embed to redo next tick.
+const PER_DOC_RESERVE_MS = DOWNLOAD_TIMEOUT_MS + EMBED_TIMEOUT_MS + 20_000;
 
 export async function processKbIngestion(opts?: { batch?: number; deadlineMs?: number }): Promise<{
   ingested: number;
@@ -53,7 +59,10 @@ export async function processKbIngestion(opts?: { batch?: number; deadlineMs?: n
   let failed = 0;
 
   for (const doc of pending) {
-    if (Date.now() >= deadlineMs) break; // out of budget — leave the rest pending
+    // Start a doc only if its worst case fits the remaining budget. Gating on the
+    // doc's full reserve (not just "are we past the deadline") is what prevents a
+    // mid-document hard-kill and the resulting re-download + re-billed embed.
+    if (Date.now() + PER_DOC_RESERVE_MS > deadlineMs) break; // out of budget — leave the rest pending
     try {
       // Idempotency: clear any chunks from a prior partial run for this doc.
       await db.delete(kbChunks).where(eq(kbChunks.documentId, doc.id));

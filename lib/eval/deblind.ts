@@ -30,9 +30,10 @@ export function deblindReason(
   if (!reason) return reason;
   const a = shortModel(orderSwapped ? challengerModel : championModel);
   const b = shortModel(orderSwapped ? championModel : challengerModel);
-  return reason
-    .replace(/\bResponse A\b/g, a)
-    .replace(/\bResponse B\b/g, b)
-    .replace(/\bA\b/g, a)
-    .replace(/\bB\b/g, b);
+  const out = reason.replace(/\bResponse A\b/g, a).replace(/\bResponse B\b/g, b);
+  // Legacy best-effort for older reasons that used a bare "A"/"B" — applied ONLY
+  // when the reason never used the full "Response A/B" form. Otherwise this would
+  // rewrite ordinary capitalized "A"/"B" words (e.g. "an A-grade answer", "Plan B").
+  if (/\bResponse [AB]\b/.test(reason)) return out;
+  return out.replace(/\bA\b/g, a).replace(/\bB\b/g, b);
 }

@@ -7,6 +7,7 @@
  * ignored — same as /v1/chat/completions). Stateful conversations
  * (`previous_response_id`) and tools are rejected with a clear 400.
  */
+import type { ModelMessage } from 'ai';
 import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
 import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
 import { resolveParams, responsesToAiToolSet } from '@/lib/gateway/openai-map';
@@ -91,7 +92,17 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   // 5) Map input -> messages (client system/developer items dropped; key owns the prompt).
-  const messages = responsesInputToMessages(body.input);
+  // Mapping is pure; its only failure mode is a malformed image/file URL (new URL throws),
+  // a client error — surface it as a clean 400 rather than an unhandled 500.
+  let messages: ModelMessage[];
+  try {
+    messages = responsesInputToMessages(body.input);
+  } catch {
+    return openAiError(400, 'invalid_request_error', 'An input item contains a malformed image or file URL.', {
+      param: 'input',
+      code: 'invalid_url',
+    });
+  }
   if (messages.length === 0) {
     return openAiError(400, 'invalid_request_error', 'No usable input content provided.', {
       param: 'input',

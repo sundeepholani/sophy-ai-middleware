@@ -7,6 +7,7 @@
  * rate limit -> quota pre-check -> inject the key's system prompt (drop client
  * system messages) -> reject tool calls -> call the AI Gateway -> map to OpenAI.
  */
+import type { ModelMessage } from 'ai';
 import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
 import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
 import { toModelMessages, resolveParams, toAiToolSet } from '@/lib/gateway/openai-map';
@@ -86,8 +87,18 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  // 5) Build messages (drops client system/developer/tool roles).
-  const messages = toModelMessages(body.messages);
+  // 5) Build messages (drops client system/developer/tool roles). Mapping is pure;
+  // its only failure mode is a malformed image/file URL (new URL throws), which is
+  // a client error — surface it as a clean 400, not an unhandled 500.
+  let messages: ModelMessage[];
+  try {
+    messages = toModelMessages(body.messages);
+  } catch {
+    return openAiError(400, 'invalid_request_error', 'A message contains a malformed image or file URL.', {
+      param: 'messages',
+      code: 'invalid_url',
+    });
+  }
   if (messages.length === 0) {
     return openAiError(400, 'invalid_request_error', 'No user or assistant messages provided.', {
       param: 'messages',

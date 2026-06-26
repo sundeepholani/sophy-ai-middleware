@@ -6,7 +6,11 @@ import type { UsageStackRow, UsageDimension } from '@/lib/admin/queries';
 type Metric = 'cost' | 'requests' | 'tokens';
 type Mode = 'share' | 'absolute';
 
-const OTHER = '__other__';
+// Sentinel for the aggregated "Other" bucket. The leading NUL byte makes it
+// impossible to collide with a real category: `cat` is a model id or a key name,
+// both read from Postgres text columns, which cannot store NUL. (It's only ever a
+// map key / comparison target — the user-facing label is always "Other".)
+const OTHER = `${String.fromCharCode(0)}other`;
 const TOP_N = 9;
 
 // Distinct, legible palette assigned by rank; "Other" is a muted pink.

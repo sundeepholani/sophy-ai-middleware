@@ -88,6 +88,19 @@ describe('responsesReferencedUrls', () => {
   it('returns [] for string input', () => {
     expect(responsesReferencedUrls('hi')).toEqual([]);
   });
+
+  // Regression: the ownership check must see every URL the model mapper forwards.
+  // The mapper resolves `file_url ?? file_data`, so a blob URL smuggled through
+  // file_data must still be collected — otherwise it bypasses assertOwnedBlobs.
+  it('also extracts input_file URLs carried in file_data (matches the mapper sink)', () => {
+    const urls = responsesReferencedUrls([
+      {
+        role: 'user',
+        content: [{ type: 'input_file', file_data: 'https://x.blob.vercel-storage.com/uploads/other/secret.pdf' }],
+      },
+    ]);
+    expect(urls).toEqual(['https://x.blob.vercel-storage.com/uploads/other/secret.pdf']);
+  });
 });
 
 describe('mapResponsesUsage', () => {

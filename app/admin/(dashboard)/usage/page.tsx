@@ -33,19 +33,24 @@ export default async function UsagePage({
 }) {
   const sp = await searchParams;
   const sinceDays = ALLOWED_RANGES.includes(Number(sp.range)) ? Number(sp.range) : 30;
-  const keyId = sp.key || undefined;
-  const model = sp.model || undefined;
-  const filters: UsageFilters = { sinceDays, keyId, model };
   const viewer = await requireViewer();
 
-  const [stackedModel, stackedKey, totals, byKey, byModel, keys, models] = await Promise.all([
+  const [keys, models] = await Promise.all([listKeys(viewer), listUsedModels(viewer)]);
+
+  // Only honor a key/model filter that refers to a real owned key / seen model.
+  // This both (a) avoids a Postgres uuid-cast error from a crafted non-UUID ?key=
+  // (apiKeyId is a uuid column), and (b) keeps the filter Select from rendering a
+  // blank value its option list doesn't contain — display and query stay in sync.
+  const keyId = sp.key && keys.some((k) => k.id === sp.key) ? sp.key : undefined;
+  const model = sp.model && models.includes(sp.model) ? sp.model : undefined;
+  const filters: UsageFilters = { sinceDays, keyId, model };
+
+  const [stackedModel, stackedKey, totals, byKey, byModel] = await Promise.all([
     getUsageStacked(viewer, filters, 'model'),
     getUsageStacked(viewer, filters, 'key'),
     getUsageTotals(viewer, filters),
     getUsageByKey(viewer, filters),
     getUsageByModel(viewer, filters),
-    listKeys(viewer),
-    listUsedModels(viewer),
   ]);
 
   return (
