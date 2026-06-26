@@ -79,7 +79,7 @@ const FEATURES: { icon: typeof Plug; title: string; body: string }[] = [
   {
     icon: Boxes,
     title: 'Any model, one gateway',
-    body: 'Route to models across providers through the Vercel AI Gateway. Browse the catalog with capabilities like vision, tools, and reasoning.',
+    body: 'Route to models from any provider through one gateway. Browse the catalog with capabilities like vision, tools, and reasoning.',
   },
   {
     icon: Wrench,
@@ -185,7 +185,7 @@ export default function HomePage() {
         <div className="mx-auto grid w-full max-w-7xl items-center gap-12 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:gap-10 lg:px-8 lg:py-28">
           <div className="space-y-6">
             <Badge variant="secondary" className="rounded-full px-3 py-1 text-xs">
-              OpenAI-compatible · Vercel AI Gateway
+              OpenAI-compatible · Any model
             </Badge>
             <h1 className="font-heading text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-6xl">
               One API key for every model.
