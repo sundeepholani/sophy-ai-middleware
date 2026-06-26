@@ -9,7 +9,7 @@
  */
 import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
 import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
-import { resolveParams } from '@/lib/gateway/openai-map';
+import { resolveParams, responsesToAiToolSet } from '@/lib/gateway/openai-map';
 import { type CallContext } from '@/lib/gateway/call';
 import { systemPromptWithKb } from '@/lib/kb/retrieve';
 import {
@@ -54,11 +54,14 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   // 3) Reject unsupported features (loudly, not silently).
-  if (Array.isArray(body.tools) && body.tools.length > 0) {
-    return openAiError(400, 'invalid_request_error', 'Tools are not supported by this endpoint.', {
-      param: 'tools',
-      code: 'tools_unsupported',
-    });
+  const aiTools = responsesToAiToolSet(body.tools, body.tool_choice);
+  if (aiTools && key.outputSchema) {
+    return openAiError(
+      400,
+      'invalid_request_error',
+      'Tool calling is not available on a key configured for structured output.',
+      { param: 'tools', code: 'tools_unsupported' },
+    );
   }
   if (body.previous_response_id != null) {
     return openAiError(
@@ -119,6 +122,8 @@ export async function POST(req: Request): Promise<Response> {
     schema: key.outputSchema,
     includeUsage: true,
     logContent: key.logContent,
+    tools: aiTools?.tools,
+    toolChoice: aiTools?.toolChoice,
   };
 
   // 7) Stream or buffer.

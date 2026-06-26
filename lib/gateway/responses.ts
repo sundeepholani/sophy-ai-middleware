@@ -34,6 +34,7 @@ import {
   buildResponseObject,
   mapResponsesUsage,
   responsesSseEvent,
+  type ResponsesOutToolCall,
 } from '@/lib/http/responses';
 
 function respId(): string {
@@ -41,6 +42,21 @@ function respId(): string {
 }
 function msgId(): string {
   return `msg_${randomBytes(18).toString('hex')}`;
+}
+function fcId(): string {
+  return `fc_${randomBytes(18).toString('hex')}`;
+}
+
+/** Map the AI SDK's returned tool calls to the Responses output-item shape. */
+function toResponsesToolCalls(
+  toolCalls: ReadonlyArray<{ toolCallId: string; toolName: string; input: unknown }>,
+): ResponsesOutToolCall[] {
+  return toolCalls.map((tc) => ({
+    id: fcId(),
+    callId: tc.toolCallId,
+    name: tc.toolName,
+    arguments: typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input ?? {}),
+  }));
 }
 
 const SSE_HEADERS: Record<string, string> = {
@@ -133,6 +149,7 @@ export async function handleResponsesNonStreaming(
 
     const result = await generateText(commonCall(ctx, messages));
     const usage = normalizeUsage(result.usage);
+    const toolCalls = ctx.tools ? toResponsesToolCalls(result.toolCalls) : undefined;
     await recordUsage({
       ...base,
       usage,
@@ -142,8 +159,11 @@ export async function handleResponsesNonStreaming(
       responseKind: 'text',
       gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
     });
-    await logIf(result.text, 'ok');
-    scheduleChampionCapture(ctx, messages, 'responses', result.text, result.providerMetadata, start, eventId);
+    await logIf(result.text || (toolCalls?.length ? JSON.stringify(toolCalls) : ''), 'ok');
+    // Tool-call turns aren't captured for eval (client owns the tool loop).
+    if (!ctx.tools) {
+      scheduleChampionCapture(ctx, messages, 'responses', result.text, result.providerMetadata, start, eventId);
+    }
     return Response.json(
       buildResponseObject({
         id,
@@ -151,11 +171,13 @@ export async function handleResponsesNonStreaming(
         model: ctx.model,
         createdAt: created,
         status: 'completed',
-        text: result.text,
+        // No message item when the turn is purely tool calls.
+        text: toolCalls?.length ? result.text || null : result.text,
         usage: mapResponsesUsage(usage),
         structured: false,
         temperature: ctx.params.temperature,
         topP: ctx.params.topP,
+        toolCalls,
       }),
       { headers: { 'cache-control': 'no-store' } },
     );
@@ -222,7 +244,9 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
       await logIf(event.text, 'ok');
       const eo = (event as { experimental_output?: unknown }).experimental_output;
       const championOut = ctx.structured && eo !== undefined ? JSON.stringify(eo) : event.text;
-      scheduleChampionCapture(ctx, messages, 'responses', championOut, event.providerMetadata, start, eventId);
+      if (!ctx.tools) {
+        scheduleChampionCapture(ctx, messages, 'responses', championOut, event.providerMetadata, start, eventId);
+      }
     },
     onError: async ({ error }) => {
       await recordUsage({
@@ -239,7 +263,12 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
   waitUntil(Promise.resolve(result.consumeStream()));
 
   const encoder = new TextEncoder();
-  const resp = (status: 'in_progress' | 'completed', text: string | null, usage: ReturnType<typeof mapResponsesUsage> | null) =>
+  const resp = (
+    status: 'in_progress' | 'completed',
+    text: string | null,
+    usage: ReturnType<typeof mapResponsesUsage> | null,
+    toolCalls?: ResponsesOutToolCall[],
+  ) =>
     buildResponseObject({
       id,
       msgId: mid,
@@ -251,6 +280,7 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
       structured: ctx.structured,
       temperature: ctx.params.temperature,
       topP: ctx.params.topP,
+      toolCalls,
     });
 
   const stream = new ReadableStream<Uint8Array>({
@@ -259,61 +289,93 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
       const emit = (type: string, data: Record<string, unknown>) =>
         controller.enqueue(encoder.encode(responsesSseEvent(type, { sequence_number: seq++, ...data })));
       let acc = '';
-      try {
-        emit('response.created', { response: resp('in_progress', null, null) });
-        emit('response.in_progress', { response: resp('in_progress', null, null) });
+      // Output items are added on demand: the text message item only when text
+      // arrives (so a pure tool-call turn emits no empty message), and each tool
+      // call as its own function_call item at the next output index.
+      let textIndex = -1;
+      let nextIndex = 0;
+      const toolCalls: ResponsesOutToolCall[] = [];
+      const openText = () => {
+        if (textIndex >= 0) return;
+        textIndex = nextIndex++;
         emit('response.output_item.added', {
-          output_index: 0,
+          output_index: textIndex,
           item: { id: mid, type: 'message', status: 'in_progress', role: 'assistant', content: [] },
         });
         emit('response.content_part.added', {
           item_id: mid,
-          output_index: 0,
+          output_index: textIndex,
           content_index: 0,
           part: { type: 'output_text', text: '', annotations: [], logprobs: [] },
         });
-        for await (const delta of result.textStream) {
-          if (delta) {
-            acc += delta;
-            emit('response.output_text.delta', {
-              item_id: mid,
-              output_index: 0,
-              content_index: 0,
-              delta,
-              logprobs: [],
+      };
+      try {
+        emit('response.created', { response: resp('in_progress', null, null) });
+        emit('response.in_progress', { response: resp('in_progress', null, null) });
+        for await (const part of result.fullStream) {
+          if (part.type === 'text-delta') {
+            const t = (part as { text?: string }).text ?? '';
+            if (t) {
+              openText();
+              acc += t;
+              emit('response.output_text.delta', {
+                item_id: mid,
+                output_index: textIndex,
+                content_index: 0,
+                delta: t,
+                logprobs: [],
+              });
+            }
+          } else if (part.type === 'tool-call') {
+            const tc = part as unknown as { toolCallId: string; toolName: string; input: unknown };
+            const itemId = fcId();
+            const argsStr = typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input ?? {});
+            const oi = nextIndex++;
+            toolCalls.push({ id: itemId, callId: tc.toolCallId, name: tc.toolName, arguments: argsStr });
+            const fc = (status: string) => ({
+              id: itemId,
+              type: 'function_call',
+              status,
+              call_id: tc.toolCallId,
+              name: tc.toolName,
+              arguments: status === 'in_progress' ? '' : argsStr,
             });
+            emit('response.output_item.added', { output_index: oi, item: fc('in_progress') });
+            emit('response.function_call_arguments.delta', { item_id: itemId, output_index: oi, delta: argsStr });
+            emit('response.function_call_arguments.done', { item_id: itemId, output_index: oi, arguments: argsStr });
+            emit('response.output_item.done', { output_index: oi, item: fc('completed') });
+          } else if (part.type === 'error') {
+            throw (part as { error: unknown }).error;
           }
         }
-        emit('response.output_text.done', {
-          item_id: mid,
-          output_index: 0,
-          content_index: 0,
-          text: acc,
-          logprobs: [],
-        });
-        emit('response.content_part.done', {
-          item_id: mid,
-          output_index: 0,
-          content_index: 0,
-          part: { type: 'output_text', text: acc, annotations: [], logprobs: [] },
-        });
-        emit('response.output_item.done', {
-          output_index: 0,
-          item: {
-            id: mid,
-            type: 'message',
-            status: 'completed',
-            role: 'assistant',
-            content: [{ type: 'output_text', text: acc, annotations: [] }],
-          },
-        });
+        if (textIndex >= 0) {
+          emit('response.output_text.done', { item_id: mid, output_index: textIndex, content_index: 0, text: acc, logprobs: [] });
+          emit('response.content_part.done', {
+            item_id: mid,
+            output_index: textIndex,
+            content_index: 0,
+            part: { type: 'output_text', text: acc, annotations: [], logprobs: [] },
+          });
+          emit('response.output_item.done', {
+            output_index: textIndex,
+            item: {
+              id: mid,
+              type: 'message',
+              status: 'completed',
+              role: 'assistant',
+              content: [{ type: 'output_text', text: acc, annotations: [] }],
+            },
+          });
+        }
         let usage = { ...ZERO_USAGE };
         try {
           usage = normalizeUsage(await result.totalUsage);
         } catch {
           /* keep zero */
         }
-        emit('response.completed', { response: resp('completed', acc, mapResponsesUsage(usage)) });
+        emit('response.completed', {
+          response: resp('completed', acc || null, mapResponsesUsage(usage), toolCalls.length ? toolCalls : undefined),
+        });
         controller.close();
       } catch {
         // Upstream/stream error or client disconnect. Accounting handled by
