@@ -37,6 +37,14 @@ import {
   type ResponsesOutToolCall,
 } from '@/lib/http/responses';
 
+function safeParseJson(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
+  }
+}
+
 function respId(): string {
   return `resp_${randomBytes(18).toString('hex')}`;
 }
@@ -213,7 +221,7 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
     streamed: true,
     responseKind: (ctx.structured ? 'structured' : 'text') as 'structured' | 'text',
   };
-  const logIf = (response: string | null, status: 'ok' | 'error') =>
+  const logIf = (response: string | null, status: 'ok' | 'validation_failed' | 'error') =>
     ctx.logContent
       ? recordRequestLog({
           id: eventId,
@@ -233,19 +241,28 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
       ? { experimental_output: Output.object({ schema: jsonSchema(ctx.schema) }) }
       : {}),
     onFinish: async (event) => {
+      const eo = (event as { experimental_output?: unknown }).experimental_output;
+      // Match the buffered path: validate structured output against the key's schema
+      // and record validation_failed (not a blanket 'ok') on mismatch. The streamed
+      // bytes can't be retracted, but accounting stays consistent and a non-conforming
+      // structured turn isn't captured as a replayable champion sample.
+      let status: 'ok' | 'validation_failed' = 'ok';
+      if (ctx.structured && ctx.schema) {
+        const obj = eo !== undefined ? eo : safeParseJson(event.text);
+        if (!validateAgainstSchema(obj, ctx.schema).valid) status = 'validation_failed';
+      }
       await recordUsage({
         ...base,
         usage: normalizeUsage(event.totalUsage ?? event.usage),
         costUsd: extractGatewayCost(event.providerMetadata),
         latencyMs: Date.now() - start,
-        status: 'ok',
+        status,
         gatewayRequestId: extractGatewayRequestId(event.providerMetadata),
       });
       const toolCallsOut = event.toolCalls?.length ? JSON.stringify(event.toolCalls) : '';
-      await logIf(event.text || toolCallsOut, 'ok');
-      const eo = (event as { experimental_output?: unknown }).experimental_output;
+      await logIf(event.text || toolCallsOut, status);
       const championOut = ctx.structured && eo !== undefined ? JSON.stringify(eo) : event.text;
-      if (!ctx.tools) {
+      if (!ctx.tools && status === 'ok') {
         scheduleChampionCapture(ctx, messages, 'responses', championOut, event.providerMetadata, start, eventId);
       }
     },

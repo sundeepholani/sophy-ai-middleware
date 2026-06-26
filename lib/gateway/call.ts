@@ -53,6 +53,14 @@ function chatId(): string {
   return `chatcmpl-${randomBytes(12).toString('hex')}`;
 }
 
+function safeParseJson(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
+  }
+}
+
 export interface CallContext {
   keyId: string;
   /** Full AI Gateway model id, e.g. "anthropic/claude-sonnet-4.6". */
@@ -285,18 +293,28 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
       ? { experimental_output: Output.object({ schema: jsonSchema(ctx.schema) }) }
       : {}),
     onFinish: async (event) => {
+      const eo = (event as { experimental_output?: unknown }).experimental_output;
+      // Match the buffered path: validate structured output against the key's schema
+      // and record validation_failed (not a blanket 'ok') on mismatch. The streamed
+      // bytes can't be retracted, but accounting/observability stays consistent and a
+      // non-conforming structured turn isn't captured as a replayable champion sample.
+      let status: 'ok' | 'validation_failed' = 'ok';
+      if (ctx.structured && ctx.schema) {
+        const obj = eo !== undefined ? eo : safeParseJson(event.text);
+        if (!validateAgainstSchema(obj, ctx.schema).valid) status = 'validation_failed';
+      }
       await recordUsage({
         ...base,
         usage: normalizeUsage(event.totalUsage ?? event.usage),
         costUsd: extractGatewayCost(event.providerMetadata),
         latencyMs: Date.now() - start,
-        status: 'ok',
+        status,
         gatewayRequestId: extractGatewayRequestId(event.providerMetadata),
       });
-      const eo = (event as { experimental_output?: unknown }).experimental_output;
       const championOut = ctx.structured && eo !== undefined ? JSON.stringify(eo) : event.text;
-      // Tool-call turns aren't captured for eval (client owns the tool loop).
-      if (!ctx.tools) {
+      // Tool-call turns aren't captured for eval (client owns the tool loop); nor is
+      // a structured turn that failed validation (not a usable final answer).
+      if (!ctx.tools && status === 'ok') {
         scheduleChampionCapture(ctx, messages, 'chat', championOut, event.providerMetadata, start, eventId);
       }
     },

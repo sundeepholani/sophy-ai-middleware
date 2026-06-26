@@ -92,7 +92,12 @@ export function KeysManager({
   // Whether the revealed key came from a rotation (vs. a fresh create) — only
   // affects the reveal dialog's wording.
   const [rotated, setRotated] = useState(false);
+  // `evalKey` drives whether the eval modal is OPEN; `evalShown` is the last key it
+  // showed and keeps it MOUNTED so the close animation can play before unmount
+  // (mirrors the always-mounted edit dialog). Opening sets both; closing clears only
+  // evalKey, so the dialog animates out with its content still present.
   const [evalKey, setEvalKey] = useState<KeyRow | null>(null);
+  const [evalShown, setEvalShown] = useState<KeyRow | null>(null);
 
   async function copyIssued() {
     if (!issued) return;
@@ -196,7 +201,10 @@ export function KeysManager({
                       aria-label="Run eval"
                       title="Eval"
                       className="relative"
-                      onClick={() => setEvalKey(k)}
+                      onClick={() => {
+                        setEvalShown(k);
+                        setEvalKey(k);
+                      }}
                     >
                       <FlaskConical className="h-3.5 w-3.5" />
                       {evalStatuses[k.id] === 'running' && (
@@ -246,15 +254,17 @@ export function KeysManager({
         </DialogContent>
       </Dialog>
 
-      {/* Eval modal */}
-      {evalKey && (
+      {/* Eval modal — kept mounted via `evalShown` so the close animation plays;
+          `open` is driven by `evalKey`. Keying on evalShown.id remounts (resetting
+          the dialog's polling/state) when a different key is opened. */}
+      {evalShown && (
         <EvalDialog
-          key={evalKey.id}
-          keyRow={{ id: evalKey.id, name: evalKey.name, model: evalKey.model }}
+          key={evalShown.id}
+          keyRow={{ id: evalShown.id, name: evalShown.name, model: evalShown.model }}
           models={models}
-          initialStatus={evalStatuses[evalKey.id]}
+          initialStatus={evalStatuses[evalShown.id]}
           judgeModel={judgeModel}
-          open={evalKey != null}
+          open={evalKey?.id === evalShown.id}
           onOpenChange={(o) => !o && setEvalKey(null)}
         />
       )}
