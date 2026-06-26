@@ -154,7 +154,13 @@ export function extractReferencedUrls(messages: OpenAIMessage[]): string[] {
     if (!Array.isArray(m.content)) continue;
     for (const part of m.content) {
       if (part.type === 'image_url' && part.image_url?.url) urls.push(part.image_url.url);
-      if (part.type === 'file' && part.file?.file_url) urls.push(part.file.file_url);
+      // Mirror the sink (partToModelPart) exactly: it forwards `file_url ?? file_data`,
+      // so BOTH fields must be ownership-checked. Collecting only file_url would let a
+      // cross-key blob URL smuggled through file_data bypass assertOwnedBlobs.
+      if (part.type === 'file' && part.file) {
+        const fileUrl = part.file.file_url ?? part.file.file_data;
+        if (fileUrl) urls.push(fileUrl);
+      }
     }
   }
   return urls;

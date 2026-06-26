@@ -210,8 +210,12 @@ export function responsesReferencedUrls(
       if (part.type === 'input_image') {
         const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
         if (url) urls.push(url);
-      } else if (part.type === 'input_file' && part.file_url) {
-        urls.push(part.file_url);
+      } else if (part.type === 'input_file') {
+        // Mirror the sink (responsesPartToModelPart): it forwards `file_url ?? file_data`,
+        // so both must be ownership-checked — else a cross-key blob URL in file_data
+        // would bypass the assertOwnedBlobs check the route performs on this output.
+        const fileUrl = part.file_url ?? part.file_data;
+        if (fileUrl) urls.push(fileUrl);
       }
     }
   }
