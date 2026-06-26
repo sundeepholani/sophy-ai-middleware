@@ -197,7 +197,7 @@ export default function DocsPage() {
             Sophy is an OpenAI-compatible gateway. Each key carries its own model, system prompt,
             parameters, optional JSON Schema, and optional knowledgebase — all server-side. You send
             requests in the OpenAI wire format; Sophy resolves the configuration from your key,
-            routes to the model through the Vercel AI Gateway, and accounts for usage.
+            routes the request to the model, and accounts for usage.
           </P>
           <P>
             <strong className="text-foreground">You send:</strong> messages / input, whether to{' '}
