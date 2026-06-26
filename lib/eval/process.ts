@@ -8,12 +8,12 @@
  * overlap, and the status guards prevent double-finalize/double-email.
  */
 import { and, eq, gte, inArray, lt, sql } from 'drizzle-orm';
-import { generateText, Output, jsonSchema } from 'ai';
+import { generateText } from 'ai';
 import type { ModelMessage } from 'ai';
 import { getDb } from '@/db/client';
 import { evalRuns, evalSamples, usageEvents, type EvalWinner, type KeyParams } from '@/db/schema';
 import { buildSystem } from '@/lib/gateway/call';
-import { validateAgainstSchema } from '@/lib/gateway/openai-map';
+import { generateStructured } from '@/lib/gateway/structured';
 import { extractGatewayCost } from '@/lib/usage/record';
 import { judge, type JudgeVerdict } from '@/lib/eval/judge';
 import { evalModel } from '@/lib/eval/model';
@@ -45,18 +45,17 @@ async function replayChallenger(
     providerOptions: { gateway: { tags: ['eval:challenger'] } } as never,
   };
   if (structured && outputSchema) {
-    const r = await generateText({
-      ...callArgs,
-      experimental_output: Output.object({ schema: jsonSchema(outputSchema) }),
-    });
-    const obj = r.experimental_output as unknown;
-    const check = validateAgainstSchema(obj, outputSchema);
+    // Tolerant structured generation: an output that wraps/pads its JSON (common
+    // for non-OpenAI/Anthropic models) is recovered instead of crashing. A truly
+    // unparseable one comes back schemaValid:false with the raw text preserved, so
+    // the caller records it as a graded "challenger loses" with the real output
+    // visible — not a dropped sample.
+    const r = await generateStructured(callArgs, outputSchema);
     return {
-      // undefined → JSON.stringify yields the value undefined (not a string); guard it.
-      output: obj === undefined ? '' : JSON.stringify(obj),
+      output: r.text,
       costUsd: extractGatewayCost(r.providerMetadata),
       latencyMs: Date.now() - start,
-      schemaValid: check.valid,
+      schemaValid: r.valid,
     };
   }
   const r = await generateText(callArgs);

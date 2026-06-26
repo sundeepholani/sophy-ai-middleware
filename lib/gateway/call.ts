@@ -33,6 +33,7 @@ import {
   ZERO_USAGE,
 } from '@/lib/usage/record';
 import { openAiError } from '@/lib/http/openai';
+import { generateStructured } from '@/lib/gateway/structured';
 import { scheduleChampionCapture } from '@/lib/eval/capture';
 
 const SYSTEM_PREAMBLE =
@@ -170,26 +171,25 @@ export async function handleNonStreaming(
 
   try {
     if (ctx.structured && ctx.schema) {
-      const schema = ctx.schema;
-      const result = await generateText({
-        ...commonCall(ctx, messages),
-        experimental_output: Output.object({ schema: jsonSchema(schema) }),
-      });
+      // Tolerant structured generation: native-JSON models take the strict path
+      // unchanged; a model that fences/pads its JSON is recovered instead of
+      // failing. Only genuinely unparseable output still 502s.
+      const result = await generateStructured(commonCall(ctx, messages), ctx.schema);
       const usage = normalizeUsage(result.usage);
-      const obj = result.experimental_output as unknown;
-      const check = validateAgainstSchema(obj, schema);
-      if (!check.valid) {
+      const costUsd = extractGatewayCost(result.providerMetadata);
+      const gatewayRequestId = extractGatewayRequestId(result.providerMetadata);
+      if (!result.valid) {
         await recordUsage({
           ...base,
           usage,
-          costUsd: extractGatewayCost(result.providerMetadata),
+          costUsd,
           latencyMs: Date.now() - start,
           status: 'validation_failed',
           responseKind: 'structured',
-          gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
-          errorMessage: check.errors,
+          gatewayRequestId,
+          errorMessage: result.errors,
         });
-        await logIf(JSON.stringify(obj), 'validation_failed');
+        await logIf(result.text, 'validation_failed');
         return openAiError(502, 'api_error', 'Model output failed schema validation.', {
           code: 'schema_validation_failed',
         });
@@ -197,21 +197,21 @@ export async function handleNonStreaming(
       await recordUsage({
         ...base,
         usage,
-        costUsd: extractGatewayCost(result.providerMetadata),
+        costUsd,
         latencyMs: Date.now() - start,
         status: 'ok',
         responseKind: 'structured',
-        gatewayRequestId: extractGatewayRequestId(result.providerMetadata),
+        gatewayRequestId,
       });
-      await logIf(JSON.stringify(obj), 'ok');
-      scheduleChampionCapture(ctx, messages, 'chat', JSON.stringify(obj), result.providerMetadata, start, eventId);
+      await logIf(result.text, 'ok');
+      scheduleChampionCapture(ctx, messages, 'chat', result.text, result.providerMetadata, start, eventId);
       return Response.json(
         toChatCompletion({
           id,
           created,
           model: ctx.model,
-          content: JSON.stringify(obj),
-          finishReason: result.finishReason,
+          content: result.text,
+          finishReason: result.finishReason ?? 'stop',
           usage,
         }),
         { headers: { 'cache-control': 'no-store' } },
