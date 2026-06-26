@@ -15,6 +15,7 @@
  */
 import type { ModelMessage } from 'ai';
 import type { NormalizedUsage } from '@/lib/usage/record';
+import type { ResponsesToolDef, ResponsesToolChoice } from '@/lib/gateway/openai-map';
 
 // ---- Request shape (subset we read) ----------------------------------------
 
@@ -30,9 +31,15 @@ export interface ResponsesContentPart {
   filename?: string;
 }
 export interface ResponsesInputItem {
-  type?: string; // optional "message"
+  type?: string; // "message" | "function_call" | "function_call_output"
   role?: 'user' | 'assistant' | 'system' | 'developer';
   content?: string | ResponsesContentPart[];
+  // function_call item (a prior model tool call being replayed):
+  call_id?: string;
+  name?: string;
+  arguments?: string;
+  // function_call_output item (a tool result the client sends back):
+  output?: string | ResponsesContentPart[];
 }
 export interface ResponsesRequest {
   model?: string;
@@ -45,7 +52,8 @@ export interface ResponsesRequest {
   stream?: boolean;
   previous_response_id?: string | null;
   store?: boolean;
-  tools?: unknown[];
+  tools?: ResponsesToolDef[];
+  tool_choice?: ResponsesToolChoice;
 }
 
 // ---- input -> AI SDK messages ----------------------------------------------
@@ -86,11 +94,22 @@ function responsesPartToModelPart(part: ResponsesContentPart) {
   }
 }
 
+function safeJson(s: string | undefined): unknown {
+  if (!s) return {};
+  try {
+    return JSON.parse(s);
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Map the Responses `input` (string or array of items) to AI SDK messages.
  * Client system/developer items are dropped — the key owns the system prompt.
- * User turns carry multimodal content (text + input_image + input_file);
- * assistant turns carry text only.
+ * User turns carry multimodal content; assistant turns carry text. Tool turns
+ * are preserved: `function_call` items become an assistant tool-call message and
+ * `function_call_output` items become a tool-result message (grouped so each
+ * assistant tool-call run is answered by one tool-result run, as providers expect).
  */
 export function responsesInputToMessages(
   input: string | ResponsesInputItem[] | undefined,
@@ -99,8 +118,58 @@ export function responsesInputToMessages(
   if (typeof input === 'string') {
     return input.trim() ? [{ role: 'user', content: input }] : [];
   }
-  const out: ModelMessage[] = [];
+
+  // call_id -> tool name, recovered from function_call items (results omit it).
+  const toolNameById = new Map<string, string>();
   for (const item of input) {
+    if (item.type === 'function_call' && item.call_id && item.name) {
+      toolNameById.set(item.call_id, item.name);
+    }
+  }
+
+  const out: ModelMessage[] = [];
+  let pendingCalls: unknown[] = [];
+  let pendingResults: unknown[] = [];
+  const flush = () => {
+    if (pendingCalls.length) {
+      out.push({ role: 'assistant', content: pendingCalls as never });
+      pendingCalls = [];
+    }
+    if (pendingResults.length) {
+      out.push({ role: 'tool', content: pendingResults as never } as ModelMessage);
+      pendingResults = [];
+    }
+  };
+
+  for (const item of input) {
+    if (item.type === 'function_call') {
+      if (pendingResults.length) flush(); // close the prior call/result round
+      if (item.call_id && item.name) {
+        pendingCalls.push({
+          type: 'tool-call',
+          toolCallId: item.call_id,
+          toolName: item.name,
+          input: safeJson(item.arguments),
+        });
+      }
+      continue;
+    }
+    if (item.type === 'function_call_output') {
+      if (pendingCalls.length) flush(); // emit the assistant calls before their results
+      if (item.call_id) {
+        const text = typeof item.output === 'string' ? item.output : partText(item.output);
+        pendingResults.push({
+          type: 'tool-result',
+          toolCallId: item.call_id,
+          toolName: toolNameById.get(item.call_id) ?? item.call_id,
+          output: { type: 'text', value: text },
+        });
+      }
+      continue;
+    }
+
+    // Any plain message item — flush any open tool run first.
+    flush();
     if (item.role === 'system' || item.role === 'developer') continue;
 
     if (typeof item.content === 'string') {
@@ -112,18 +181,17 @@ export function responsesInputToMessages(
     if (!Array.isArray(item.content)) continue;
 
     if (item.role === 'assistant') {
-      // Prior model output — text only.
       const text = partText(item.content);
       if (text) out.push({ role: 'assistant', content: text });
       continue;
     }
 
-    // User turn — preserve text + images + files.
     const parts = item.content
       .map(responsesPartToModelPart)
       .filter((p): p is NonNullable<typeof p> => p != null);
     if (parts.length > 0) out.push({ role: 'user', content: parts as never });
   }
+  flush();
   return out;
 }
 
@@ -170,6 +238,14 @@ export function mapResponsesUsage(u: NormalizedUsage): ResponsesUsage {
   };
 }
 
+/** A function tool call the model emitted, in Responses output-item shape. */
+export interface ResponsesOutToolCall {
+  id: string; // output item id, e.g. "fc_…"
+  callId: string; // call_id the client echoes back as function_call_output
+  name: string;
+  arguments: string;
+}
+
 export interface BuildResponseArgs {
   id: string;
   msgId: string;
@@ -181,23 +257,32 @@ export interface BuildResponseArgs {
   structured: boolean;
   temperature?: number;
   topP?: number;
+  toolCalls?: ResponsesOutToolCall[];
 }
 
 /** Build the Responses `response` object (used for the buffered reply and for
  *  the `response` payload in created/in_progress/completed streaming events). */
 export function buildResponseObject(args: BuildResponseArgs): Record<string, unknown> {
-  const output =
-    args.text == null
-      ? []
-      : [
-          {
-            id: args.msgId,
-            type: 'message',
-            status: 'completed',
-            role: 'assistant',
-            content: [{ type: 'output_text', text: args.text, annotations: [] }],
-          },
-        ];
+  const output: Record<string, unknown>[] = [];
+  if (args.text != null) {
+    output.push({
+      id: args.msgId,
+      type: 'message',
+      status: 'completed',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: args.text, annotations: [] }],
+    });
+  }
+  for (const tc of args.toolCalls ?? []) {
+    output.push({
+      id: tc.id,
+      type: 'function_call',
+      status: 'completed',
+      call_id: tc.callId,
+      name: tc.name,
+      arguments: tc.arguments,
+    });
+  }
   return {
     id: args.id,
     object: 'response',

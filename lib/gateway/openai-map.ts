@@ -25,34 +25,79 @@ export interface AiTools {
   toolChoice?: AiToolChoice;
 }
 
+/** Flat function-tool shape used by the Responses API (vs. the chat nesting). */
+export interface ResponsesToolDef {
+  type?: string;
+  name?: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+export type ResponsesToolChoice = 'auto' | 'none' | 'required' | { type: 'function'; name: string };
+
+interface ToolDef {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+
 /**
- * Build an AI SDK ToolSet from client-supplied OpenAI tool definitions. Each tool
- * is defined with NO `execute` — so the model emits the call and the SDK returns
- * it without running anything (the proxy never executes tools). Returns null when
- * there are no tools.
+ * Core: build a passthrough ToolSet from normalized tool defs. Each tool is
+ * defined with NO `execute`, so the model emits the call and the SDK returns it
+ * without running anything (the proxy never executes tools). Null = no tools.
  */
+function buildAiTools(defs: ToolDef[], toolChoice: AiToolChoice | undefined): AiTools | null {
+  const set: ToolSet = {};
+  for (const d of defs) {
+    if (!d.name) continue;
+    set[d.name] = tool({
+      description: d.description,
+      inputSchema: jsonSchema((d.parameters ?? { type: 'object', properties: {} }) as never),
+    });
+  }
+  if (Object.keys(set).length === 0) return null;
+  return { tools: set, toolChoice };
+}
+
+/** Chat Completions tools: [{ type:'function', function:{ name, … } }] + tool_choice. */
 export function toAiToolSet(
   tools: OpenAITool[] | undefined,
   toolChoice: OpenAIToolChoice | undefined,
 ): AiTools | null {
   if (!Array.isArray(tools) || tools.length === 0) return null;
-  const set: ToolSet = {};
+  const defs: ToolDef[] = [];
   for (const t of tools) {
     if (t?.type !== 'function' || !t.function?.name) continue;
-    set[t.function.name] = tool({
+    defs.push({
+      name: t.function.name,
       description: t.function.description,
-      inputSchema: jsonSchema((t.function.parameters ?? { type: 'object', properties: {} }) as never),
+      parameters: t.function.parameters,
     });
   }
-  if (Object.keys(set).length === 0) return null;
-
   let choice: AiToolChoice | undefined;
-  if (toolChoice === 'auto' || toolChoice === 'none' || toolChoice === 'required') {
-    choice = toolChoice;
-  } else if (toolChoice && typeof toolChoice === 'object' && toolChoice.type === 'function') {
+  if (toolChoice === 'auto' || toolChoice === 'none' || toolChoice === 'required') choice = toolChoice;
+  else if (toolChoice && typeof toolChoice === 'object' && toolChoice.type === 'function') {
     choice = { type: 'tool', toolName: toolChoice.function.name };
   }
-  return { tools: set, toolChoice: choice };
+  return buildAiTools(defs, choice);
+}
+
+/** Responses API tools: [{ type:'function', name, description, parameters }] (flat) + tool_choice. */
+export function responsesToAiToolSet(
+  tools: ResponsesToolDef[] | undefined,
+  toolChoice: ResponsesToolChoice | undefined,
+): AiTools | null {
+  if (!Array.isArray(tools) || tools.length === 0) return null;
+  const defs: ToolDef[] = [];
+  for (const t of tools) {
+    if (t?.type !== 'function' || !t.name) continue; // only function tools pass through
+    defs.push({ name: t.name, description: t.description, parameters: t.parameters });
+  }
+  let choice: AiToolChoice | undefined;
+  if (toolChoice === 'auto' || toolChoice === 'none' || toolChoice === 'required') choice = toolChoice;
+  else if (toolChoice && typeof toolChoice === 'object' && toolChoice.type === 'function') {
+    choice = { type: 'tool', toolName: toolChoice.name };
+  }
+  return buildAiTools(defs, choice);
 }
 
 function safeJsonParse(s: string): unknown {
