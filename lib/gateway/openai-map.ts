@@ -126,7 +126,13 @@ export function toModelMessages(messages: OpenAIMessage[]): ModelMessage[] {
 
     if (m.role === 'assistant' && m.tool_calls?.length) {
       const parts: unknown[] = [];
-      if (typeof m.content === 'string' && m.content) parts.push({ type: 'text', text: m.content });
+      // Preserve any leading text, whether sent as a string or as content parts
+      // (mirrors the non-tool assistant path), then append the tool-call parts.
+      if (typeof m.content === 'string') {
+        if (m.content) parts.push({ type: 'text', text: m.content });
+      } else if (Array.isArray(m.content)) {
+        for (const p of m.content) parts.push(partToModelPart(p));
+      }
       for (const tc of m.tool_calls) {
         parts.push({
           type: 'tool-call',
@@ -228,7 +234,9 @@ export function toChatCompletion(args: {
               }
             : {}),
         },
-        finish_reason: mapFinishReason(args.finishReason),
+        // Force 'tool_calls' whenever the turn emitted tool calls, matching the
+        // streaming path (some providers report 'stop' despite emitting calls).
+        finish_reason: hasTools ? 'tool_calls' : mapFinishReason(args.finishReason),
       },
     ],
     usage: toOpenAIUsage(args.usage),
