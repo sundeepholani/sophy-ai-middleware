@@ -28,9 +28,30 @@ const PALETTE = [
 const OTHER_COLOR = '#f9a8d4';
 
 const nf = new Intl.NumberFormat('en-US');
+const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
+
 function fmt(metric: Metric, n: number): string {
   if (metric === 'cost') return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
   return nf.format(Math.round(n));
+}
+
+/** Short label for axis ticks + per-column totals (keeps narrow columns legible). */
+function fmtCompact(metric: Metric, n: number): string {
+  if (metric === 'cost') {
+    if (n === 0) return '$0';
+    return n >= 1 ? `$${compact.format(n)}` : `$${n.toFixed(2)}`;
+  }
+  return compact.format(Math.round(n));
+}
+
+/** A "nice" axis ceiling + tick step for [0, max] using 1/2/2.5/5/10 steps. */
+function niceScale(max: number, ticks = 4): { max: number; step: number } {
+  if (!(max > 0)) return { max: 1, step: 1 };
+  const rawStep = max / ticks;
+  const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const norm = rawStep / mag;
+  const niceStep = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10) * mag;
+  return { max: Math.ceil(max / niceStep) * niceStep, step: niceStep };
 }
 
 interface Legend {
@@ -39,6 +60,17 @@ interface Legend {
   value: number;
   pct: number;
   color: string;
+}
+
+interface Segment {
+  cat: string;
+  value: number;
+  color: string;
+}
+interface Column {
+  day: string;
+  /** Stacking buckets for this day, in render (top→bottom) order, value > 0. */
+  segments: Segment[];
 }
 
 function shape(rows: UsageStackRow[], metric: Metric) {
@@ -77,34 +109,22 @@ function shape(rows: UsageStackRow[], metric: Metric) {
   // Per-day value per stacking bucket (top cats individually, rest → Other).
   const days = [...new Set(rows.map((r) => r.day))].sort();
   const perDay = new Map<string, Map<string, number>>();
-  const dayTotal = new Map<string, number>();
   for (const r of rows) {
     const bucket = topIndex.has(r.cat) ? r.cat : OTHER;
     if (!perDay.has(r.day)) perDay.set(r.day, new Map());
     const m = perDay.get(r.day)!;
     m.set(bucket, (m.get(bucket) ?? 0) + val(r));
-    dayTotal.set(r.day, (dayTotal.get(r.day) ?? 0) + val(r));
   }
-  // Busiest day — the full-height reference for absolute mode.
-  const maxTotal = Math.max(0, ...days.map((d) => dayTotal.get(d) ?? 0));
 
-  // Stack bottom→top by rank, Other on top — so render order is top→bottom = reversed.
-  const order = [...topCats, ...(hasOther ? [OTHER] : [])];
-  const renderOrder = [...order].reverse();
+  // Stack bottom→top by rank, Other on top — so DOM (top→bottom) order is reversed.
+  const renderOrder = [...topCats, ...(hasOther ? [OTHER] : [])].reverse();
 
-  const columns = days.map((d) => {
+  const columns: Column[] = days.map((d) => {
     const m = perDay.get(d);
-    const total = dayTotal.get(d) ?? 0;
     const segments = renderOrder
       .map((cat) => ({ cat, value: m?.get(cat) ?? 0, color: colorOf(cat) }))
-      .filter((s) => s.value > 0)
-      .map((s) => ({
-        ...s,
-        // share% within the day, and absolute% of the busiest day
-        pct: total > 0 ? (s.value / total) * 100 : 0,
-        abs: maxTotal > 0 ? (s.value / maxTotal) * 100 : 0,
-      }));
-    return { day: d, total, segments };
+      .filter((s) => s.value > 0);
+    return { day: d, segments };
   });
 
   return { legend, columns, days };
@@ -139,6 +159,10 @@ function Segmented<T extends string>({
   );
 }
 
+// Vertical insets shared by the y-axis and the plot area so their `bottom: x%`
+// positions line up. top headroom leaves room for the per-column total labels.
+const PLOT_INSET = 'top-5 bottom-2';
+
 export function UsageShareChart({
   data,
 }: {
@@ -148,6 +172,8 @@ export function UsageShareChart({
   const [dim, setDim] = useState<UsageDimension>('key');
   const [metric, setMetric] = useState<Metric>('cost');
   const [mode, setMode] = useState<Mode>('absolute');
+  // Legend filter: empty = show all; otherwise show only the selected categories.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [hover, setHover] = useState<{
     x: number;
     y: number;
@@ -156,9 +182,41 @@ export function UsageShareChart({
     value: number;
     pct: number;
   } | null>(null);
+
   const { legend, columns, days } = useMemo(() => shape(data[dim], metric), [data, dim, metric]);
 
-  const empty = columns.every((c) => c.total <= 0);
+  // Flipping the dimension (keys ↔ models) changes the category universe, so a
+  // stale selection would filter to nothing — clear it alongside the switch.
+  function changeDim(v: UsageDimension) {
+    setDim(v);
+    setSelected(new Set());
+  }
+
+  const filterActive = selected.size > 0;
+  const isShown = (cat: string) => !filterActive || selected.has(cat);
+
+  // Per-day totals over the currently-shown categories, and the busiest such day.
+  const dayTotals = useMemo(
+    () => columns.map((c) => c.segments.reduce((s, seg) => s + (isShown(seg.cat) ? seg.value : 0), 0)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [columns, selected],
+  );
+  const filteredMax = Math.max(0, ...dayTotals);
+  const empty = filteredMax <= 0;
+
+  // y-axis scale + ticks: share mode is a fixed 0–100%, absolute uses a nice ceiling.
+  const axis = mode === 'share' ? { max: 100, step: 25 } : niceScale(filteredMax);
+  const ticks: number[] = [];
+  if (axis.max > 0) for (let v = 0; v <= axis.max + axis.step * 1e-6; v += axis.step) ticks.push(v);
+
+  function toggle(label: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  }
 
   return (
     <div className="space-y-4">
@@ -166,7 +224,7 @@ export function UsageShareChart({
       <div className="flex flex-wrap items-center gap-2">
         <Segmented
           value={dim}
-          onChange={setDim}
+          onChange={changeDim}
           options={[
             { value: 'key', label: 'By API key' },
             { value: 'model', label: 'By model' },
@@ -192,71 +250,146 @@ export function UsageShareChart({
       </div>
 
       {empty ? (
-        <p className="py-12 text-center text-sm text-muted-foreground">No usage in this range.</p>
+        <p className="py-12 text-center text-sm text-muted-foreground">
+          {filterActive ? 'No usage for the selected series.' : 'No usage in this range.'}
+        </p>
       ) : (
         <div className="flex flex-col gap-4 lg:flex-row">
-          {/* Each column is a full-height (definite) flex box so segment heights
-              resolve as percentages. Share mode fills each column to 100%;
-              absolute mode scales to the busiest day, so segments anchor to the
-              bottom (justify-end) and short days leave a gap on top. */}
           <div className="min-w-0 flex-1">
-            {/* p-2 insets the bars so the rounded border never clips them. */}
-            <div
-              className="flex h-64 items-stretch gap-px rounded-md border bg-muted/20 p-2"
-              onMouseLeave={() => setHover(null)}
-            >
-              {columns.map((c) => (
-                <div key={c.day} className="flex h-full min-w-0 flex-1 flex-col justify-end">
-                  {c.segments.map((s) => {
-                    const label = s.cat === OTHER ? 'Other' : s.cat;
-                    return (
-                      <div
-                        key={s.cat}
-                        className="w-full transition-opacity hover:opacity-80"
-                        style={{ height: `${mode === 'share' ? s.pct : s.abs}%`, backgroundColor: s.color }}
-                        onMouseMove={(e) =>
-                          setHover({
-                            x: e.clientX,
-                            y: e.clientY,
-                            cat: label,
-                            day: c.day,
-                            value: s.value,
-                            pct: s.pct,
-                          })
-                        }
-                      />
-                    );
-                  })}
+            <div className="flex gap-2">
+              {/* y-axis tick values, aligned to the plot area's 0–100% range. */}
+              <div className="relative h-64 w-12 shrink-0" aria-hidden>
+                <div className={`absolute inset-x-0 ${PLOT_INSET}`}>
+                  {ticks.map((t) => (
+                    <div
+                      key={t}
+                      className="absolute right-1 translate-y-1/2 text-[10px] leading-none tabular-nums text-muted-foreground"
+                      style={{ bottom: `${(t / axis.max) * 100}%` }}
+                    >
+                      {mode === 'share' ? `${t}%` : fmtCompact(metric, t)}
+                    </div>
+                  ))}
                 </div>
-              ))}
+              </div>
+
+              {/* Plot: gridlines behind, stacked bars in front. */}
+              <div className="relative h-64 min-w-0 flex-1 rounded-md border bg-muted/20">
+                <div className={`absolute inset-x-2 ${PLOT_INSET}`}>
+                  {/* Horizontal gridlines at each tick. */}
+                  {ticks.map((t) => (
+                    <div
+                      key={t}
+                      className="pointer-events-none absolute inset-x-0 border-t border-dashed border-border/60"
+                      style={{ bottom: `${(t / axis.max) * 100}%` }}
+                    />
+                  ))}
+
+                  <div
+                    className="absolute inset-0 flex items-stretch gap-px"
+                    onMouseLeave={() => setHover(null)}
+                  >
+                    {columns.map((c, ci) => {
+                      const dayTotal = dayTotals[ci];
+                      const barTop = mode === 'share' ? (dayTotal > 0 ? 100 : 0) : (dayTotal / axis.max) * 100;
+                      return (
+                        <div
+                          key={c.day}
+                          className="relative flex h-full min-w-0 flex-1 flex-col justify-end"
+                        >
+                          {/* Total for the day, riding just above the bar. */}
+                          {dayTotal > 0 && (
+                            <div
+                              className="pointer-events-none absolute inset-x-0 text-center text-[10px] leading-none font-medium tabular-nums whitespace-nowrap text-foreground/75"
+                              style={{ bottom: `calc(${barTop}% + 2px)` }}
+                            >
+                              {fmtCompact(metric, dayTotal)}
+                            </div>
+                          )}
+                          {c.segments
+                            .filter((s) => isShown(s.cat))
+                            .map((s) => {
+                              const label = s.cat === OTHER ? 'Other' : s.cat;
+                              const pct = dayTotal > 0 ? (s.value / dayTotal) * 100 : 0;
+                              const height = mode === 'share' ? pct : (s.value / axis.max) * 100;
+                              return (
+                                <div
+                                  key={s.cat}
+                                  className="w-full transition-opacity hover:opacity-80"
+                                  style={{ height: `${height}%`, backgroundColor: s.color }}
+                                  onMouseMove={(e) =>
+                                    setHover({
+                                      x: e.clientX,
+                                      y: e.clientY,
+                                      cat: label,
+                                      day: c.day,
+                                      value: s.value,
+                                      pct,
+                                    })
+                                  }
+                                />
+                              );
+                            })}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
             </div>
-            <div className="mt-1 flex justify-between text-xs text-muted-foreground">
+
+            <div className="mt-1 flex justify-between pl-14 text-xs text-muted-foreground">
               <span>{days[0]}</span>
               <span>{mode === 'share' ? `share of ${metric}` : metric} / day</span>
               <span>{days[days.length - 1]}</span>
             </div>
           </div>
 
-          {/* Legend: ranked over the whole range — % in share mode, totals in absolute mode. */}
-          <ol className="w-full shrink-0 space-y-1.5 text-sm lg:w-64">
-            {legend.map((l, i) => (
-              <li key={l.label} className="flex items-center gap-2">
-                <span className="w-4 text-right text-xs tabular-nums text-muted-foreground">
-                  {i + 1}
-                </span>
-                <span
-                  className="h-2.5 w-2.5 shrink-0 rounded-full"
-                  style={{ backgroundColor: l.color }}
-                />
-                <span className="min-w-0 flex-1 truncate" title={l.display}>
-                  {l.display}
-                </span>
-                <span className="shrink-0 tabular-nums text-muted-foreground">
-                  {mode === 'share' ? `${l.pct.toFixed(1)}%` : fmt(metric, l.value)}
-                </span>
-              </li>
-            ))}
-          </ol>
+          {/* Legend doubles as a filter: click to isolate series, click again to remove.
+              Ranked over the whole range — % in share mode, totals in absolute mode. */}
+          <div className="w-full shrink-0 space-y-1.5 lg:w-64">
+            <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
+              <span>{filterActive ? `${selected.size} selected` : 'Click to filter'}</span>
+              {filterActive && (
+                <button
+                  type="button"
+                  onClick={() => setSelected(new Set())}
+                  className="font-medium text-primary hover:underline"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <ol className="space-y-0.5 text-sm">
+              {legend.map((l, i) => {
+                const on = selected.has(l.label);
+                return (
+                  <li key={l.label}>
+                    <button
+                      type="button"
+                      aria-pressed={on}
+                      onClick={() => toggle(l.label)}
+                      title={l.display}
+                      className={`flex w-full items-center gap-2 rounded px-1 py-0.5 text-left transition-colors hover:bg-muted ${
+                        filterActive && !on ? 'opacity-40' : ''
+                      }`}
+                    >
+                      <span className="w-4 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                        {i + 1}
+                      </span>
+                      <span
+                        className="h-2.5 w-2.5 shrink-0 rounded-full"
+                        style={{ backgroundColor: l.color }}
+                      />
+                      <span className="min-w-0 flex-1 truncate">{l.display}</span>
+                      <span className="shrink-0 tabular-nums text-muted-foreground">
+                        {mode === 'share' ? `${l.pct.toFixed(1)}%` : fmt(metric, l.value)}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
         </div>
       )}
 
