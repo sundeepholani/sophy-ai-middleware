@@ -11,10 +11,34 @@
  * (OpenAI/Anthropic — unchanged), and adds a TOLERANT fallback that extracts the
  * JSON from the raw text and validates it ourselves. The fallback only runs when
  * the strict path would otherwise fail, so a call that succeeds today is untouched.
+ *
+ * The fallback also covers SCHEMA REJECTIONS: some user schemas are valid JSON
+ * Schema yet violate a provider's native structured-mode constraints — OpenAI
+ * strict mode requires every key in `properties` to appear in `required`, and
+ * Anthropic refuses an empty `{}` sub-schema. The provider then 400s before
+ * generating anything. Rather than surface a hard error, we drop native mode and
+ * re-ask with the schema inline (the plain-text retry), validating ourselves.
  */
 import { generateText, Output, jsonSchema, NoObjectGeneratedError } from 'ai';
 import type { LanguageModelUsage, ProviderMetadata, FinishReason } from 'ai';
 import { validateAgainstSchema } from '@/lib/gateway/openai-map';
+
+/**
+ * True when the provider rejected our JSON schema in its native structured mode
+ * (rather than failing to generate). Shows up as a 400 whose message references
+ * the response format / output schema — e.g. OpenAI strict mode demanding every
+ * key in `required`, or Anthropic refusing an empty `{}` sub-schema. These are
+ * recoverable by dropping native mode and re-asking with the schema inline.
+ */
+export function isSchemaRejection(e: unknown): boolean {
+  if (typeof e !== 'object' || e === null) return false;
+  if ((e as { statusCode?: number }).statusCode !== 400) return false;
+  const message = (e as { message?: unknown }).message;
+  if (typeof message !== 'string') return false;
+  return /response_format|output_config\.format|format\.schema|invalid schema|empty schema|required to be supplied|additionalproperties/i.test(
+    message,
+  );
+}
 
 function tryParse(s: string): unknown {
   try {
@@ -145,9 +169,11 @@ function withJsonInstruction(system: string | undefined, schema: Record<string, 
  * 3. **Plain-text retry** — some models (GLM, kimi, …) emit *prose* under the
  *    SDK's structured mode but clean (often fenced) JSON in a normal call, so we
  *    re-ask without `experimental_output` and tolerant-extract. Only reached when
- *    the strict path already failed, so native models never pay for it.
+ *    the strict path already failed, so native models never pay for it. This also
+ *    rescues SCHEMA REJECTIONS — a provider 400 that refused the schema in native
+ *    mode (see `isSchemaRejection`) — since the retry sends no native schema.
  *
- * Non-parse errors (timeouts/transient upstream failures) re-throw so callers
+ * Other upstream errors (timeouts/transient/auth failures) re-throw so callers
  * handle them exactly as before.
  */
 export async function generateStructured(
@@ -175,11 +201,17 @@ export async function generateStructured(
     finishReason = r.finishReason;
     strictErrors = strict.errors;
   } catch (e) {
-    if (!NoObjectGeneratedError.isInstance(e)) throw e; // real error → propagate
-    strictText = typeof e.text === 'string' ? e.text : '';
-    usage = e.usage;
-    providerMetadata = undefined; // the error carries no gateway cost metadata
-    finishReason = e.finishReason;
+    if (NoObjectGeneratedError.isInstance(e)) {
+      strictText = typeof e.text === 'string' ? e.text : '';
+      usage = e.usage;
+      providerMetadata = undefined; // the error carries no gateway cost metadata
+      finishReason = e.finishReason;
+    } else if (!isSchemaRejection(e)) {
+      throw e; // genuine upstream error (auth/rate-limit/timeout) → propagate
+    }
+    // A schema rejection leaves strictText empty: step 2 finds nothing to coerce
+    // and we fall through to the plain-text retry (step 3), which re-asks with
+    // the schema as a prompt instruction — sidestepping native strict mode.
   }
 
   // ---- 2) tolerant extract of the strict attempt ---------------------------
