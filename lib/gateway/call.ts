@@ -79,7 +79,7 @@ export interface CallContext {
   toolChoice?: AiToolChoice;
 }
 
-function providerOf(model: string): string {
+export function providerOf(model: string): string {
   return model.split('/')[0] ?? 'unknown';
 }
 

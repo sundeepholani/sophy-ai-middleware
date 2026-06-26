@@ -18,6 +18,7 @@ const NAV: { id: string; label: string }[] = [
   { id: 'chat-completions', label: 'Chat Completions' },
   { id: 'responses', label: 'Responses API' },
   { id: 'tools', label: 'Tool calling' },
+  { id: 'images', label: 'Image generation' },
   { id: 'models', label: 'Models' },
   { id: 'files', label: 'Files' },
   { id: 'key-behavior', label: 'Key-owned behavior' },
@@ -111,6 +112,7 @@ const ERROR_ROWS: { status: string; type: string; code: string; when: string }[]
   { status: '400', type: 'invalid_request_error', code: 'tools_unsupported', when: 'Tools sent to a key configured for structured output.' },
   { status: '400', type: 'invalid_request_error', code: 'functions_unsupported', when: 'Legacy `functions` parameter used — send `tools` instead.' },
   { status: '400', type: 'invalid_request_error', code: 'stateful_unsupported', when: '`previous_response_id` used — Sophy is stateless.' },
+  { status: '400', type: 'invalid_request_error', code: 'model_not_image', when: 'Image generation requested on a key whose model is not an image model.' },
   { status: '403', type: 'invalid_request_error', code: 'file_access_denied', when: 'Referencing a file uploaded by a different key.' },
   { status: '413', type: 'invalid_request_error', code: 'file_too_large', when: 'Upload exceeds the 4 MB limit.' },
   { status: '429', type: 'rate_limit_error', code: 'rate_limit_exceeded', when: 'Per-key requests-per-minute limit hit (see Retry-After).' },
@@ -366,6 +368,52 @@ print(second.choices[0].message.content)`}
             top-level <Code>functions</Code> parameter is not supported (<Code>400
             functions_unsupported</Code>) — use <Code>tools</Code>.
           </P>
+        </Section>
+
+        <Section id="images" title="Image generation">
+          <Method method="POST" path={`${BASE_URL}/images/generations`} />
+          <P>
+            Generate images through the same OpenAI-compatible surface. The key owns the model, so
+            this works when your key’s model is an image model (e.g. <Code>openai/gpt-image-1</Code>)
+            — a key bound to a text model returns <Code>400 model_not_image</Code>. Honored fields:{' '}
+            <Code>prompt</Code> (required), <Code>n</Code>, <Code>size</Code>, and provider knobs like{' '}
+            <Code>quality</Code> and <Code>style</Code>. Images are returned inline as base64
+            (<Code>b64_json</Code>); <Code>{'response_format: "url"'}</Code> is not supported in v1.
+          </P>
+          <CodeTabs
+            samples={[
+              {
+                label: 'python',
+                code: `from openai import OpenAI
+import base64
+
+client = OpenAI(base_url="${BASE_URL}", api_key="mw_live_…")
+
+resp = client.images.generate(
+    model="sophy",                 # ignored — the key owns the image model
+    prompt="A red panda coding at a desk, watercolor",
+    n=1,
+    size="1024x1024",
+)
+with open("out.png", "wb") as f:
+    f.write(base64.b64decode(resp.data[0].b64_json))`,
+              },
+              {
+                label: 'curl',
+                code: `curl ${BASE_URL}/images/generations \\
+  -H "Authorization: Bearer mw_live_…" \\
+  -H "Content-Type: application/json" \\
+  -d '{ "prompt": "A red panda coding at a desk, watercolor", "size": "1024x1024" }'`,
+              },
+            ]}
+          />
+          <CodeBlock
+            label="json"
+            code={`{
+  "created": 1735689600,
+  "data": [ { "b64_json": "iVBORw0KGgoAAAANSUhEUgAA…" } ]
+}`}
+          />
         </Section>
 
         <Section id="models" title="Models">

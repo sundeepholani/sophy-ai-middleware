@@ -5,6 +5,7 @@ import {
   Plug,
   KeyRound,
   Boxes,
+  Image as ImageIcon,
   Wrench,
   Braces,
   Library,
@@ -69,7 +70,7 @@ const FEATURES: { icon: typeof Plug; title: string; body: string }[] = [
   {
     icon: Plug,
     title: 'OpenAI-compatible',
-    body: 'Keep your existing OpenAI SDK. Change only the base URL and API key — chat completions, responses, models, and file uploads all work unchanged.',
+    body: 'Keep your existing OpenAI SDK. Change only the base URL and API key — chat completions, responses, image generation, models, and file uploads all work unchanged.',
   },
   {
     icon: KeyRound,
@@ -80,6 +81,11 @@ const FEATURES: { icon: typeof Plug; title: string; body: string }[] = [
     icon: Boxes,
     title: 'Any model, one gateway',
     body: 'Route to models from any provider through one gateway. Browse the catalog with capabilities like vision, tools, and reasoning.',
+  },
+  {
+    icon: ImageIcon,
+    title: 'Image generation',
+    body: 'Generate images through the same OpenAI-compatible API. Point a key at an image model and call /v1/images/generations — your client just changes the endpoint.',
   },
   {
     icon: Wrench,
