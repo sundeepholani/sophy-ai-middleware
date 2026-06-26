@@ -1,7 +1,7 @@
 import { listKeys, getEvalStatuses, listUsers, listKnowledgebaseOptions } from '@/lib/admin/queries';
 import { getSettings } from '@/lib/admin/settings';
 import { requireViewer } from '@/lib/auth/viewer';
-import { listGatewayModels, type AvailableModel } from '@/lib/gateway/models';
+import { listKeyModels, type AvailableModel } from '@/lib/gateway/models';
 import { KeysManager } from '@/components/admin/keys-manager';
 
 export const dynamic = 'force-dynamic';
@@ -20,7 +20,7 @@ export default async function KeysPage() {
   let models: AvailableModel[] = [];
   let modelsUnavailable = false;
   try {
-    models = await listGatewayModels();
+    models = await listKeyModels();
   } catch {
     models = [];
     modelsUnavailable = true;

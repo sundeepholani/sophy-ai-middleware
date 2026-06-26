@@ -371,7 +371,9 @@ function StartForm({
   onDone: () => void;
 }) {
   const [isPending, startTransition] = useTransition();
-  const options = models.filter((m) => m.id !== keyRow.model);
+  // Eval compares text outputs, so a challenger must be a language model — the
+  // key-form model list now also includes image models, which can't be judged.
+  const options = models.filter((m) => m.type === 'language' && m.id !== keyRow.model);
   const [challenger, setChallenger] = useState(options[0]?.id ?? '');
   const [targetN, setTargetN] = useState('100');
 

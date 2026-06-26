@@ -25,6 +25,7 @@ export interface AvailableModel {
 
 /** The capabilities operators can filter on (a curated subset of the gateway tags). */
 export const MODEL_CAPABILITIES = [
+  { tag: 'image-generation', label: 'Image generation', hint: 'Generates images from a prompt' },
   { tag: 'vision', label: 'Image analysis', hint: 'Accepts image input' },
   { tag: 'file-input', label: 'File input', hint: 'Accepts PDF / document input' },
   { tag: 'tool-use', label: 'Tool use', hint: 'Function / tool calling' },
@@ -36,7 +37,6 @@ export const MODEL_CAPABILITIES = [
 export function capabilityLabel(tag: string): string {
   const known = MODEL_CAPABILITIES.find((c) => c.tag === tag);
   if (known) return known.label;
-  if (tag === 'image-generation') return 'Image generation';
   if (tag === 'implicit-caching' || tag === 'explicit-caching') return 'Prompt caching';
   return tag.replace(/-/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase());
 }

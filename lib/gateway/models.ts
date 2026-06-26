@@ -48,18 +48,26 @@ async function fetchFresh(): Promise<AvailableModel[]> {
   const raw = json.data ?? json.models ?? [];
 
   return raw
-    .map((m) => ({
-      id: m.id,
-      name: m.name ?? m.id,
-      provider: m.owned_by ?? m.id.split('/')[0] ?? 'unknown',
-      type: m.type ?? 'language',
-      contextWindow: m.context_window ?? null,
-      maxTokens: m.max_tokens ?? null,
-      inputPerMTok: perMillion(m.pricing?.input),
-      outputPerMTok: perMillion(m.pricing?.output),
-      description: m.description ?? null,
-      tags: Array.isArray(m.tags) ? m.tags : [],
-    }))
+    .map((m) => {
+      const type = m.type ?? 'language';
+      const tags = Array.isArray(m.tags) ? [...m.tags] : [];
+      // The gateway flags image models via `type`, not a tag. Surface a synthetic
+      // `image-generation` capability so the capability filter and Models screen
+      // treat it like any other capability.
+      if (type === 'image' && !tags.includes('image-generation')) tags.push('image-generation');
+      return {
+        id: m.id,
+        name: m.name ?? m.id,
+        provider: m.owned_by ?? m.id.split('/')[0] ?? 'unknown',
+        type,
+        contextWindow: m.context_window ?? null,
+        maxTokens: m.max_tokens ?? null,
+        inputPerMTok: perMillion(m.pricing?.input),
+        outputPerMTok: perMillion(m.pricing?.output),
+        description: m.description ?? null,
+        tags,
+      };
+    })
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
@@ -88,11 +96,23 @@ export async function listAllModels(): Promise<AvailableModel[]> {
 }
 
 /**
- * Language models only — for the key route editor / model picker, since the
- * proxy serves text+vision→text chat (image-generation/embedding models aren't
- * routable here).
+ * Language models only — for the eval challenger / judge pickers, which compare
+ * text outputs and must never offer image/embedding models.
  */
 export async function listGatewayModels(): Promise<AvailableModel[]> {
   const all = await fetchCatalog();
   return all.filter((m) => m.type === 'language');
+}
+
+/**
+ * Models a Sophy key can be bound to: language (chat/`/v1/chat/completions` +
+ * `/v1/responses`) and image (`/v1/images/generations`). Embedding/reranking/
+ * video models aren't served by a key. Language models sort first so creating a
+ * new key still defaults to a chat model.
+ */
+export async function listKeyModels(): Promise<AvailableModel[]> {
+  const all = await fetchCatalog();
+  return all
+    .filter((m) => m.type === 'language' || m.type === 'image')
+    .sort((a, b) => (a.type === b.type ? a.id.localeCompare(b.id) : a.type === 'image' ? 1 : -1));
 }

@@ -164,3 +164,34 @@ export interface ChatCompletionChunk {
   }[];
   usage?: OpenAIUsage | null;
 }
+
+// ---- Image generation (POST /v1/images/generations) ------------------------
+
+/**
+ * OpenAI Images request (subset we read). As on every surface the key owns the
+ * model, so `model` here is ignored — the key's image model wins. Sophy returns
+ * base64 images (`response_format: "b64_json"`, the default and only supported
+ * format in v1). `quality`/`style`/`background`/`output_format` are forwarded to
+ * the provider when set; unknown-to-the-provider values are ignored upstream.
+ */
+export interface ImageGenerationRequest {
+  model?: string;
+  prompt?: string;
+  n?: number;
+  size?: string;
+  response_format?: 'b64_json' | 'url';
+  quality?: string;
+  style?: string;
+  background?: string;
+  output_format?: string;
+  user?: string;
+}
+
+export interface ImageData {
+  b64_json: string;
+}
+
+export interface ImageGenerationResponse {
+  created: number;
+  data: ImageData[];
+}
