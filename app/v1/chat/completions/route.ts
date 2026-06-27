@@ -12,6 +12,7 @@ import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
 import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
 import { toModelMessages, resolveParams, toAiToolSet } from '@/lib/gateway/openai-map';
 import { handleNonStreaming, handleStreaming, type CallContext } from '@/lib/gateway/call';
+import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
 import { systemPromptWithKb } from '@/lib/kb/retrieve';
 import { assertOwnedBlobs, extractReferencedUrls } from '@/lib/files/blob';
 import { openAiError, type ChatCompletionRequest } from '@/lib/http/openai';
@@ -126,7 +127,7 @@ export async function POST(req: Request): Promise<Response> {
     systemPrompt: await systemPromptWithKb(key.systemPrompt, key.knowledgebaseId, messages),
     params: resolveParams(key.params),
     structured,
-    schema: key.outputSchema,
+    schema: structured ? normalizeOutputSchema(key.outputSchema) : key.outputSchema,
     includeUsage: body.stream_options?.include_usage === true,
     logContent: key.logContent,
     tools: aiTools?.tools,
