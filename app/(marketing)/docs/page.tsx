@@ -474,8 +474,11 @@ with open("out.png", "wb") as f:
             </li>
             <li>
               <strong className="text-foreground">Structured output.</strong> If the key has a JSON
-              Schema attached, every response is validated against it and returned as JSON. Output
-              that fails validation returns <Code>502 schema_validation_failed</Code>.
+              Schema attached, every response is validated against it and returned as JSON. The schema
+              is normalized to work on any model the key uses — optional fields are kept (as nullable)
+              and provider-specific strictness is handled for you — so you can repoint the model
+              without rewriting the schema. Output that fails validation returns{' '}
+              <Code>502 schema_validation_failed</Code>.
             </li>
             <li>
               <strong className="text-foreground">Knowledgebase grounding.</strong> If the key has a

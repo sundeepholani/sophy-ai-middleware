@@ -27,6 +27,8 @@ import {
   requireViewer,
 } from '@/lib/auth/viewer';
 import { issueKey, generateKey } from '@/lib/auth/api-key';
+import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
+import { schemaCompileError } from '@/lib/gateway/openai-map';
 import { getSettings } from '@/lib/admin/settings';
 import { getKeyEvals, type KeyEval } from '@/lib/admin/queries';
 
@@ -144,6 +146,23 @@ function validateKeyInput(input: KeyFormInput): void {
   }
 }
 
+/**
+ * Canonicalize a key's output schema at save time: unwrap any OpenAI
+ * `{name,schema,strict}` envelope and strict-normalize so it works on any model
+ * the key may be pointed at (matching the proxy's request-time normalization, so
+ * the stored value is what actually runs). Rejects a malformed schema here rather
+ * than letting it fail on the first request. Returns the normalized schema.
+ */
+function normalizedSchemaOrThrow(
+  outputSchema: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (outputSchema === null) return null;
+  const normalized = normalizeOutputSchema(outputSchema);
+  const err = schemaCompileError(normalized);
+  if (err) throw new Error(`Output schema is not a valid JSON Schema: ${err}`);
+  return normalized;
+}
+
 export async function createKey(input: KeyFormInput): Promise<{ fullKey: string }> {
   const viewer = await assertUser();
   validateKeyInput(input);
@@ -158,7 +177,14 @@ export async function createKey(input: KeyFormInput): Promise<{ fullKey: string 
       ? DEFAULT_COST_CAP_USD
       : input.monthlyCostCapUsd;
   const knowledgebaseId = await resolveKnowledgebase(input.knowledgebaseId ?? null);
-  const { fullKey, id } = await issueKey({ ...input, ownerUserId, monthlyCostCapUsd, knowledgebaseId });
+  const outputSchema = normalizedSchemaOrThrow(input.outputSchema);
+  const { fullKey, id } = await issueKey({
+    ...input,
+    outputSchema,
+    ownerUserId,
+    monthlyCostCapUsd,
+    knowledgebaseId,
+  });
   await audit(viewer.email, 'key.create', id, {
     name: input.name,
     model: input.model,
@@ -184,6 +210,8 @@ export async function updateKey(input: KeyFormInput & { id: string }): Promise<v
   const kbId =
     input.knowledgebaseId !== undefined ? await resolveKnowledgebase(input.knowledgebaseId) : undefined;
 
+  const outputSchema = normalizedSchemaOrThrow(input.outputSchema);
+
   // Read the prior KB only when we might change it, so we can audit the change
   // (attaching/detaching a KB changes what data the key can surface).
   let priorKb: string | null = null;
@@ -203,7 +231,7 @@ export async function updateKey(input: KeyFormInput & { id: string }): Promise<v
       model: input.model,
       systemPrompt: input.systemPrompt,
       params: input.params,
-      outputSchema: input.outputSchema,
+      outputSchema,
       rpmLimit: input.rpmLimit,
       logContent: input.logContent,
       ownerUserId: newOwner,

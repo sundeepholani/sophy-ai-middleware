@@ -12,6 +12,7 @@ import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
 import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
 import { resolveParams, responsesToAiToolSet } from '@/lib/gateway/openai-map';
 import { type CallContext } from '@/lib/gateway/call';
+import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
 import { systemPromptWithKb } from '@/lib/kb/retrieve';
 import {
   handleResponsesNonStreaming,
@@ -130,7 +131,7 @@ export async function POST(req: Request): Promise<Response> {
     systemPrompt: await systemPromptWithKb(key.systemPrompt, key.knowledgebaseId, messages),
     params: resolveParams(key.params),
     structured,
-    schema: key.outputSchema,
+    schema: structured ? normalizeOutputSchema(key.outputSchema) : key.outputSchema,
     includeUsage: true,
     logContent: key.logContent,
     tools: aiTools?.tools,
