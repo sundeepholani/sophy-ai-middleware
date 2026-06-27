@@ -363,3 +363,18 @@ export function validateAgainstSchema(
     return { valid: false, errors: `schema compile error: ${String(err)}` };
   }
 }
+
+/**
+ * Compile-check a JSON Schema without validating any data. Returns an error
+ * message when the schema itself is malformed (Ajv rejects it), else null.
+ * Used to reject a bad output schema when a key is saved, rather than letting
+ * it surface as a runtime failure on the first request.
+ */
+export function schemaCompileError(schema: Record<string, unknown>): string | null {
+  try {
+    getValidator(schema);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}

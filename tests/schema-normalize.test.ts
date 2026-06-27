@@ -4,7 +4,7 @@ import {
   toStrictSchema,
   normalizeOutputSchema,
 } from '@/lib/gateway/schema-normalize';
-import { validateAgainstSchema } from '@/lib/gateway/openai-map';
+import { validateAgainstSchema, schemaCompileError } from '@/lib/gateway/openai-map';
 
 /** Assert every object node requires all its properties and forbids extras. */
 function assertStrict(node: unknown, path = 'root'): void {
@@ -129,5 +129,24 @@ describe('normalizeOutputSchema — real production cases', () => {
 
   it('returns a non-object value unchanged (defensive)', () => {
     expect(normalizeOutputSchema(null as unknown)).toBeNull();
+  });
+});
+
+describe('schemaCompileError (save-time guard)', () => {
+  it('returns null for a valid schema', () => {
+    expect(schemaCompileError({ type: 'object', properties: { a: { type: 'string' } } })).toBeNull();
+  });
+
+  it('returns a message for a malformed schema', () => {
+    expect(schemaCompileError({ type: 'banana' })).toBeTruthy();
+  });
+
+  it('a normalized real schema compiles cleanly', () => {
+    const norm = normalizeOutputSchema({
+      name: 'recommended_skills',
+      strict: true,
+      schema: { type: 'object', required: ['skills'], properties: { skills: { type: 'array', items: { type: 'string' } } } },
+    });
+    expect(schemaCompileError(norm)).toBeNull();
   });
 });

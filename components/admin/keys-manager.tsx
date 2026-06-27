@@ -821,6 +821,11 @@ function KeyForm({
               value={schemaText}
               onChange={(e) => setSchemaText(e.target.value)}
             />
+            <p className="text-xs text-muted-foreground">
+              Normalized on save to work on any model: optional fields become nullable and required,
+              and an OpenAI <code>{'{ name, schema, strict }'}</code> wrapper is unwrapped. Reopen the
+              key to see the stored form.
+            </p>
           </div>
         </div>
       )}
