@@ -1,8 +1,8 @@
 'use client';
 
-import { useId, useState, useTransition } from 'react';
+import { useId, useMemo, useState, useTransition } from 'react';
 import { toast } from 'sonner';
-import { Plus, Pencil, FlaskConical, Ban, RotateCw } from 'lucide-react';
+import { Plus, Pencil, FlaskConical, Ban, RotateCw, Search, X } from 'lucide-react';
 import { createKey, updateKey, revokeKey, rotateKey, type KeyFormInput } from '@/app/admin/actions';
 import type { KeyRow } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
@@ -99,6 +99,30 @@ export function KeysManager({
   const [evalKey, setEvalKey] = useState<KeyRow | null>(null);
   const [evalShown, setEvalShown] = useState<KeyRow | null>(null);
 
+  // Free-text filter across everything visible in a row (case-insensitive; all
+  // space-separated terms must match). The key prefix is searchable too even
+  // though only the last-4 shows, since searching a key fragment is natural.
+  const [query, setQuery] = useState('');
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return keys;
+    const terms = q.split(/\s+/);
+    return keys.filter((k) => {
+      const hay = [
+        k.name,
+        k.keyPrefix,
+        k.keyLast4,
+        k.model,
+        k.ownerEmail ?? 'unassigned',
+        quotaLabel(k, role),
+        k.status,
+      ]
+        .join(' ')
+        .toLowerCase();
+      return terms.every((t) => hay.includes(t));
+    });
+  }, [keys, query, role]);
+
   async function copyIssued() {
     if (!issued) return;
     try {
@@ -114,7 +138,9 @@ export function KeysManager({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-muted-foreground">
-          {keys.length} key{keys.length === 1 ? '' : 's'}
+          {query.trim()
+            ? `${filtered.length} of ${keys.length} keys`
+            : `${keys.length} key${keys.length === 1 ? '' : 's'}`}
         </h2>
         <Button size="sm" onClick={() => setCreateOpen(true)}>
           <Plus className="h-4 w-4" />
@@ -145,6 +171,27 @@ export function KeysManager({
         </Dialog>
       </div>
 
+      <div className="relative max-w-sm">
+        <Search className="pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search keys…"
+          aria-label="Search keys"
+          className="pr-8 pl-8"
+        />
+        {query && (
+          <button
+            type="button"
+            aria-label="Clear search"
+            onClick={() => setQuery('')}
+            className="absolute top-1/2 right-2 -translate-y-1/2 rounded-sm text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+
       <div className="overflow-hidden rounded-lg border bg-card">
         <Table>
           <TableHeader className="bg-muted/50">
@@ -166,7 +213,14 @@ export function KeysManager({
                 </TableCell>
               </TableRow>
             )}
-            {keys.map((k) => (
+            {keys.length > 0 && filtered.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
+                  No keys match “{query.trim()}”.
+                </TableCell>
+              </TableRow>
+            )}
+            {filtered.map((k) => (
               <TableRow key={k.id}>
                 <TableCell className="font-medium">{k.name}</TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">
