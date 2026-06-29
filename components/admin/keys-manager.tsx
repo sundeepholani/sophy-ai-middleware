@@ -1,8 +1,8 @@
 'use client';
 
-import { useId, useMemo, useState, useTransition } from 'react';
+import { useId, useState, useTransition } from 'react';
 import { toast } from 'sonner';
-import { Plus, Pencil, FlaskConical, Ban, RotateCw, Search, X } from 'lucide-react';
+import { Plus, Pencil, FlaskConical, Ban, RotateCw } from 'lucide-react';
 import { createKey, updateKey, revokeKey, rotateKey, type KeyFormInput } from '@/app/admin/actions';
 import type { KeyRow } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
@@ -11,6 +11,7 @@ import type { EvalRunStatus } from '@/db/schema';
 import { EvalDialog } from '@/components/admin/eval-dialog';
 import { ModelCombobox } from '@/components/admin/model-combobox';
 import { CapabilityCheckboxes } from '@/components/admin/capability-checkboxes';
+import { TableSearchBox, useTableFilter } from '@/components/admin/table-search';
 import { modelHasAllTags, capabilityLabel } from '@/lib/gateway/capabilities';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -99,29 +100,12 @@ export function KeysManager({
   const [evalKey, setEvalKey] = useState<KeyRow | null>(null);
   const [evalShown, setEvalShown] = useState<KeyRow | null>(null);
 
-  // Free-text filter across everything visible in a row (case-insensitive; all
-  // space-separated terms must match). The key prefix is searchable too even
-  // though only the last-4 shows, since searching a key fragment is natural.
-  const [query, setQuery] = useState('');
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return keys;
-    const terms = q.split(/\s+/);
-    return keys.filter((k) => {
-      const hay = [
-        k.name,
-        k.keyPrefix,
-        k.keyLast4,
-        k.model,
-        k.ownerEmail ?? 'unassigned',
-        quotaLabel(k, role),
-        k.status,
-      ]
-        .join(' ')
-        .toLowerCase();
-      return terms.every((t) => hay.includes(t));
-    });
-  }, [keys, query, role]);
+  // Free-text filter across everything visible in a row. The key prefix is
+  // searchable too even though only the last-4 shows, since searching a key
+  // fragment is natural.
+  const { query, setQuery, filtered } = useTableFilter(keys, (k) =>
+    [k.name, k.keyPrefix, k.keyLast4, k.model, k.ownerEmail ?? 'unassigned', quotaLabel(k, role), k.status].join(' '),
+  );
 
   async function copyIssued() {
     if (!issued) return;
@@ -171,26 +155,7 @@ export function KeysManager({
         </Dialog>
       </div>
 
-      <div className="relative max-w-sm">
-        <Search className="pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search keys…"
-          aria-label="Search keys"
-          className="pr-8 pl-8"
-        />
-        {query && (
-          <button
-            type="button"
-            aria-label="Clear search"
-            onClick={() => setQuery('')}
-            className="absolute top-1/2 right-2 -translate-y-1/2 rounded-sm text-muted-foreground hover:text-foreground"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        )}
-      </div>
+      <TableSearchBox value={query} onChange={setQuery} placeholder="Search keys…" label="Search keys" />
 
       <div className="overflow-hidden rounded-lg border bg-card">
         <Table>

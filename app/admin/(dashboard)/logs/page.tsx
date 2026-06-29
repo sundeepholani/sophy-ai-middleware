@@ -1,18 +1,8 @@
 import Link from 'next/link';
 import { getRecentLogs, type LogSource } from '@/lib/admin/queries';
 import { requireViewer } from '@/lib/auth/viewer';
-import { LocalTime } from '@/components/admin/local-time';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
+import { LogsTable } from '@/components/admin/logs-table';
 
 export const dynamic = 'force-dynamic';
 
@@ -42,7 +32,7 @@ export default async function LogsPage({
       </div>
 
       {/* Source filter — challenger runs can produce many samples, so let the
-          operator isolate or hide them. */}
+          operator isolate or hide them. Applied server-side; search narrows within. */}
       <div className="inline-flex rounded-md border bg-muted/40 p-0.5">
         {FILTERS.map((f) => {
           const active = (source ?? 'all') === f.value;
@@ -63,72 +53,7 @@ export default async function LogsPage({
         })}
       </div>
 
-      <div className="overflow-hidden rounded-lg border bg-card">
-        <Table>
-          <TableHeader className="bg-muted/50">
-            <TableRow>
-              <TableHead>Time</TableHead>
-              <TableHead>Key</TableHead>
-              <TableHead>Model</TableHead>
-              <TableHead className="text-right">In</TableHead>
-              <TableHead className="text-right">Out</TableHead>
-              <TableHead className="text-right">Cost</TableHead>
-              <TableHead>Kind</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {logs.map((l) => (
-              <TableRow key={l.id}>
-                <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
-                  <LocalTime value={l.createdAt.toISOString()} />
-                </TableCell>
-                <TableCell className="font-medium">{l.keyName ?? l.apiKeyId.slice(0, 8)}</TableCell>
-                <TableCell className="font-mono text-xs">
-                  <span className="inline-flex items-center gap-1.5">
-                    {l.model ?? '—'}
-                    {l.source === 'challenger' && (
-                      <Badge variant="secondary" className="font-sans">
-                        challenger
-                      </Badge>
-                    )}
-                  </span>
-                </TableCell>
-                <TableCell className="text-right tabular-nums">{l.inputTokens ?? '—'}</TableCell>
-                <TableCell className="text-right tabular-nums">{l.outputTokens ?? '—'}</TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {l.costUsd ? `$${Number(l.costUsd).toFixed(4)}` : '—'}
-                </TableCell>
-                <TableCell>
-                  {l.responseKind ?? '—'}
-                  {l.streamed ? ' · stream' : ''}
-                </TableCell>
-                <TableCell>
-                  <Badge variant={l.status === 'ok' ? 'default' : 'destructive'}>{l.status}</Badge>
-                </TableCell>
-                <TableCell className="text-right">
-                  <Button
-                    render={<Link href={`/admin/logs/${l.id}`} />}
-                    nativeButton={false}
-                    size="sm"
-                    variant="ghost"
-                  >
-                    View
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))}
-            {logs.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={9} className="text-center text-sm text-muted-foreground">
-                  No requests yet.
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </div>
+      <LogsTable logs={logs} />
     </div>
   );
 }
