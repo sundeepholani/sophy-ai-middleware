@@ -295,6 +295,8 @@ export const evalSamples = pgTable(
     challengerOutput: text('challenger_output'),
     challengerCostUsd: numeric('challenger_cost_usd', { precision: 12, scale: 6 }),
     challengerLatencyMs: integer('challenger_latency_ms'),
+    challengerInputTokens: integer('challenger_input_tokens'),
+    challengerOutputTokens: integer('challenger_output_tokens'),
     // Judge.
     judgeCostUsd: numeric('judge_cost_usd', { precision: 12, scale: 6 }),
     winner: text('winner').$type<EvalWinner>(),

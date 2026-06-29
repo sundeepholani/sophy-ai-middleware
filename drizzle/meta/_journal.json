@@ -50,6 +50,13 @@
       "when": 1782297589597,
       "tag": "0006_supreme_silvermane",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1782711376725,
+      "tag": "0007_good_alex_wilder",
+      "breakpoints": true
     }
   ]
 }

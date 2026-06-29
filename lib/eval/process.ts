@@ -14,7 +14,7 @@ import { getDb } from '@/db/client';
 import { evalRuns, evalSamples, usageEvents, type EvalWinner, type KeyParams } from '@/db/schema';
 import { buildSystem } from '@/lib/gateway/call';
 import { generateStructured } from '@/lib/gateway/structured';
-import { extractGatewayCost } from '@/lib/usage/record';
+import { extractGatewayCost, normalizeUsage } from '@/lib/usage/record';
 import { judge, type JudgeVerdict } from '@/lib/eval/judge';
 import { evalModel } from '@/lib/eval/model';
 import { summarize, type JudgedSample } from '@/lib/eval/aggregate';
@@ -32,7 +32,14 @@ async function replayChallenger(
   params: KeyParams,
   structured: boolean,
   outputSchema: Record<string, unknown> | null,
-): Promise<{ output: string; costUsd: number | null; latencyMs: number; schemaValid: boolean }> {
+): Promise<{
+  output: string;
+  costUsd: number | null;
+  latencyMs: number;
+  schemaValid: boolean;
+  inputTokens: number;
+  outputTokens: number;
+}> {
   const start = Date.now();
   const callArgs = {
     model: evalModel(model),
@@ -51,19 +58,25 @@ async function replayChallenger(
     // the caller records it as a graded "challenger loses" with the real output
     // visible — not a dropped sample.
     const r = await generateStructured(callArgs, outputSchema);
+    const u = normalizeUsage(r.usage);
     return {
       output: r.text,
       costUsd: extractGatewayCost(r.providerMetadata),
       latencyMs: Date.now() - start,
       schemaValid: r.valid,
+      inputTokens: u.inputTokens,
+      outputTokens: u.outputTokens,
     };
   }
   const r = await generateText(callArgs);
+  const u = normalizeUsage(r.usage);
   return {
     output: r.text,
     costUsd: extractGatewayCost(r.providerMetadata),
     latencyMs: Date.now() - start,
     schemaValid: true,
+    inputTokens: u.inputTokens,
+    outputTokens: u.outputTokens,
   };
 }
 
@@ -153,6 +166,8 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
           challengerOutput: challenger.output.slice(0, MAX_OUTPUT_CHARS),
           challengerCostUsd: challenger.costUsd != null ? String(challenger.costUsd) : null,
           challengerLatencyMs: challenger.latencyMs,
+          challengerInputTokens: challenger.inputTokens,
+          challengerOutputTokens: challenger.outputTokens,
           judgeCostUsd: verdict.costUsd != null ? String(verdict.costUsd) : null,
           winner: verdict.winner,
           confidence: String(verdict.confidence),
