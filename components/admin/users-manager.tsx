@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
+import { TableSearchBox, useTableFilter } from '@/components/admin/table-search';
 import {
   Dialog,
   DialogContent,
@@ -47,11 +48,16 @@ function errMsg(e: unknown): string {
 
 export function UsersManager({ users, selfId }: { users: AdminUserRow[]; selfId: string }) {
   const [inviteOpen, setInviteOpen] = useState(false);
+  const { query, setQuery, filtered } = useTableFilter(users, (u) =>
+    [u.email, u.role, u.status].join(' '),
+  );
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-muted-foreground">
-          {users.length} user{users.length === 1 ? '' : 's'}
+          {query.trim()
+            ? `${filtered.length} of ${users.length} users`
+            : `${users.length} user${users.length === 1 ? '' : 's'}`}
         </h2>
         <Button size="sm" onClick={() => setInviteOpen(true)}>
           <UserPlus className="h-4 w-4" />
@@ -70,6 +76,8 @@ export function UsersManager({ users, selfId }: { users: AdminUserRow[]; selfId:
           </DialogContent>
         </Dialog>
       </div>
+
+      <TableSearchBox value={query} onChange={setQuery} placeholder="Search users…" label="Search users" />
 
       <div className="overflow-hidden rounded-lg border bg-card">
         <Table>
@@ -90,7 +98,14 @@ export function UsersManager({ users, selfId }: { users: AdminUserRow[]; selfId:
                 </TableCell>
               </TableRow>
             )}
-            {users.map((u) => (
+            {users.length > 0 && filtered.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={5} className="h-24 text-center text-muted-foreground">
+                  No users match “{query.trim()}”.
+                </TableCell>
+              </TableRow>
+            )}
+            {filtered.map((u) => (
               <UserRowItem key={u.id} u={u} isSelf={u.id === selfId} />
             ))}
           </TableBody>

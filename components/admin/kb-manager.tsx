@@ -42,6 +42,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { TableSearchBox, useTableFilter } from '@/components/admin/table-search';
 
 const ACCEPT =
   '.txt,.md,.markdown,.csv,.json,.pdf,.docx,text/plain,text/markdown,text/csv,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -69,12 +70,17 @@ function fmtBytes(n: number | null): string {
 export function KbManager({ knowledgebases }: { knowledgebases: KnowledgebaseRow[] }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [managing, setManaging] = useState<KnowledgebaseRow | null>(null);
+  const { query, setQuery, filtered } = useTableFilter(knowledgebases, (kb) =>
+    [kb.name, kb.embeddingModel].join(' '),
+  );
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-muted-foreground">
-          {knowledgebases.length} knowledgebase{knowledgebases.length === 1 ? '' : 's'}
+          {query.trim()
+            ? `${filtered.length} of ${knowledgebases.length} knowledgebases`
+            : `${knowledgebases.length} knowledgebase${knowledgebases.length === 1 ? '' : 's'}`}
         </h2>
         <Button size="sm" onClick={() => setCreateOpen(true)}>
           <Plus className="h-4 w-4" />
@@ -95,6 +101,13 @@ export function KbManager({ knowledgebases }: { knowledgebases: KnowledgebaseRow
         </Dialog>
       </div>
 
+      <TableSearchBox
+        value={query}
+        onChange={setQuery}
+        placeholder="Search knowledgebases…"
+        label="Search knowledgebases"
+      />
+
       <div className="overflow-hidden rounded-lg border bg-card">
         <Table>
           <TableHeader className="bg-muted/50">
@@ -114,7 +127,14 @@ export function KbManager({ knowledgebases }: { knowledgebases: KnowledgebaseRow
                 </TableCell>
               </TableRow>
             )}
-            {knowledgebases.map((kb) => (
+            {knowledgebases.length > 0 && filtered.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={5} className="h-24 text-center text-muted-foreground">
+                  No knowledgebases match “{query.trim()}”.
+                </TableCell>
+              </TableRow>
+            )}
+            {filtered.map((kb) => (
               <KbRowItem key={kb.id} kb={kb} onManage={() => setManaging(kb)} />
             ))}
           </TableBody>
@@ -244,6 +264,9 @@ function DocumentsDialog({ kb, onClose }: { kb: KnowledgebaseRow; onClose: () =>
   const [refreshing, startRefresh] = useTransition();
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const { query, setQuery, filtered } = useTableFilter(docs ?? [], (d) =>
+    [d.filename, d.status].join(' '),
+  );
 
   function load() {
     startRefresh(async () => {
@@ -316,7 +339,11 @@ function DocumentsDialog({ kb, onClose }: { kb: KnowledgebaseRow; onClose: () =>
 
         <div className="flex items-center justify-between">
           <span className="text-xs text-muted-foreground">
-            {docs == null ? 'Loading…' : `${docs.length} document${docs.length === 1 ? '' : 's'}`}
+            {docs == null
+              ? 'Loading…'
+              : query.trim()
+                ? `${filtered.length} of ${docs.length} documents`
+                : `${docs.length} document${docs.length === 1 ? '' : 's'}`}
             {pending && ' · some pending ingestion'}
           </span>
           <Button size="sm" variant="ghost" onClick={load} disabled={refreshing}>
@@ -324,6 +351,16 @@ function DocumentsDialog({ kb, onClose }: { kb: KnowledgebaseRow; onClose: () =>
             Refresh
           </Button>
         </div>
+
+        {docs != null && docs.length > 0 && (
+          <TableSearchBox
+            value={query}
+            onChange={setQuery}
+            placeholder="Search documents…"
+            label="Search documents"
+            className="max-w-none"
+          />
+        )}
 
         <div className="overflow-hidden rounded-lg border">
           <Table>
@@ -344,7 +381,14 @@ function DocumentsDialog({ kb, onClose }: { kb: KnowledgebaseRow; onClose: () =>
                   </TableCell>
                 </TableRow>
               )}
-              {docs?.map((d) => (
+              {docs != null && docs.length > 0 && filtered.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={5} className="h-20 text-center text-muted-foreground">
+                    No documents match “{query.trim()}”.
+                  </TableCell>
+                </TableRow>
+              )}
+              {filtered.map((d) => (
                 <DocRowItem key={d.id} doc={d} onChanged={load} />
               ))}
             </TableBody>
