@@ -195,3 +195,34 @@ export interface ImageGenerationResponse {
   created: number;
   data: ImageData[];
 }
+
+/**
+ * OpenAI Embeddings request (subset we read). As on every surface the key owns
+ * the model, so `model` here is ignored — the key's embedding model wins.
+ * `input` accepts a single string or an array of strings; token-array inputs
+ * (arrays of integers) are not supported. `encoding_format` follows OpenAI:
+ * "float" (default) or "base64" (little-endian float32 bytes) — the official
+ * openai clients request base64 by default and decode transparently, so both
+ * must work. `dimensions` is forwarded to the provider when set.
+ */
+export interface EmbeddingsRequest {
+  model?: string;
+  input?: string | string[] | number[] | number[][];
+  encoding_format?: 'float' | 'base64';
+  dimensions?: number;
+  user?: string;
+}
+
+export interface EmbeddingData {
+  object: 'embedding';
+  index: number;
+  /** number[] for encoding_format "float", base64 string for "base64". */
+  embedding: number[] | string;
+}
+
+export interface EmbeddingsResponse {
+  object: 'list';
+  data: EmbeddingData[];
+  model: string;
+  usage: { prompt_tokens: number; total_tokens: number };
+}

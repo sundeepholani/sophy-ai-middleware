@@ -30,7 +30,7 @@ import {
 // ---- Shared TS types --------------------------------------------------------
 
 export type UsageStatus = 'ok' | 'validation_failed' | 'error';
-export type ResponseKind = 'text' | 'structured' | 'image';
+export type ResponseKind = 'text' | 'structured' | 'image' | 'embedding';
 export type KeyStatus = 'active' | 'revoked';
 
 /** Operator-set generation parameters applied to every call on a key. */
