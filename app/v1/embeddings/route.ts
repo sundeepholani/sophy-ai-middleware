@@ -34,12 +34,16 @@ export async function POST(req: Request): Promise<Response> {
     return openAiError(401, 'authentication_error', 'Invalid API key.', { code: 'invalid_api_key' });
   }
 
-  // 2) Parse the body.
+  // 2) Parse the body. `null`/scalars are valid JSON but not a valid request —
+  // reject here rather than TypeError-ing into a framework 500 downstream.
   let body: EmbeddingsRequest;
   try {
     body = (await req.json()) as EmbeddingsRequest;
   } catch {
     return openAiError(400, 'invalid_request_error', 'Request body must be valid JSON.');
+  }
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    return openAiError(400, 'invalid_request_error', 'Request body must be a JSON object.');
   }
 
   // 3) Capability guard: this surface only works for embedding models. A model

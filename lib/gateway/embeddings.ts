@@ -26,7 +26,13 @@ import { embeddingModel } from '@/lib/kb/embed';
 import { listAllModels } from '@/lib/gateway/models';
 import { type AvailableModel } from '@/lib/gateway/capabilities';
 
-/** OpenAI allows up to 2048 inputs per embeddings request. */
+/**
+ * OpenAI allows up to 2048 inputs per embeddings request. This also equals the
+ * gateway SDK's maxEmbeddingsPerCall (2048), so every request is a single
+ * provider call — which matters because embedMany's multi-chunk merge keeps only
+ * the LAST chunk's providerMetadata (gateway cost). If this cap is ever raised
+ * past the SDK's, sum cost from result.responses instead of providerMetadata.
+ */
 const MAX_INPUTS = 2048;
 
 // ---- Capability guard -------------------------------------------------------
@@ -104,12 +110,15 @@ export function parseEmbeddingsRequest(
       };
     }
     if (!input.every((v): v is string => typeof v === 'string')) {
+      const looksTokenized = input.some((v) => typeof v === 'number' || Array.isArray(v));
       return {
         ok: false,
         status: 400,
-        message: 'Token-array inputs are not supported — send strings.',
+        message: looksTokenized
+          ? 'Token-array inputs are not supported — send strings.'
+          : 'input array items must all be strings.',
         param: 'input',
-        code: 'token_input_unsupported',
+        code: looksTokenized ? 'token_input_unsupported' : undefined,
       };
     }
     if (input.some((v) => v === '')) {
@@ -137,8 +146,21 @@ export function parseEmbeddingsRequest(
   // Forward provider-specific knobs only when the client set them.
   const knobs: Record<string, unknown> = {};
   if (body.dimensions != null) {
-    if (!Number.isInteger(body.dimensions) || body.dimensions < 1) {
+    if (!Number.isInteger(body.dimensions) || body.dimensions < 1 || body.dimensions > 100_000) {
       return { ok: false, status: 400, message: 'dimensions must be a positive integer.', param: 'dimensions' };
+    }
+    // The AI SDK option name `dimensions` is OpenAI's; other embedding providers
+    // spell it differently (Google: outputDimensionality, …) and the SDK silently
+    // ignores unknown options — which would hand the client full-size vectors it
+    // didn't ask for. Reject rather than silently poison a vector store.
+    if (providerOf(model) !== 'openai') {
+      return {
+        ok: false,
+        status: 400,
+        message: 'dimensions is only supported for openai/* embedding models.',
+        param: 'dimensions',
+        code: 'dimensions_unsupported',
+      };
     }
     knobs.dimensions = body.dimensions;
   }
@@ -156,7 +178,12 @@ export function parseEmbeddingsRequest(
 
 // ---- Response mapping (pure) ------------------------------------------------
 
-/** OpenAI's base64 embedding encoding: little-endian float32 bytes. */
+/**
+ * OpenAI's base64 embedding encoding: little-endian float32 bytes. Float32Array
+ * uses platform byte order — every deploy target (Vercel x86/ARM) is LE, and the
+ * official openai clients decode platform-native too, so this matches the wire
+ * contract without a per-element DataView pass.
+ */
 export function toBase64Embedding(vector: number[]): string {
   return Buffer.from(new Float32Array(vector).buffer).toString('base64');
 }
@@ -206,8 +233,16 @@ export async function handleEmbeddings(
       values: parsed.values,
       providerOptions: parsed.providerOptions as never,
     });
+    if (result.warnings?.length) {
+      console.warn('[embeddings] provider warnings', { model: ctx.model, warnings: result.warnings });
+    }
 
-    const tokens = result.usage?.tokens ?? 0;
+    // The gateway may omit usage, and embedMany's chunked path substitutes (and
+    // sums) NaN in that case — NaN is not nullish, so `?? 0` alone won't catch
+    // it, and it would both break the usage insert (losing the cost charge) and
+    // serialize as `"prompt_tokens": null` on the wire.
+    const rawTokens = result.usage?.tokens;
+    const tokens = Number.isFinite(rawTokens) ? (rawTokens as number) : 0;
     const usage: NormalizedUsage = {
       ...ZERO_USAGE,
       inputTokens: tokens,

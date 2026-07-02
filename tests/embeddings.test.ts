@@ -104,6 +104,29 @@ describe('parseEmbeddingsRequest', () => {
       ok: false,
       param: 'dimensions',
     });
+    expect(parseEmbeddingsRequest({ input: 'x', dimensions: 100_001 }, MODEL, KEY)).toMatchObject({
+      ok: false,
+      param: 'dimensions',
+    });
+  });
+
+  it('rejects dimensions on non-OpenAI embedding models (SDK would silently ignore it)', () => {
+    expect(
+      parseEmbeddingsRequest({ input: 'x', dimensions: 256 }, 'google/gemini-embedding-001', KEY),
+    ).toMatchObject({ ok: false, code: 'dimensions_unsupported', param: 'dimensions' });
+    // Without dimensions, non-OpenAI models are fine.
+    expect(
+      parseEmbeddingsRequest({ input: 'x' }, 'google/gemini-embedding-001', KEY),
+    ).toMatchObject({ ok: true });
+  });
+
+  it('distinguishes token arrays from other non-string array items', () => {
+    expect(parseEmbeddingsRequest({ input: ['a', {} as never] }, MODEL, KEY)).toMatchObject({
+      ok: false,
+      param: 'input',
+    });
+    const mixed = parseEmbeddingsRequest({ input: ['a', {} as never] }, MODEL, KEY);
+    expect(!mixed.ok && mixed.code).toBeUndefined();
   });
 
   it('ignores the client model field entirely (key owns the model)', () => {
