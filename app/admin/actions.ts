@@ -309,15 +309,25 @@ export interface StartEvalInput {
   targetN: number;
 }
 
-export async function startEvalRun(input: StartEvalInput): Promise<void> {
-  const { viewer, model, status } = await assertCanManageKey(input.apiKeyId);
-  const challengerModel = input.challengerModel.trim();
-  if (!challengerModel) throw new Error('Challenger model is required');
-  const targetN =
-    Number.isInteger(input.targetN) && input.targetN > 0 ? Math.min(input.targetN, 1000) : 100;
+/** Clamp a requested sample size to a sane positive whole number (default 100, max 1000). */
+function clampTargetN(n: number): number {
+  return Number.isInteger(n) && n > 0 ? Math.min(n, 1000) : 100;
+}
 
-  if (status !== 'active') throw new Error('Key is not active');
-  if (challengerModel === model) {
+/**
+ * Create a running eval for one already-authorized key, enforcing the run
+ * invariants: active key, challenger differs from the champion, and at most one
+ * running eval per key (checked, then backstopped by the partial unique index).
+ * Throws with a human-readable reason; shared by the single and bulk actions.
+ */
+async function insertEvalRun(
+  key: { id: string; model: string; status: string },
+  challengerModel: string,
+  judgeModel: string,
+  targetN: number,
+): Promise<void> {
+  if (key.status !== 'active') throw new Error('Key is not active');
+  if (challengerModel === key.model) {
     throw new Error('Challenger must differ from the current model');
   }
 
@@ -325,17 +335,16 @@ export async function startEvalRun(input: StartEvalInput): Promise<void> {
   const [active] = await db
     .select({ id: evalRuns.id })
     .from(evalRuns)
-    .where(and(eq(evalRuns.apiKeyId, input.apiKeyId), eq(evalRuns.status, 'running')))
+    .where(and(eq(evalRuns.apiKeyId, key.id), eq(evalRuns.status, 'running')))
     .limit(1);
   if (active) throw new Error('An eval is already running for this key');
 
-  const settings = await getSettings();
   try {
     await db.insert(evalRuns).values({
-      apiKeyId: input.apiKeyId,
-      championModel: model,
+      apiKeyId: key.id,
+      championModel: key.model,
       challengerModel,
-      judgeModel: settings.judgeModel,
+      judgeModel,
       targetN,
       status: 'running',
     });
@@ -346,6 +355,21 @@ export async function startEvalRun(input: StartEvalInput): Promise<void> {
     }
     throw e;
   }
+}
+
+export async function startEvalRun(input: StartEvalInput): Promise<void> {
+  const { viewer, model, status } = await assertCanManageKey(input.apiKeyId);
+  const challengerModel = input.challengerModel.trim();
+  if (!challengerModel) throw new Error('Challenger model is required');
+  const targetN = clampTargetN(input.targetN);
+
+  const settings = await getSettings();
+  await insertEvalRun(
+    { id: input.apiKeyId, model, status },
+    challengerModel,
+    settings.judgeModel,
+    targetN,
+  );
   await audit(viewer.email, 'eval.start', input.apiKeyId, {
     championModel: model,
     challengerModel,
@@ -353,6 +377,143 @@ export async function startEvalRun(input: StartEvalInput): Promise<void> {
     targetN,
   });
   revalidatePath('/admin/keys');
+}
+
+// ---- Bulk key operations -----------------------------------------------------
+
+/**
+ * Outcome of a bulk action. Keys the viewer may not manage, or that fail an
+ * invariant, are SKIPPED (with the key name and a human-readable reason) rather
+ * than failing the whole batch — an operator fixing 20 keys shouldn't lose 19
+ * updates because one was revoked out from under them. Only a dead session
+ * ('unauthorized') aborts outright.
+ */
+export interface BulkActionResult {
+  done: number;
+  skipped: { name: string; reason: string }[];
+}
+
+/** Dedupe + sanity-bound the selected ids (the keys table tops out far below this). */
+function normalizeBulkIds(ids: string[]): string[] {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) throw new Error('No keys selected');
+  if (unique.length > 500) throw new Error('Too many keys selected');
+  return unique;
+}
+
+/**
+ * Map a per-key failure to a short reason for the skip report. Only known,
+ * operator-meaningful messages pass through — anything unexpected collapses to
+ * a generic 'failed', because RETURNED values bypass Next's production masking
+ * of thrown Server Action errors (a raw driver error would hand the client the
+ * failed SQL text).
+ */
+const KNOWN_SKIP_REASONS = new Set([
+  'Key is not active',
+  'Challenger must differ from the current model',
+  'An eval is already running for this key',
+]);
+function skipReason(e: unknown): string {
+  const msg = e instanceof Error ? e.message : '';
+  if (msg === 'forbidden') return 'you do not manage this key';
+  if (msg === 'not_found') return 'key no longer exists';
+  return KNOWN_SKIP_REASONS.has(msg) ? msg : 'failed';
+}
+
+/**
+ * Point several keys at a new model in one go. Authorization is per key (admin
+ * or owner), matching the single-key edit; each change is audited individually.
+ */
+export async function bulkUpdateKeyModel(input: { ids: string[]; model: string }): Promise<BulkActionResult> {
+  const model = input.model.trim();
+  if (!model) throw new Error('Model is required');
+  const ids = normalizeBulkIds(input.ids);
+
+  let done = 0;
+  const skipped: BulkActionResult['skipped'] = [];
+  for (const id of ids) {
+    let name = id.slice(0, 8);
+    // Once the UPDATE commits the key counts as done, even if the audit insert
+    // then fails — reporting a committed change as "skipped" would be a lie.
+    let mutated = false;
+    try {
+      const key = await assertCanManageKey(id);
+      name = key.name;
+      if (key.status !== 'active') {
+        skipped.push({ name, reason: 'key is not active' });
+        continue;
+      }
+      if (key.model === model) {
+        skipped.push({ name, reason: 'already on this model' });
+        continue;
+      }
+      await getDb().update(apiKeys).set({ model }).where(eq(apiKeys.id, id));
+      mutated = true;
+      done++;
+      await audit(key.viewer.email, 'key.model', id, { from: key.model, to: model });
+    } catch (e) {
+      if (e instanceof Error && e.message === 'unauthorized') throw e;
+      if (!mutated) skipped.push({ name, reason: skipReason(e) });
+      else console.error(`bulk model change: audit write failed for key ${id}`, e);
+    }
+  }
+  // Revalidate even on an all-skips batch: a skip usually means the client's
+  // snapshot has diverged from the DB (revoked elsewhere, eval started…), so
+  // this is exactly when the table needs a resync.
+  revalidatePath('/admin/keys');
+  return { done, skipped };
+}
+
+/**
+ * Start the same challenger eval on several keys. Each key's CURRENT model is its
+ * champion, so one challenger can be raced against a mixed fleet. Per-key
+ * invariants (active, challenger differs, no running eval) skip that key only.
+ */
+export async function bulkStartEvalRuns(input: {
+  ids: string[];
+  challengerModel: string;
+  targetN: number;
+}): Promise<BulkActionResult> {
+  const challengerModel = input.challengerModel.trim();
+  if (!challengerModel) throw new Error('Challenger model is required');
+  const targetN = clampTargetN(input.targetN);
+  const ids = normalizeBulkIds(input.ids);
+  const settings = await getSettings();
+
+  let done = 0;
+  const skipped: BulkActionResult['skipped'] = [];
+  for (const id of ids) {
+    let name = id.slice(0, 8);
+    // Once the run row is inserted the eval IS running; a later audit failure
+    // must not report it as skipped.
+    let started = false;
+    try {
+      const key = await assertCanManageKey(id);
+      name = key.name;
+      await insertEvalRun(
+        { id, model: key.model, status: key.status },
+        challengerModel,
+        settings.judgeModel,
+        targetN,
+      );
+      started = true;
+      done++;
+      await audit(key.viewer.email, 'eval.start', id, {
+        championModel: key.model,
+        challengerModel,
+        judgeModel: settings.judgeModel,
+        targetN,
+      });
+    } catch (e) {
+      if (e instanceof Error && e.message === 'unauthorized') throw e;
+      if (!started) skipped.push({ name, reason: skipReason(e) });
+      else console.error(`bulk eval start: audit write failed for key ${id}`, e);
+    }
+  }
+  // Unconditional for the same reason as bulkUpdateKeyModel: skips signal a
+  // stale client snapshot, so resync the table either way.
+  revalidatePath('/admin/keys');
+  return { done, skipped };
 }
 
 export async function cancelEvalRun(runId: string): Promise<void> {
