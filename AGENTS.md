@@ -13,6 +13,7 @@ The `components/ui/*` primitives wrap `@base-ui/react`, which behaves differentl
 - **No `dismissible` prop.** To make a dialog non-dismissable (e.g. a show-once secret), control `open` and ignore close requests in `onOpenChange`, and pass `showCloseButton={false}`. (`disablePointerDismissal` only covers outside-clicks.)
 - **`asChild` doesn't exist.** Use the `render` prop instead (e.g. `<Button render={<Link href=… />}>`).
 - **`Select.onValueChange` can fire with `null`.** Guard before assigning to required state.
+- **`Checkbox` renders an inline `<span>`, not a `<button>`.** Width/height are ignored on inline elements, so a sized primitive needs an explicit display — `components/ui/checkbox.tsx` carries `inline-flex items-center justify-center`; don't remove it. Flex parents mask the bug (flex items are blockified), which is why a checkbox can look fine inside a flex `<Label>` yet collapse to a border sliver in a table cell. Base-ui also ignores synthetic `el.click()` in tests/tooling — drive it with a full pointerdown/pointerup/click sequence.
 
 # Keep the marketing site and API docs current with features
 
