@@ -2,8 +2,17 @@
 
 import { useId, useState, useTransition } from 'react';
 import { toast } from 'sonner';
-import { Plus, Pencil, FlaskConical, Ban, RotateCw } from 'lucide-react';
-import { createKey, updateKey, revokeKey, rotateKey, type KeyFormInput } from '@/app/admin/actions';
+import { Plus, Pencil, FlaskConical, Ban, RotateCw, Replace } from 'lucide-react';
+import {
+  createKey,
+  updateKey,
+  revokeKey,
+  rotateKey,
+  bulkUpdateKeyModel,
+  bulkStartEvalRuns,
+  type KeyFormInput,
+  type BulkActionResult,
+} from '@/app/admin/actions';
 import type { KeyRow } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
 import type { SessionRole } from '@/lib/auth/session-config';
@@ -14,6 +23,7 @@ import { CapabilityCheckboxes } from '@/components/admin/capability-checkboxes';
 import { TableSearchBox, useTableFilter } from '@/components/admin/table-search';
 import { modelHasAllTags, capabilityLabel } from '@/lib/gateway/capabilities';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -68,6 +78,19 @@ function quotaLabel(k: KeyRow, role: SessionRole): string {
   return `${cap} · ${rpm}`;
 }
 
+/** Toast the outcome of a bulk action: one success line, one line naming any skips. */
+function reportBulk(result: BulkActionResult, verb: string) {
+  if (result.done > 0) {
+    toast.success(`${verb} ${result.done} key${result.done === 1 ? '' : 's'}`);
+  }
+  if (result.skipped.length > 0) {
+    toast.warning(
+      `Skipped ${result.skipped.length}: ${result.skipped.map((s) => `${s.name} (${s.reason})`).join(', ')}`,
+      { duration: 8000 },
+    );
+  }
+}
+
 export function KeysManager({
   keys,
   models,
@@ -106,6 +129,39 @@ export function KeysManager({
   const { query, setQuery, filtered } = useTableFilter(keys, (k) =>
     [k.name, k.keyPrefix, k.keyLast4, k.model, k.ownerEmail ?? 'unassigned', quotaLabel(k, role), k.status].join(' '),
   );
+
+  // Bulk selection. Only ACTIVE keys are selectable (the bulk actions require an
+  // active key anyway). The raw id set survives searching; what counts is derived
+  // against the fresh rows each render, so a key revoked elsewhere silently drops
+  // out rather than lingering as a stale selection.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkModelOpen, setBulkModelOpen] = useState(false);
+  const [bulkEvalOpen, setBulkEvalOpen] = useState(false);
+  const selectedKeys = keys.filter((k) => k.status === 'active' && selected.has(k.id));
+  const filteredActive = filtered.filter((k) => k.status === 'active');
+  const allFilteredSelected =
+    filteredActive.length > 0 && filteredActive.every((k) => selected.has(k.id));
+
+  function setKeySelected(id: string, on: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+  // The header checkbox works on the rows currently shown, so search + select-all
+  // composes into "select everything matching this query".
+  function toggleAllFiltered(on: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const k of filteredActive) {
+        if (on) next.add(k.id);
+        else next.delete(k.id);
+      }
+      return next;
+    });
+  }
 
   async function copyIssued() {
     if (!issued) return;
@@ -157,10 +213,38 @@ export function KeysManager({
 
       <TableSearchBox value={query} onChange={setQuery} placeholder="Search keys…" label="Search keys" />
 
+      {selectedKeys.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-3 py-2">
+          <span className="text-sm font-medium">
+            {selectedKeys.length} key{selectedKeys.length === 1 ? '' : 's'} selected
+          </span>
+          <span className="flex-1" />
+          <Button size="sm" variant="outline" onClick={() => setBulkModelOpen(true)}>
+            <Replace className="h-3.5 w-3.5" />
+            Change model…
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setBulkEvalOpen(true)}>
+            <FlaskConical className="h-3.5 w-3.5" />
+            Run eval…
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
+            Clear
+          </Button>
+        </div>
+      )}
+
       <div className="overflow-hidden rounded-lg border bg-card">
         <Table>
           <TableHeader className="bg-muted/50">
             <TableRow>
+              <TableHead className="w-8">
+                <Checkbox
+                  aria-label="Select all keys shown"
+                  checked={allFilteredSelected}
+                  onCheckedChange={(c) => toggleAllFiltered(c === true)}
+                  disabled={filteredActive.length === 0}
+                />
+              </TableHead>
               <TableHead>Name</TableHead>
               <TableHead>Key</TableHead>
               <TableHead>Model</TableHead>
@@ -173,20 +257,29 @@ export function KeysManager({
           <TableBody>
             {keys.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
+                <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
                   No keys yet — create one with “New API key”.
                 </TableCell>
               </TableRow>
             )}
             {keys.length > 0 && filtered.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
+                <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
                   No keys match “{query.trim()}”.
                 </TableCell>
               </TableRow>
             )}
             {filtered.map((k) => (
-              <TableRow key={k.id}>
+              <TableRow key={k.id} data-state={selected.has(k.id) && k.status === 'active' ? 'selected' : undefined}>
+                <TableCell>
+                  {k.status === 'active' && (
+                    <Checkbox
+                      aria-label={`Select ${k.name}`}
+                      checked={selected.has(k.id)}
+                      onCheckedChange={(c) => setKeySelected(k.id, c === true)}
+                    />
+                  )}
+                </TableCell>
                 <TableCell className="font-medium">{k.name}</TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">
                   …{k.keyLast4}
@@ -288,6 +381,27 @@ export function KeysManager({
         />
       )}
 
+      {/* Bulk dialogs — mounted permanently (like the edit modal) so open/close
+          animates; they read the live selection each render. */}
+      <BulkModelDialog
+        open={bulkModelOpen}
+        onOpenChange={setBulkModelOpen}
+        keys={selectedKeys}
+        models={models}
+        modelsUnavailable={modelsUnavailable}
+        runningEvalCount={selectedKeys.filter((k) => evalStatuses[k.id] === 'running').length}
+        onDone={() => setSelected(new Set())}
+      />
+      <BulkEvalDialog
+        open={bulkEvalOpen}
+        onOpenChange={setBulkEvalOpen}
+        keys={selectedKeys}
+        models={models}
+        judgeModel={judgeModel}
+        evalStatuses={evalStatuses}
+        onDone={() => setSelected(new Set())}
+      />
+
       {/* Show-once key reveal — dismissable only via the explicit acknowledgement button,
           since the key cannot be retrieved later. */}
       <Dialog
@@ -324,6 +438,241 @@ export function KeysManager({
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/** Compact name + current-model listing shared by the bulk dialogs. */
+function SelectedKeysList({ keys }: { keys: KeyRow[] }) {
+  return (
+    <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border p-2">
+      {keys.map((k) => (
+        <div key={k.id} className="flex items-center justify-between gap-3 text-xs">
+          <span className="truncate font-medium">{k.name}</span>
+          <code className="shrink-0 text-muted-foreground">{k.model}</code>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BulkModelDialog({
+  open,
+  onOpenChange,
+  keys,
+  models,
+  modelsUnavailable = false,
+  runningEvalCount,
+  onDone,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  keys: KeyRow[];
+  models: AvailableModel[];
+  modelsUnavailable?: boolean;
+  runningEvalCount: number;
+  onDone: () => void;
+}) {
+  const uid = useId();
+  const [isPending, startTransition] = useTransition();
+  const [model, setModel] = useState('');
+
+  function submit() {
+    if (!model.trim()) return toast.error('Pick a model');
+    startTransition(async () => {
+      try {
+        const res = await bulkUpdateKeyModel({ ids: keys.map((k) => k.id), model: model.trim() });
+        reportBulk(res, 'Model updated on');
+        onDone();
+        onOpenChange(false);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : '';
+        toast.error(
+          msg === 'unauthorized'
+            ? 'Your session expired — please sign in again.'
+            : msg || 'Could not update the keys',
+        );
+      }
+    });
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] w-full overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>
+            Change model — {keys.length} key{keys.length === 1 ? '' : 's'}
+          </DialogTitle>
+          <DialogDescription>
+            Point every selected key at a new model. Applies on the next request — no redeploy.
+            Keys already on the chosen model are left as they are.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="space-y-1">
+            <Label htmlFor={`${uid}-bulk-model`} className="text-xs">
+              New model
+            </Label>
+            <ModelCombobox
+              id={`${uid}-bulk-model`}
+              value={model}
+              onValueChange={setModel}
+              models={models.map((m) => m.id)}
+              modelsUnavailable={modelsUnavailable}
+              placeholder="anthropic/claude-sonnet-4.6"
+            />
+          </div>
+
+          <SelectedKeysList keys={keys} />
+
+          {runningEvalCount > 0 && (
+            <p className="text-xs text-amber-600 dark:text-amber-500">
+              {runningEvalCount === 1 ? '1 selected key has' : `${runningEvalCount} selected keys have`}{' '}
+              a running eval — changing the model mid-run can skew its results.
+            </p>
+          )}
+
+          <div className="flex justify-end">
+            <Button onClick={submit} disabled={isPending || keys.length === 0}>
+              {isPending
+                ? 'Updating…'
+                : `Change model on ${keys.length} key${keys.length === 1 ? '' : 's'}`}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function BulkEvalDialog({
+  open,
+  onOpenChange,
+  keys,
+  models,
+  judgeModel,
+  evalStatuses,
+  onDone,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  keys: KeyRow[];
+  models: AvailableModel[];
+  judgeModel: string;
+  evalStatuses: Record<string, EvalRunStatus>;
+  onDone: () => void;
+}) {
+  const uid = useId();
+  const [isPending, startTransition] = useTransition();
+  // Evals compare text outputs, so challengers are language models only (same
+  // rule as the single-key eval dialog).
+  const options = models.filter((m) => m.type === 'language');
+  const [challenger, setChallenger] = useState(options[0]?.id ?? '');
+  const [targetN, setTargetN] = useState('100');
+
+  // Keys the dialog announces as skipped are NOT submitted — the button's count
+  // is a promise, and a stale snapshot (e.g. a run that finished since page
+  // load) must not quietly start more evals than it stated. The server still
+  // re-checks every invariant live for the ids we do send.
+  const alreadyRunning = keys.filter((k) => evalStatuses[k.id] === 'running');
+  const sameModel = keys.filter((k) => k.model === challenger.trim());
+  const startableKeys = keys.filter(
+    (k) => evalStatuses[k.id] !== 'running' && k.model !== challenger.trim(),
+  );
+  const startable = startableKeys.length;
+
+  function submit() {
+    if (!challenger.trim()) return toast.error('Pick a challenger model');
+    const n = Number(targetN);
+    if (!Number.isInteger(n) || n <= 0) {
+      return toast.error('Sample size must be a positive whole number');
+    }
+    startTransition(async () => {
+      try {
+        const res = await bulkStartEvalRuns({
+          ids: startableKeys.map((k) => k.id),
+          challengerModel: challenger.trim(),
+          targetN: n,
+        });
+        reportBulk(res, 'Eval started on');
+        onDone();
+        onOpenChange(false);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : '';
+        toast.error(
+          msg === 'unauthorized'
+            ? 'Your session expired — please sign in again.'
+            : msg || 'Could not start the evals',
+        );
+      }
+    });
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] w-full overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>
+            Run eval — {keys.length} key{keys.length === 1 ? '' : 's'}
+          </DialogTitle>
+          <DialogDescription>
+            Shadow the same challenger against each selected key’s current model, judged blind by{' '}
+            <code>{judgeModel}</code>. Each key gets its own run and email verdict.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="space-y-1">
+            <Label htmlFor={`${uid}-bulk-challenger`} className="text-xs">
+              Challenger model
+            </Label>
+            <ModelCombobox
+              id={`${uid}-bulk-challenger`}
+              value={challenger}
+              onValueChange={setChallenger}
+              models={options.map((m) => m.id)}
+              placeholder="anthropic/claude-sonnet-4.6"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <Label htmlFor={`${uid}-bulk-n`} className="text-xs">
+              Sample size per key (transactions)
+            </Label>
+            <Input
+              id={`${uid}-bulk-n`}
+              inputMode="numeric"
+              value={targetN}
+              onChange={(e) => setTargetN(e.target.value)}
+              className="w-32"
+            />
+          </div>
+
+          <SelectedKeysList keys={keys} />
+
+          {alreadyRunning.length > 0 && (
+            <p className="text-xs text-amber-600 dark:text-amber-500">
+              Skipped ({alreadyRunning.length}) — eval already running:{' '}
+              {alreadyRunning.map((k) => k.name).join(', ')}.
+            </p>
+          )}
+          {sameModel.length > 0 && (
+            <p className="text-xs text-amber-600 dark:text-amber-500">
+              Skipped ({sameModel.length}) — already on the challenger model:{' '}
+              {sameModel.map((k) => k.name).join(', ')}.
+            </p>
+          )}
+
+          <div className="flex justify-end">
+            <Button onClick={submit} disabled={isPending || startable <= 0}>
+              {isPending
+                ? 'Starting…'
+                : `Start ${startable} eval${startable === 1 ? '' : 's'}`}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

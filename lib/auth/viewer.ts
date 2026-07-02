@@ -67,16 +67,27 @@ export async function assertUser(): Promise<Viewer> {
  */
 export async function assertCanManageKey(
   keyId: string,
-): Promise<{ viewer: Viewer; ownerUserId: string | null; model: string; status: string }> {
+): Promise<{ viewer: Viewer; ownerUserId: string | null; model: string; status: string; name: string }> {
   const v = await requireViewer();
   const [key] = await getDb()
-    .select({ ownerUserId: apiKeys.ownerUserId, model: apiKeys.model, status: apiKeys.status })
+    .select({
+      ownerUserId: apiKeys.ownerUserId,
+      model: apiKeys.model,
+      status: apiKeys.status,
+      name: apiKeys.name,
+    })
     .from(apiKeys)
     .where(eq(apiKeys.id, keyId))
     .limit(1);
   if (!key) throw new Error('not_found');
   if (v.role !== 'admin' && key.ownerUserId !== v.userId) throw new Error('forbidden');
-  return { viewer: v, ownerUserId: key.ownerUserId, model: key.model, status: key.status };
+  return {
+    viewer: v,
+    ownerUserId: key.ownerUserId,
+    model: key.model,
+    status: key.status,
+    name: key.name,
+  };
 }
 
 /** Allow if the viewer may manage the key that owns this eval run. */
