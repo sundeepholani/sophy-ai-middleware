@@ -83,6 +83,11 @@ function reportBulk(result: BulkActionResult, verb: string) {
   if (result.done > 0) {
     toast.success(`${verb} ${result.done} key${result.done === 1 ? '' : 's'}`);
   }
+  if (result.stoppedEvals > 0) {
+    toast.info(
+      `Stopped ${result.stoppedEvals} running eval${result.stoppedEvals === 1 ? '' : 's'}`,
+    );
+  }
   if (result.skipped.length > 0) {
     toast.warning(
       `Skipped ${result.skipped.length}: ${result.skipped.map((s) => `${s.name} (${s.reason})`).join(', ')}`,
@@ -360,6 +365,7 @@ export function KeysManager({
               role={role}
               users={users}
               knowledgebases={knowledgebases}
+              evalRunning={evalStatuses[editing.id] === 'running'}
               onDone={() => setEditing(null)}
             />
           )}
@@ -389,7 +395,7 @@ export function KeysManager({
         keys={selectedKeys}
         models={models}
         modelsUnavailable={modelsUnavailable}
-        runningEvalCount={selectedKeys.filter((k) => evalStatuses[k.id] === 'running').length}
+        evalStatuses={evalStatuses}
         onDone={() => setSelected(new Set())}
       />
       <BulkEvalDialog
@@ -461,7 +467,7 @@ function BulkModelDialog({
   keys,
   models,
   modelsUnavailable = false,
-  runningEvalCount,
+  evalStatuses,
   onDone,
 }: {
   open: boolean;
@@ -469,20 +475,42 @@ function BulkModelDialog({
   keys: KeyRow[];
   models: AvailableModel[];
   modelsUnavailable?: boolean;
-  runningEvalCount: number;
+  evalStatuses: Record<string, EvalRunStatus>;
   onDone: () => void;
 }) {
   const uid = useId();
   const [isPending, startTransition] = useTransition();
   const [model, setModel] = useState('');
+  const [confirmStopOpen, setConfirmStopOpen] = useState(false);
+
+  // Keys whose running eval the change would invalidate. Keys already on the
+  // chosen model are excluded — they're skipped server-side, eval untouched.
+  const runningEvalKeys = keys.filter((k) => evalStatuses[k.id] === 'running');
+  const evalStopKeys = runningEvalKeys.filter((k) => k.model !== model.trim());
 
   function submit() {
     if (!model.trim()) return toast.error('Pick a model');
+    // A model change stops a running eval — never do that silently. Only the
+    // keys this dialog NAMES are sent as confirmed stops; a running eval the
+    // snapshot didn't know about makes the server skip that key, not cancel it.
+    if (evalStopKeys.length > 0) {
+      setConfirmStopOpen(true);
+      return;
+    }
+    doSubmit([]);
+  }
+
+  function doSubmit(stopEvalIds: string[]) {
     startTransition(async () => {
       try {
-        const res = await bulkUpdateKeyModel({ ids: keys.map((k) => k.id), model: model.trim() });
+        const res = await bulkUpdateKeyModel({
+          ids: keys.map((k) => k.id),
+          model: model.trim(),
+          stopEvalIds,
+        });
         reportBulk(res, 'Model updated on');
         onDone();
+        setConfirmStopOpen(false);
         onOpenChange(false);
       } catch (e) {
         const msg = e instanceof Error ? e.message : '';
@@ -525,10 +553,11 @@ function BulkModelDialog({
 
           <SelectedKeysList keys={keys} />
 
-          {runningEvalCount > 0 && (
+          {runningEvalKeys.length > 0 && (
             <p className="text-xs text-amber-600 dark:text-amber-500">
-              {runningEvalCount === 1 ? '1 selected key has' : `${runningEvalCount} selected keys have`}{' '}
-              a running eval — changing the model mid-run can skew its results.
+              {runningEvalKeys.length === 1 ? '1 selected key has' : `${runningEvalKeys.length} selected keys have`}{' '}
+              a running eval — a model change invalidates it, so it will be stopped (you’ll be
+              asked to confirm).
             </p>
           )}
 
@@ -540,6 +569,38 @@ function BulkModelDialog({
             </Button>
           </div>
         </div>
+
+        {/* Confirmation before stopping running evals as part of the change. */}
+        <AlertDialog open={confirmStopOpen} onOpenChange={setConfirmStopOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                Stop {evalStopKeys.length === 1 ? 'the running eval' : `${evalStopKeys.length} running evals`}?
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                {evalStopKeys.map((k) => k.name).join(', ')}{' '}
+                {evalStopKeys.length === 1 ? 'has' : 'have'} an eval in progress. Changing the
+                model invalidates its results, so continuing will stop{' '}
+                {evalStopKeys.length === 1 ? 'that eval' : 'those evals'} and discard the partial
+                results, then change the model.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                disabled={isPending}
+                onClick={(e) => {
+                  e.preventDefault();
+                  doSubmit(evalStopKeys.map((k) => k.id));
+                }}
+              >
+                {evalStopKeys.length === 1
+                  ? 'Stop eval & change model'
+                  : 'Stop evals & change model'}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </DialogContent>
     </Dialog>
   );
@@ -569,17 +630,16 @@ function BulkEvalDialog({
   const options = models.filter((m) => m.type === 'language');
   const [challenger, setChallenger] = useState(options[0]?.id ?? '');
   const [targetN, setTargetN] = useState('100');
+  const [confirmStopOpen, setConfirmStopOpen] = useState(false);
 
-  // Keys the dialog announces as skipped are NOT submitted — the button's count
-  // is a promise, and a stale snapshot (e.g. a run that finished since page
-  // load) must not quietly start more evals than it stated. The server still
-  // re-checks every invariant live for the ids we do send.
-  const alreadyRunning = keys.filter((k) => evalStatuses[k.id] === 'running');
+  // Keys the dialog announces as skipped (already on the challenger) are NOT
+  // submitted — the button's count is a promise. Keys with a running eval ARE
+  // startable: their current run is stopped and replaced, behind an explicit
+  // confirmation. The server re-checks every invariant live either way.
   const sameModel = keys.filter((k) => k.model === challenger.trim());
-  const startableKeys = keys.filter(
-    (k) => evalStatuses[k.id] !== 'running' && k.model !== challenger.trim(),
-  );
+  const startableKeys = keys.filter((k) => k.model !== challenger.trim());
   const startable = startableKeys.length;
+  const replaceEvalKeys = startableKeys.filter((k) => evalStatuses[k.id] === 'running');
 
   function submit() {
     if (!challenger.trim()) return toast.error('Pick a challenger model');
@@ -587,15 +647,28 @@ function BulkEvalDialog({
     if (!Number.isInteger(n) || n <= 0) {
       return toast.error('Sample size must be a positive whole number');
     }
+    // Starting a new eval replaces a key's running one — never silently. Only
+    // the keys this dialog NAMES are sent as confirmed stops; a running eval
+    // the snapshot didn't know about makes the server skip that key.
+    if (replaceEvalKeys.length > 0) {
+      setConfirmStopOpen(true);
+      return;
+    }
+    doSubmit([]);
+  }
+
+  function doSubmit(stopEvalIds: string[]) {
     startTransition(async () => {
       try {
         const res = await bulkStartEvalRuns({
           ids: startableKeys.map((k) => k.id),
           challengerModel: challenger.trim(),
-          targetN: n,
+          targetN: Number(targetN),
+          stopEvalIds,
         });
         reportBulk(res, 'Eval started on');
         onDone();
+        setConfirmStopOpen(false);
         onOpenChange(false);
       } catch (e) {
         const msg = e instanceof Error ? e.message : '';
@@ -650,10 +723,10 @@ function BulkEvalDialog({
 
           <SelectedKeysList keys={keys} />
 
-          {alreadyRunning.length > 0 && (
+          {replaceEvalKeys.length > 0 && (
             <p className="text-xs text-amber-600 dark:text-amber-500">
-              Skipped ({alreadyRunning.length}) — eval already running:{' '}
-              {alreadyRunning.map((k) => k.name).join(', ')}.
+              Eval already running on {replaceEvalKeys.map((k) => k.name).join(', ')} — it will be
+              stopped and replaced by this new eval (you’ll be asked to confirm).
             </p>
           )}
           {sameModel.length > 0 && (
@@ -671,6 +744,34 @@ function BulkEvalDialog({
             </Button>
           </div>
         </div>
+
+        {/* Confirmation before stopping the running evals that this batch replaces. */}
+        <AlertDialog open={confirmStopOpen} onOpenChange={setConfirmStopOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                Stop {replaceEvalKeys.length === 1 ? 'the running eval' : `${replaceEvalKeys.length} running evals`}?
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                {replaceEvalKeys.map((k) => k.name).join(', ')}{' '}
+                {replaceEvalKeys.length === 1 ? 'has' : 'have'} an eval in progress. Starting a new
+                eval will stop the current one and discard its partial results.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                disabled={isPending}
+                onClick={(e) => {
+                  e.preventDefault();
+                  doSubmit(replaceEvalKeys.map((k) => k.id));
+                }}
+              >
+                Stop &amp; start new evals
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </DialogContent>
     </Dialog>
   );
@@ -796,6 +897,7 @@ function KeyForm({
   role,
   users,
   knowledgebases,
+  evalRunning = false,
   onIssued,
   onDone,
 }: {
@@ -807,6 +909,8 @@ function KeyForm({
   role: SessionRole;
   users: { id: string; email: string }[];
   knowledgebases: { id: string; name: string }[];
+  /** Page-load hint that this key has an eval in progress (edit mode only). */
+  evalRunning?: boolean;
   onIssued?: (key: string) => void;
   onDone?: () => void;
 }) {
@@ -832,6 +936,10 @@ function KeyForm({
   // that have ALL the ticked capabilities.
   const [requiredCaps, setRequiredCaps] = useState<string[]>([]);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  // Confirmation before a model change stops the key's running eval. Opened
+  // upfront from the page-load hint, or by the server's requiresEvalStop reply
+  // when that hint was stale.
+  const [confirmStopEval, setConfirmStopEval] = useState(false);
 
   const filteredModels = requiredCaps.length
     ? models.filter((m) => modelHasAllTags(m, requiredCaps))
@@ -841,7 +949,7 @@ function KeyForm({
     ? requiredCaps.filter((c) => !currentModel.tags.includes(c))
     : [];
 
-  function submit() {
+  function submit(stopEval = false) {
     if (!name.trim()) return toast.error('Name is required');
     if (!model.trim()) return toast.error('Model is required');
 
@@ -928,6 +1036,16 @@ function KeyForm({
       ownerUserId: role === 'admin' ? ownerUserId || null : undefined,
       knowledgebaseId: knowledgebaseId || null,
     };
+    // A model change invalidates the key's running eval — never stop it without
+    // asking. The page-load hint triggers the confirmation here; if the hint is
+    // stale (eval started after load), the server's requiresEvalStop reply below
+    // opens the same dialog.
+    const modelChanged = mode === 'edit' && initial != null && model.trim() !== initial.model;
+    if (!stopEval && evalRunning && modelChanged) {
+      setConfirmStopEval(true);
+      return;
+    }
+
     startTransition(async () => {
       try {
         if (mode === 'create') {
@@ -935,8 +1053,17 @@ function KeyForm({
           onIssued?.(fullKey);
           toast.success('Key created');
         } else {
-          await updateKey({ id: keyId!, ...input });
-          toast.success('Saved — applies to the next request');
+          const res = await updateKey({ id: keyId!, ...input, stopRunningEval: stopEval });
+          if (res.requiresEvalStop) {
+            setConfirmStopEval(true);
+            return;
+          }
+          setConfirmStopEval(false);
+          toast.success(
+            res.stoppedEval
+              ? 'Saved — the running eval was stopped'
+              : 'Saved — applies to the next request',
+          );
         }
         onDone?.();
       } catch (e) {
@@ -1199,10 +1326,37 @@ function KeyForm({
       )}
 
       <div className="flex justify-end gap-2 pt-2">
-        <Button onClick={submit} disabled={isPending}>
+        {/* () => submit() — passing the handler directly would hand the click
+            event to the stopEval param, silently skipping the confirmation. */}
+        <Button onClick={() => submit()} disabled={isPending}>
           {isPending ? 'Saving…' : mode === 'create' ? 'Create key' : 'Save changes'}
         </Button>
       </div>
+
+      {/* Confirmation before a model change stops this key's running eval. */}
+      <AlertDialog open={confirmStopEval} onOpenChange={setConfirmStopEval}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Stop the running eval?</AlertDialogTitle>
+            <AlertDialogDescription>
+              An eval is running on this key. Changing the model invalidates its results, so
+              saving will stop the eval and discard its partial results.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={isPending}
+              onClick={(e) => {
+                e.preventDefault();
+                submit(true);
+              }}
+            >
+              Stop eval &amp; save
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
