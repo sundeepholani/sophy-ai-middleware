@@ -62,6 +62,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 /** Parses a positive whole number; '' → null (no limit); anything else → 'invalid'. */
 function posIntOrNull(s: string): number | null | 'invalid' {
@@ -128,10 +129,18 @@ export function KeysManager({
   const [evalKey, setEvalKey] = useState<KeyRow | null>(null);
   const [evalShown, setEvalShown] = useState<KeyRow | null>(null);
 
+  // Active and revoked keys live on separate tabs; everything below (search,
+  // selection, table) operates within the visible tab. The search query
+  // deliberately survives a tab switch — "find X wherever it is" reads well.
+  const [tab, setTab] = useState<'active' | 'revoked'>('active');
+  const activeKeys = keys.filter((k) => k.status === 'active');
+  const revokedKeys = keys.filter((k) => k.status !== 'active');
+  const statusKeys = tab === 'active' ? activeKeys : revokedKeys;
+
   // Free-text filter across everything visible in a row. The key prefix is
   // searchable too even though only the last-4 shows, since searching a key
   // fragment is natural.
-  const { query, setQuery, filtered } = useTableFilter(keys, (k) =>
+  const { query, setQuery, filtered } = useTableFilter(statusKeys, (k) =>
     [k.name, k.keyPrefix, k.keyLast4, k.model, k.ownerEmail ?? 'unassigned', quotaLabel(k, role), k.status].join(' '),
   );
 
@@ -184,8 +193,8 @@ export function KeysManager({
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-muted-foreground">
           {query.trim()
-            ? `${filtered.length} of ${keys.length} keys`
-            : `${keys.length} key${keys.length === 1 ? '' : 's'}`}
+            ? `${filtered.length} of ${statusKeys.length} ${tab} keys`
+            : `${statusKeys.length} ${tab} key${statusKeys.length === 1 ? '' : 's'}`}
         </h2>
         <Button size="sm" onClick={() => setCreateOpen(true)}>
           <Plus className="h-4 w-4" />
@@ -216,9 +225,22 @@ export function KeysManager({
         </Dialog>
       </div>
 
+      <Tabs
+        value={tab}
+        onValueChange={(v) => {
+          // Guard the value like Select (base-ui can fire with null).
+          if (v === 'active' || v === 'revoked') setTab(v);
+        }}
+      >
+        <TabsList>
+          <TabsTrigger value="active">Active ({activeKeys.length})</TabsTrigger>
+          <TabsTrigger value="revoked">Revoked ({revokedKeys.length})</TabsTrigger>
+        </TabsList>
+      </Tabs>
+
       <TableSearchBox value={query} onChange={setQuery} placeholder="Search keys…" label="Search keys" />
 
-      {selectedKeys.length > 0 && (
+      {tab === 'active' && selectedKeys.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-3 py-2">
           <span className="text-sm font-medium">
             {selectedKeys.length} key{selectedKeys.length === 1 ? '' : 's'} selected
@@ -242,14 +264,18 @@ export function KeysManager({
         <Table>
           <TableHeader className="bg-muted/50">
             <TableRow>
-              <TableHead className="w-8">
-                <Checkbox
-                  aria-label="Select all keys shown"
-                  checked={allFilteredSelected}
-                  onCheckedChange={(c) => toggleAllFiltered(c === true)}
-                  disabled={filteredActive.length === 0}
-                />
-              </TableHead>
+              {/* Selection only exists on the Active tab — bulk actions require
+                  active keys, so the Revoked tab drops the column entirely. */}
+              {tab === 'active' && (
+                <TableHead className="w-8">
+                  <Checkbox
+                    aria-label="Select all keys shown"
+                    checked={allFilteredSelected}
+                    onCheckedChange={(c) => toggleAllFiltered(c === true)}
+                    disabled={filteredActive.length === 0}
+                  />
+                </TableHead>
+              )}
               <TableHead>Name</TableHead>
               <TableHead>Key</TableHead>
               <TableHead>Model</TableHead>
@@ -260,31 +286,41 @@ export function KeysManager({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {keys.length === 0 && (
+            {statusKeys.length === 0 && (
               <TableRow>
-                <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
-                  No keys yet — create one with “New API key”.
+                <TableCell
+                  colSpan={tab === 'active' ? 8 : 7}
+                  className="h-24 text-center text-muted-foreground"
+                >
+                  {tab === 'revoked'
+                    ? 'No revoked keys.'
+                    : keys.length === 0
+                      ? 'No keys yet — create one with “New API key”.'
+                      : 'No active keys.'}
                 </TableCell>
               </TableRow>
             )}
-            {keys.length > 0 && filtered.length === 0 && (
+            {statusKeys.length > 0 && filtered.length === 0 && (
               <TableRow>
-                <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
-                  No keys match “{query.trim()}”.
+                <TableCell
+                  colSpan={tab === 'active' ? 8 : 7}
+                  className="h-24 text-center text-muted-foreground"
+                >
+                  No {tab} keys match “{query.trim()}”.
                 </TableCell>
               </TableRow>
             )}
             {filtered.map((k) => (
-              <TableRow key={k.id} data-state={selected.has(k.id) && k.status === 'active' ? 'selected' : undefined}>
-                <TableCell>
-                  {k.status === 'active' && (
+              <TableRow key={k.id} data-state={tab === 'active' && selected.has(k.id) ? 'selected' : undefined}>
+                {tab === 'active' && (
+                  <TableCell>
                     <Checkbox
                       aria-label={`Select ${k.name}`}
                       checked={selected.has(k.id)}
                       onCheckedChange={(c) => setKeySelected(k.id, c === true)}
                     />
-                  )}
-                </TableCell>
+                  </TableCell>
+                )}
                 <TableCell className="font-medium">{k.name}</TableCell>
                 <TableCell className="font-mono text-xs text-muted-foreground">
                   …{k.keyLast4}
