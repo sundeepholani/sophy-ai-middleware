@@ -32,10 +32,18 @@ import { schemaCompileError } from '@/lib/gateway/openai-map';
 import { getSettings } from '@/lib/admin/settings';
 import { getKeyEvals, type KeyEval } from '@/lib/admin/queries';
 
-async function audit(actor: string, action: string, target: string, after: unknown): Promise<void> {
-  await getDb()
-    .insert(auditLog)
-    .values({ actor, action, target, after: after as object });
+/** The drizzle client, or a transaction executor — both expose the same query API. */
+type Db = ReturnType<typeof getDb>;
+type DbTx = Parameters<Parameters<Db['transaction']>[0]>[0];
+
+async function audit(
+  actor: string,
+  action: string,
+  target: string,
+  after: unknown,
+  db: Db | DbTx = getDb(),
+): Promise<void> {
+  await db.insert(auditLog).values({ actor, action, target, after: after as object });
 }
 
 /** Validate an admin-chosen owner: '' / null → unassigned; otherwise must be a real user. */
@@ -195,8 +203,22 @@ export async function createKey(input: KeyFormInput): Promise<{ fullKey: string 
   return { fullKey };
 }
 
-export async function updateKey(input: KeyFormInput & { id: string }): Promise<void> {
-  const { viewer, ownerUserId: currentOwner } = await assertCanManageKey(input.id);
+export interface UpdateKeyResult {
+  /**
+   * True when the save was NOT performed because the model is changing while an
+   * eval is running on the key — resubmit with `stopRunningEval: true` after the
+   * operator confirms. (A returned field, not a thrown error: thrown messages
+   * are masked in production, so the client couldn't tell this case apart.)
+   */
+  requiresEvalStop: boolean;
+  /** True when a running eval was cancelled as part of this save. */
+  stoppedEval: boolean;
+}
+
+export async function updateKey(
+  input: KeyFormInput & { id: string; stopRunningEval?: boolean },
+): Promise<UpdateKeyResult> {
+  const { viewer, ownerUserId: currentOwner, model: currentModel } = await assertCanManageKey(input.id);
   validateKeyInput(input);
 
   // Only admins may reassign ownership; editors' owner is left untouched.
@@ -224,22 +246,50 @@ export async function updateKey(input: KeyFormInput & { id: string }): Promise<v
     priorKb = row?.kb ?? null;
   }
 
-  await getDb()
-    .update(apiKeys)
-    .set({
-      name: input.name,
-      model: input.model,
-      systemPrompt: input.systemPrompt,
-      params: input.params,
-      outputSchema,
-      rpmLimit: input.rpmLimit,
-      logContent: input.logContent,
-      ownerUserId: newOwner,
-      ...(kbId !== undefined ? { knowledgebaseId: kbId } : {}),
-      // Only admins may change the budget; editors' cap is left untouched.
-      ...(viewer.role === 'admin' ? { monthlyCostCapUsd: input.monthlyCostCapUsd ?? null } : {}),
-    })
-    .where(eq(apiKeys.id, input.id));
+  // A model change invalidates a running eval: the run's champion is snapshotted
+  // at start, but champion samples are captured from whatever the key serves
+  // LIVE (lib/eval/capture.ts) — so a mid-run swap silently mixes models into
+  // one run. The operator must explicitly confirm stopping the eval; until then
+  // nothing is written. Checked after validation so the confirmation only ever
+  // appears for a save that would otherwise succeed.
+  const modelChanged = input.model.trim() !== currentModel;
+  if (modelChanged && !input.stopRunningEval) {
+    const [running] = await getDb()
+      .select({ id: evalRuns.id })
+      .from(evalRuns)
+      .where(and(eq(evalRuns.apiKeyId, input.id), eq(evalRuns.status, 'running')))
+      .limit(1);
+    if (running) return { requiresEvalStop: true, stoppedEval: false };
+  }
+
+  const updateSet = {
+    name: input.name,
+    model: input.model,
+    systemPrompt: input.systemPrompt,
+    params: input.params,
+    outputSchema,
+    rpmLimit: input.rpmLimit,
+    logContent: input.logContent,
+    ownerUserId: newOwner,
+    ...(kbId !== undefined ? { knowledgebaseId: kbId } : {}),
+    // Only admins may change the budget; editors' cap is left untouched.
+    ...(viewer.role === 'admin' ? { monthlyCostCapUsd: input.monthlyCostCapUsd ?? null } : {}),
+  };
+
+  let stoppedEval = false;
+  if (modelChanged && input.stopRunningEval) {
+    // Cancel + save atomically: the cancel purges captured samples, so if the
+    // save then failed, the eval would be destroyed for nothing. Rolling both
+    // back together means a failed save leaves the eval running and the table
+    // truthful.
+    await getDb().transaction(async (tx) => {
+      stoppedEval =
+        (await cancelRunningEvalsForKey(tx, input.id, viewer.email, 'model change')) > 0;
+      await tx.update(apiKeys).set(updateSet).where(eq(apiKeys.id, input.id));
+    });
+  } else {
+    await getDb().update(apiKeys).set(updateSet).where(eq(apiKeys.id, input.id));
+  }
   await audit(viewer.email, 'key.update', input.id, { name: input.name, model: input.model });
   if (newOwner !== currentOwner) {
     await audit(viewer.email, 'key.reassign', input.id, { from: currentOwner, to: newOwner });
@@ -248,6 +298,7 @@ export async function updateKey(input: KeyFormInput & { id: string }): Promise<v
     await audit(viewer.email, 'key.kb', input.id, { from: priorKb, to: kbId });
   }
   revalidatePath('/admin/keys');
+  return { requiresEvalStop: false, stoppedEval };
 }
 
 export async function revokeKey(id: string): Promise<void> {
@@ -315,12 +366,41 @@ function clampTargetN(n: number): number {
 }
 
 /**
+ * Cancel any running eval on a key — same lifecycle as cancelEvalRun: guarded
+ * status flip, purge captured samples (privacy option A), audit with the cause.
+ * The caller must have already authorized the key, and should pass a TRANSACTION
+ * executor when the cancel only makes sense together with a follow-up write
+ * (model change / replacement run) — a cancel is destructive (samples are
+ * purged), so it must roll back if the write it justifies fails. Returns how
+ * many runs were stopped (0 or 1 — the partial unique index allows one running
+ * run per key).
+ */
+async function cancelRunningEvalsForKey(
+  db: Db | DbTx,
+  keyId: string,
+  actorEmail: string,
+  cause: string,
+): Promise<number> {
+  const cancelled = await db
+    .update(evalRuns)
+    .set({ status: 'cancelled', completedAt: new Date() })
+    .where(and(eq(evalRuns.apiKeyId, keyId), eq(evalRuns.status, 'running')))
+    .returning({ id: evalRuns.id });
+  for (const run of cancelled) {
+    await db.delete(evalSamples).where(eq(evalSamples.runId, run.id));
+    await audit(actorEmail, 'eval.cancel', run.id, { cause }, db);
+  }
+  return cancelled.length;
+}
+
+/**
  * Create a running eval for one already-authorized key, enforcing the run
  * invariants: active key, challenger differs from the champion, and at most one
  * running eval per key (checked, then backstopped by the partial unique index).
  * Throws with a human-readable reason; shared by the single and bulk actions.
  */
 async function insertEvalRun(
+  db: Db | DbTx,
   key: { id: string; model: string; status: string },
   challengerModel: string,
   judgeModel: string,
@@ -331,7 +411,6 @@ async function insertEvalRun(
     throw new Error('Challenger must differ from the current model');
   }
 
-  const db = getDb();
   const [active] = await db
     .select({ id: evalRuns.id })
     .from(evalRuns)
@@ -365,6 +444,7 @@ export async function startEvalRun(input: StartEvalInput): Promise<void> {
 
   const settings = await getSettings();
   await insertEvalRun(
+    getDb(),
     { id: input.apiKeyId, model, status },
     challengerModel,
     settings.judgeModel,
@@ -391,6 +471,8 @@ export async function startEvalRun(input: StartEvalInput): Promise<void> {
 export interface BulkActionResult {
   done: number;
   skipped: { name: string; reason: string }[];
+  /** Running evals cancelled on the operator's confirmation as part of this batch. */
+  stoppedEvals: number;
 }
 
 /** Dedupe + sanity-bound the selected ids (the keys table tops out far below this). */
@@ -424,12 +506,23 @@ function skipReason(e: unknown): string {
  * Point several keys at a new model in one go. Authorization is per key (admin
  * or owner), matching the single-key edit; each change is audited individually.
  */
-export async function bulkUpdateKeyModel(input: { ids: string[]; model: string }): Promise<BulkActionResult> {
+export async function bulkUpdateKeyModel(input: {
+  ids: string[];
+  model: string;
+  /**
+   * Ids whose running eval the operator EXPLICITLY confirmed stopping. Per-key
+   * identity, not a batch-wide flag: an eval the confirmation dialog never
+   * named (started elsewhere after page load) is skipped, never cancelled.
+   */
+  stopEvalIds?: string[];
+}): Promise<BulkActionResult> {
   const model = input.model.trim();
   if (!model) throw new Error('Model is required');
   const ids = normalizeBulkIds(input.ids);
+  const confirmedStops = new Set(input.stopEvalIds ?? []);
 
   let done = 0;
+  let stoppedEvals = 0;
   const skipped: BulkActionResult['skipped'] = [];
   for (const id of ids) {
     let name = id.slice(0, 8);
@@ -447,7 +540,29 @@ export async function bulkUpdateKeyModel(input: { ids: string[]; model: string }
         skipped.push({ name, reason: 'already on this model' });
         continue;
       }
-      await getDb().update(apiKeys).set({ model }).where(eq(apiKeys.id, id));
+      // A model change invalidates a running eval (see updateKey). Only a key
+      // the operator explicitly confirmed may have its eval stopped — cancel +
+      // update atomically so a failed update can't destroy the eval for
+      // nothing. Any other running eval skips the key.
+      if (confirmedStops.has(id)) {
+        let stoppedHere = 0;
+        await getDb().transaction(async (tx) => {
+          stoppedHere = await cancelRunningEvalsForKey(tx, id, key.viewer.email, 'model change');
+          await tx.update(apiKeys).set({ model }).where(eq(apiKeys.id, id));
+        });
+        stoppedEvals += stoppedHere;
+      } else {
+        const [running] = await getDb()
+          .select({ id: evalRuns.id })
+          .from(evalRuns)
+          .where(and(eq(evalRuns.apiKeyId, id), eq(evalRuns.status, 'running')))
+          .limit(1);
+        if (running) {
+          skipped.push({ name, reason: 'an eval is running — confirm stopping it and retry' });
+          continue;
+        }
+        await getDb().update(apiKeys).set({ model }).where(eq(apiKeys.id, id));
+      }
       mutated = true;
       done++;
       await audit(key.viewer.email, 'key.model', id, { from: key.model, to: model });
@@ -461,7 +576,7 @@ export async function bulkUpdateKeyModel(input: { ids: string[]; model: string }
   // snapshot has diverged from the DB (revoked elsewhere, eval started…), so
   // this is exactly when the table needs a resync.
   revalidatePath('/admin/keys');
-  return { done, skipped };
+  return { done, skipped, stoppedEvals };
 }
 
 /**
@@ -473,14 +588,23 @@ export async function bulkStartEvalRuns(input: {
   ids: string[];
   challengerModel: string;
   targetN: number;
+  /**
+   * Ids whose running eval the operator EXPLICITLY confirmed replacing. Per-key
+   * identity, not a batch-wide flag: a running eval the confirmation dialog
+   * never named makes that key skip (via insertEvalRun's running-check), never
+   * a silent cancel.
+   */
+  stopEvalIds?: string[];
 }): Promise<BulkActionResult> {
   const challengerModel = input.challengerModel.trim();
   if (!challengerModel) throw new Error('Challenger model is required');
   const targetN = clampTargetN(input.targetN);
   const ids = normalizeBulkIds(input.ids);
+  const confirmedStops = new Set(input.stopEvalIds ?? []);
   const settings = await getSettings();
 
   let done = 0;
+  let stoppedEvals = 0;
   const skipped: BulkActionResult['skipped'] = [];
   for (const id of ids) {
     let name = id.slice(0, 8);
@@ -490,12 +614,27 @@ export async function bulkStartEvalRuns(input: {
     try {
       const key = await assertCanManageKey(id);
       name = key.name;
-      await insertEvalRun(
-        { id, model: key.model, status: key.status },
-        challengerModel,
-        settings.judgeModel,
-        targetN,
-      );
+      const keyArg = { id, model: key.model, status: key.status };
+      // With per-key confirmation, replace the current running eval — cancel +
+      // insert atomically, so losing the one-running-run race (23505) rolls the
+      // cancel back and reports a skip instead of destroying the eval. The
+      // cancel only happens when the new run could actually start (active key,
+      // challenger differs); otherwise insertEvalRun's checks throw first.
+      if (confirmedStops.has(id) && key.status === 'active' && challengerModel !== key.model) {
+        let stoppedHere = 0;
+        await getDb().transaction(async (tx) => {
+          stoppedHere = await cancelRunningEvalsForKey(
+            tx,
+            id,
+            key.viewer.email,
+            'superseded by a new eval',
+          );
+          await insertEvalRun(tx, keyArg, challengerModel, settings.judgeModel, targetN);
+        });
+        stoppedEvals += stoppedHere;
+      } else {
+        await insertEvalRun(getDb(), keyArg, challengerModel, settings.judgeModel, targetN);
+      }
       started = true;
       done++;
       await audit(key.viewer.email, 'eval.start', id, {
@@ -513,7 +652,7 @@ export async function bulkStartEvalRuns(input: {
   // Unconditional for the same reason as bulkUpdateKeyModel: skips signal a
   // stale client snapshot, so resync the table either way.
   revalidatePath('/admin/keys');
-  return { done, skipped };
+  return { done, skipped, stoppedEvals };
 }
 
 export async function cancelEvalRun(runId: string): Promise<void> {
