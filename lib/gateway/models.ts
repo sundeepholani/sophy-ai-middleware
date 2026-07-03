@@ -106,13 +106,19 @@ export async function listGatewayModels(): Promise<AvailableModel[]> {
 
 /**
  * Models a Sophy key can be bound to: language (chat/`/v1/chat/completions` +
- * `/v1/responses`) and image (`/v1/images/generations`). Embedding/reranking/
- * video models aren't served by a key. Language models sort first so creating a
- * new key still defaults to a chat model.
+ * `/v1/responses`), image (`/v1/images/generations`), and embedding
+ * (`/v1/embeddings`). Reranking/video models aren't served by a key. Language
+ * models sort first so creating a new key still defaults to a chat model.
  */
+const KEY_MODEL_TYPE_ORDER: Record<string, number> = { language: 0, embedding: 1, image: 2 };
+
 export async function listKeyModels(): Promise<AvailableModel[]> {
   const all = await fetchCatalog();
   return all
-    .filter((m) => m.type === 'language' || m.type === 'image')
-    .sort((a, b) => (a.type === b.type ? a.id.localeCompare(b.id) : a.type === 'image' ? 1 : -1));
+    .filter((m) => m.type in KEY_MODEL_TYPE_ORDER)
+    .sort((a, b) =>
+      a.type === b.type
+        ? a.id.localeCompare(b.id)
+        : KEY_MODEL_TYPE_ORDER[a.type] - KEY_MODEL_TYPE_ORDER[b.type],
+    );
 }
