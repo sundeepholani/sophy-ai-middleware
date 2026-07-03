@@ -4,13 +4,15 @@
  * Scoped to the text + structured-JSON path so clients using
  * `client.responses.create(...)` work by changing only base_url + api_key. The
  * key owns model/system/params (client `model`, `instructions`, params are
- * ignored — same as /v1/chat/completions). Stateful conversations
- * (`previous_response_id`) and tools are rejected with a clear 400.
+ * ignored — same as /v1/chat/completions) — EXCEPT agent-mode keys
+ * (params.allowClientPrompt), which honor client `instructions` appended after
+ * the key's prompt. Stateful conversations (`previous_response_id`) are
+ * rejected with a clear 400.
  */
 import type { ModelMessage } from 'ai';
 import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
 import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
-import { resolveParams, responsesToAiToolSet } from '@/lib/gateway/openai-map';
+import { resolveParams, responsesToAiToolSet, composeSystemPrompt } from '@/lib/gateway/openai-map';
 import { type CallContext } from '@/lib/gateway/call';
 import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
 import { systemPromptWithKb } from '@/lib/kb/retrieve';
@@ -21,6 +23,7 @@ import {
 import {
   responsesInputToMessages,
   responsesReferencedUrls,
+  collectResponsesClientSystemText,
   type ResponsesRequest,
 } from '@/lib/http/responses';
 import { assertOwnedBlobs } from '@/lib/files/blob';
@@ -122,13 +125,21 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   // 6) Assemble the call from the key's config (structured iff the key has a
-  // schema). If the key has a knowledgebase, embed the latest user message and
-  // fold the top-k matches into the system prompt; non-KB keys pay nothing here.
+  // schema). Agent-mode keys (params.allowClientPrompt) additionally honor the
+  // client's `instructions` + system/developer input items, appended AFTER the
+  // key's own prompt (key stays authoritative-first; the security preamble still
+  // leads via buildSystem). If the key has a knowledgebase, embed the latest
+  // user message and fold the top-k matches into the system prompt; non-KB keys
+  // pay nothing here.
+  const clientPrompt = key.params?.allowClientPrompt
+    ? collectResponsesClientSystemText(body)
+    : null;
+  const basePrompt = composeSystemPrompt(key.systemPrompt, clientPrompt);
   const structured = key.outputSchema != null;
   const ctx: CallContext = {
     keyId: key.id,
     model: key.model,
-    systemPrompt: await systemPromptWithKb(key.systemPrompt, key.knowledgebaseId, messages),
+    systemPrompt: await systemPromptWithKb(basePrompt, key.knowledgebaseId, messages),
     params: resolveParams(key.params),
     structured,
     schema: structured ? normalizeOutputSchema(key.outputSchema) : key.outputSchema,

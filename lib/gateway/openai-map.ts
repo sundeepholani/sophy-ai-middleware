@@ -129,8 +129,43 @@ function partToModelPart(part: OpenAIContentPart) {
 }
 
 /**
+ * Collect the text of client-supplied system/developer messages, in order.
+ * Used only for keys with `params.allowClientPrompt` (agent mode) — the routes
+ * append this after the key's own prompt. Non-text parts are ignored.
+ */
+export function collectClientSystemText(messages: OpenAIMessage[]): string | null {
+  const texts: string[] = [];
+  for (const m of messages) {
+    if (m.role !== 'system' && m.role !== 'developer') continue;
+    const text =
+      typeof m.content === 'string'
+        ? m.content
+        : (m.content ?? []).map((p) => ('text' in p ? p.text : '')).join('');
+    if (text.trim()) texts.push(text);
+  }
+  return texts.length ? texts.join('\n\n') : null;
+}
+
+/**
+ * Compose the effective operator prompt for a request: the key's prompt first
+ * (authoritative), then — only in agent mode — the client's prompt. Either side
+ * may be absent; returns null when both are.
+ */
+export function composeSystemPrompt(
+  keyPrompt: string | null,
+  clientPrompt: string | null,
+): string | null {
+  const parts = [keyPrompt, clientPrompt].filter(
+    (s): s is string => typeof s === 'string' && s.trim() !== '',
+  );
+  return parts.length ? parts.join('\n\n') : null;
+}
+
+/**
  * Convert OpenAI messages to AI SDK ModelMessages. Client-supplied system /
- * developer messages are DROPPED — the operator owns the system prompt.
+ * developer messages are DROPPED — the operator owns the system prompt. (For
+ * agent-mode keys the routes first collect them via `collectClientSystemText`
+ * and fold them into the system prompt; they are never kept as messages.)
  * Tool-calling turns are preserved: an assistant message's `tool_calls` become
  * tool-call parts, and `tool` messages become a tool-result message. OpenAI tool
  * messages omit the tool name, so we recover it from the assistant `tool_calls`

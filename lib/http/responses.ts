@@ -196,6 +196,31 @@ export function responsesInputToMessages(
 }
 
 /**
+ * Collect the text of client-supplied system/developer input items plus the
+ * request's `instructions` field, in that order (instructions first — it is the
+ * Responses API's primary prompt channel and what agent SDKs send). Used only
+ * for keys with `params.allowClientPrompt` (agent mode). Non-text parts ignored.
+ */
+export function collectResponsesClientSystemText(body: {
+  instructions?: string | null;
+  input?: string | ResponsesInputItem[];
+}): string | null {
+  const texts: string[] = [];
+  if (typeof body.instructions === 'string' && body.instructions.trim()) {
+    texts.push(body.instructions);
+  }
+  if (Array.isArray(body.input)) {
+    for (const item of body.input) {
+      if (item.type === 'function_call' || item.type === 'function_call_output') continue;
+      if (item.role !== 'system' && item.role !== 'developer') continue;
+      const text = typeof item.content === 'string' ? item.content : partText(item.content ?? []);
+      if (text.trim()) texts.push(text);
+    }
+  }
+  return texts.length ? texts.join('\n\n') : null;
+}
+
+/**
  * URLs referenced by image/file parts in a Responses input — used for the same
  * cross-key blob-ownership check the chat surface performs.
  */

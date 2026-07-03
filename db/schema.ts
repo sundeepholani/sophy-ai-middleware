@@ -38,6 +38,14 @@ export interface KeyParams {
   temperature?: number;
   maxOutputTokens?: number;
   topP?: number;
+  /**
+   * Agent mode: honor the CLIENT's system prompt (chat `system`/`developer`
+   * messages; responses `instructions`) by appending it after the key's own
+   * prompt. For agentic SDK flows (e.g. openai-agents) whose instructions are
+   * dynamic per request and can't live on the key. Default false — the key
+   * exclusively owns the prompt.
+   */
+  allowClientPrompt?: boolean;
 }
 
 // ---- Users (operators: admins + editors) -----------------------------------
