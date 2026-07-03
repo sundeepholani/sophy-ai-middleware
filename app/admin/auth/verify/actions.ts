@@ -24,6 +24,7 @@ export async function confirmSignIn(formData: FormData): Promise<void> {
   session.role = user.role;
   session.email = user.email;
   session.loginAt = Date.now();
+  session.sealedAt = Date.now();
   session.isAdmin = undefined;
   await session.save();
 

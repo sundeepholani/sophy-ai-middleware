@@ -19,7 +19,7 @@ export type Viewer = CurrentUser; // { userId, role, email }
  * The signed-in operator, or null. Identity comes from the signed cookie, but the
  * role and active status are authoritative in Postgres and re-checked on EVERY
  * request — so deactivation and role changes take effect immediately (like key
- * revocation), not only when the 8h cookie expires. (Legacy single-admin cookies
+ * revocation), not only when the sliding 5-day cookie expires. (Legacy single-admin cookies
  * have no userId → null → must re-login via magic link.)
  *
  * cache() dedupes this within a single server request, so the layout and the page
