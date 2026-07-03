@@ -4,7 +4,9 @@
  * Sophy exposes a scoped Responses-compatible surface (POST /v1/responses) so
  * clients using `client.responses.create(...)` work by only changing base_url +
  * api_key. Like the chat surface, model/instructions/params are owned by the key
- * and any client-sent values are ignored.
+ * and any client-sent values are ignored — except agent-mode keys
+ * (params.allowClientPrompt), which honor client `instructions` + leading
+ * system items (see collectResponsesClientSystemText).
  *
  * Spec-critical details (break the official SDK if wrong):
  *  - usage fields are input_tokens / output_tokens / total_tokens (NOT prompt_*).
@@ -196,10 +198,13 @@ export function responsesInputToMessages(
 }
 
 /**
- * Collect the text of client-supplied system/developer input items plus the
- * request's `instructions` field, in that order (instructions first — it is the
- * Responses API's primary prompt channel and what agent SDKs send). Used only
- * for keys with `params.allowClientPrompt` (agent mode). Non-text parts ignored.
+ * Collect the request's `instructions` field plus the text of LEADING client
+ * system/developer input items (instructions first — it is the Responses API's
+ * primary prompt channel and what agent SDKs send). Collection stops at the
+ * first non-system item, so a system-role item smuggled into the later
+ * transcript is NOT promoted into the operator prompt. Used only for keys with
+ * `params.allowClientPrompt` (agent mode). Malformed content never throws
+ * (clients send arbitrary JSON); non-text parts ignored.
  */
 export function collectResponsesClientSystemText(body: {
   instructions?: string | null;
@@ -211,9 +216,22 @@ export function collectResponsesClientSystemText(body: {
   }
   if (Array.isArray(body.input)) {
     for (const item of body.input) {
-      if (item.type === 'function_call' || item.type === 'function_call_output') continue;
-      if (item.role !== 'system' && item.role !== 'developer') continue;
-      const text = typeof item.content === 'string' ? item.content : partText(item.content ?? []);
+      if (!item || typeof item !== 'object') break;
+      if (item.type === 'function_call' || item.type === 'function_call_output') break;
+      if (item.role !== 'system' && item.role !== 'developer') break;
+      const c = item.content as unknown;
+      const text =
+        typeof c === 'string'
+          ? c
+          : Array.isArray(c)
+            ? c
+                .map((p) =>
+                  p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string'
+                    ? (p as { text: string }).text
+                    : '',
+                )
+                .join('')
+            : '';
       if (text.trim()) texts.push(text);
     }
   }

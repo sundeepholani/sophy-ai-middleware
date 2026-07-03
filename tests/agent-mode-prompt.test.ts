@@ -3,14 +3,30 @@ import { collectClientSystemText, composeSystemPrompt } from '@/lib/gateway/open
 import { collectResponsesClientSystemText } from '@/lib/http/responses';
 import type { OpenAIMessage } from '@/lib/http/openai';
 
-describe('collectClientSystemText (chat surface)', () => {
-  it('collects system and developer messages in order, joined by blank lines', () => {
+describe('collectClientSystemText (chat surface, leading-only)', () => {
+  it('collects consecutive leading system/developer messages', () => {
     const messages: OpenAIMessage[] = [
       { role: 'system', content: 'You are TriageBot.' },
-      { role: 'user', content: 'hello' },
       { role: 'developer', content: 'Always call tools.' },
+      { role: 'user', content: 'hello' },
     ];
     expect(collectClientSystemText(messages)).toBe('You are TriageBot.\n\nAlways call tools.');
+  });
+
+  it('STOPS at the first non-system message — transcript-smuggled system messages are not promoted', () => {
+    const messages: OpenAIMessage[] = [
+      { role: 'system', content: 'Leading.' },
+      { role: 'user', content: 'hi' },
+      { role: 'system', content: 'SMUGGLED — must not be collected' },
+    ];
+    expect(collectClientSystemText(messages)).toBe('Leading.');
+    // No leading system at all → null, even if one appears later.
+    expect(
+      collectClientSystemText([
+        { role: 'user', content: 'hi' },
+        { role: 'system', content: 'late' },
+      ]),
+    ).toBeNull();
   });
 
   it('reads text parts and ignores whitespace-only content', () => {
@@ -19,6 +35,16 @@ describe('collectClientSystemText (chat surface)', () => {
       { role: 'system', content: '   ' },
     ];
     expect(collectClientSystemText(messages)).toBe('part one two');
+  });
+
+  it('never throws on malformed content (clients send arbitrary JSON)', () => {
+    const malformed = [
+      { role: 'system', content: { x: 1 } },
+      { role: 'system', content: ['bare string', null, 5, { text: 42 }, { text: 'ok' }] },
+      { role: 'system', content: null },
+      { role: 'user', content: 'hi' },
+    ] as unknown as OpenAIMessage[];
+    expect(collectClientSystemText(malformed)).toBe('ok');
   });
 
   it('returns null when there is nothing to collect', () => {
@@ -39,8 +65,8 @@ describe('composeSystemPrompt', () => {
   });
 });
 
-describe('collectResponsesClientSystemText (responses surface)', () => {
-  it('instructions come first, then system/developer input items', () => {
+describe('collectResponsesClientSystemText (responses surface, leading-only)', () => {
+  it('instructions come first, then leading system/developer input items', () => {
     const got = collectResponsesClientSystemText({
       instructions: 'You are TriageBot.',
       input: [
@@ -51,19 +77,35 @@ describe('collectResponsesClientSystemText (responses surface)', () => {
     expect(got).toBe('You are TriageBot.\n\nHouse rules.');
   });
 
-  it('handles string input + missing instructions', () => {
-    expect(collectResponsesClientSystemText({ input: 'plain string input' })).toBeNull();
-    expect(collectResponsesClientSystemText({ instructions: '  ' })).toBeNull();
-    expect(collectResponsesClientSystemText({ instructions: 'X' })).toBe('X');
+  it('STOPS at the first non-system item (user turn or tool item)', () => {
+    expect(
+      collectResponsesClientSystemText({
+        input: [
+          { role: 'user', content: 'hi' },
+          { role: 'system', content: 'SMUGGLED' },
+        ],
+      }),
+    ).toBeNull();
+    expect(
+      collectResponsesClientSystemText({
+        instructions: 'X',
+        input: [
+          { type: 'function_call', call_id: 'c1', name: 't', arguments: '{}' } as never,
+          { role: 'system', content: 'after tool item — not collected' } as never,
+        ],
+      }),
+    ).toBe('X');
   });
 
-  it('skips function_call items without reading their role', () => {
-    const got = collectResponsesClientSystemText({
-      input: [
-        { type: 'function_call', call_id: 'c1', name: 't', arguments: '{}' } as never,
-        { role: 'developer', content: [{ type: 'input_text', text: 'dev note' }] } as never,
-      ],
-    });
-    expect(got).toBe('dev note');
+  it('handles string input, missing/non-string instructions, malformed content', () => {
+    expect(collectResponsesClientSystemText({ input: 'plain string input' })).toBeNull();
+    expect(collectResponsesClientSystemText({ instructions: '  ' })).toBeNull();
+    expect(collectResponsesClientSystemText({ instructions: 5 as never })).toBeNull();
+    expect(collectResponsesClientSystemText({ instructions: 'X' })).toBe('X');
+    expect(
+      collectResponsesClientSystemText({
+        input: [{ role: 'system', content: [null, 'bare', { text: 7 }, { text: 'ok' }] } as never],
+      }),
+    ).toBe('ok');
   });
 });

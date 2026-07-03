@@ -128,19 +128,33 @@ function partToModelPart(part: OpenAIContentPart) {
   }
 }
 
+/** Defensive text extraction: clients can send anything at runtime. */
+function safeMessageText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((p) =>
+      p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string'
+        ? (p as { text: string }).text
+        : '',
+    )
+    .join('');
+}
+
 /**
- * Collect the text of client-supplied system/developer messages, in order.
- * Used only for keys with `params.allowClientPrompt` (agent mode) — the routes
- * append this after the key's own prompt. Non-text parts are ignored.
+ * Collect the text of LEADING client system/developer messages — collection
+ * stops at the first non-system message. Agent SDKs emit one leading
+ * instructions block; stopping there means a system-role object smuggled into
+ * the later transcript (e.g. by an end user of a proxied app) is NOT promoted
+ * into the operator prompt. Used only for keys with `params.allowClientPrompt`
+ * (agent mode) — the routes append this after the key's own prompt. Malformed
+ * content never throws (clients send arbitrary JSON); non-text parts ignored.
  */
 export function collectClientSystemText(messages: OpenAIMessage[]): string | null {
   const texts: string[] = [];
   for (const m of messages) {
-    if (m.role !== 'system' && m.role !== 'developer') continue;
-    const text =
-      typeof m.content === 'string'
-        ? m.content
-        : (m.content ?? []).map((p) => ('text' in p ? p.text : '')).join('');
+    if (m.role !== 'system' && m.role !== 'developer') break;
+    const text = safeMessageText(m.content);
     if (text.trim()) texts.push(text);
   }
   return texts.length ? texts.join('\n\n') : null;

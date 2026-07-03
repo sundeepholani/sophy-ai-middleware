@@ -39,11 +39,17 @@ export interface KeyParams {
   maxOutputTokens?: number;
   topP?: number;
   /**
-   * Agent mode: honor the CLIENT's system prompt (chat `system`/`developer`
-   * messages; responses `instructions`) by appending it after the key's own
-   * prompt. For agentic SDK flows (e.g. openai-agents) whose instructions are
-   * dynamic per request and can't live on the key. Default false — the key
-   * exclusively owns the prompt.
+   * Agent mode: honor the CLIENT's system prompt (chat LEADING `system`/
+   * `developer` messages; responses `instructions` + leading system items) by
+   * appending it after the key's own prompt. For agentic SDK flows (e.g.
+   * openai-agents) whose instructions are dynamic per request and can't live on
+   * the key. Default false — the key exclusively owns the prompt.
+   *
+   * TRUST REQUIREMENT: enable only for keys used by server-side apps that
+   * construct the message array themselves. Client prompts are operator-level;
+   * collection is leading-only so transcript-smuggled system messages are not
+   * promoted, but the caller still must not forward end-user-authored leading
+   * system messages.
    */
   allowClientPrompt?: boolean;
 }
