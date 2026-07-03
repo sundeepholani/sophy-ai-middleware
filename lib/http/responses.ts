@@ -4,7 +4,9 @@
  * Sophy exposes a scoped Responses-compatible surface (POST /v1/responses) so
  * clients using `client.responses.create(...)` work by only changing base_url +
  * api_key. Like the chat surface, model/instructions/params are owned by the key
- * and any client-sent values are ignored.
+ * and any client-sent values are ignored — except agent-mode keys
+ * (params.allowClientPrompt), which honor client `instructions` + leading
+ * system items (see collectResponsesClientSystemText).
  *
  * Spec-critical details (break the official SDK if wrong):
  *  - usage fields are input_tokens / output_tokens / total_tokens (NOT prompt_*).
@@ -193,6 +195,47 @@ export function responsesInputToMessages(
   }
   flush();
   return out;
+}
+
+/**
+ * Collect the request's `instructions` field plus the text of LEADING client
+ * system/developer input items (instructions first — it is the Responses API's
+ * primary prompt channel and what agent SDKs send). Collection stops at the
+ * first non-system item, so a system-role item smuggled into the later
+ * transcript is NOT promoted into the operator prompt. Used only for keys with
+ * `params.allowClientPrompt` (agent mode). Malformed content never throws
+ * (clients send arbitrary JSON); non-text parts ignored.
+ */
+export function collectResponsesClientSystemText(body: {
+  instructions?: string | null;
+  input?: string | ResponsesInputItem[];
+}): string | null {
+  const texts: string[] = [];
+  if (typeof body.instructions === 'string' && body.instructions.trim()) {
+    texts.push(body.instructions);
+  }
+  if (Array.isArray(body.input)) {
+    for (const item of body.input) {
+      if (!item || typeof item !== 'object') break;
+      if (item.type === 'function_call' || item.type === 'function_call_output') break;
+      if (item.role !== 'system' && item.role !== 'developer') break;
+      const c = item.content as unknown;
+      const text =
+        typeof c === 'string'
+          ? c
+          : Array.isArray(c)
+            ? c
+                .map((p) =>
+                  p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string'
+                    ? (p as { text: string }).text
+                    : '',
+                )
+                .join('')
+            : '';
+      if (text.trim()) texts.push(text);
+    }
+  }
+  return texts.length ? texts.join('\n\n') : null;
 }
 
 /**

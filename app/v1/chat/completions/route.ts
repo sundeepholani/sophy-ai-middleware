@@ -10,7 +10,13 @@
 import type { ModelMessage } from 'ai';
 import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
 import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
-import { toModelMessages, resolveParams, toAiToolSet } from '@/lib/gateway/openai-map';
+import {
+  toModelMessages,
+  resolveParams,
+  toAiToolSet,
+  collectClientSystemText,
+  composeSystemPrompt,
+} from '@/lib/gateway/openai-map';
 import { handleNonStreaming, handleStreaming, type CallContext } from '@/lib/gateway/call';
 import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
 import { systemPromptWithKb } from '@/lib/kb/retrieve';
@@ -117,14 +123,21 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  // 6) Assemble the call from the key's config. If the key has a knowledgebase,
-  // embed the latest user message and fold the top-k matches into the system
-  // prompt (RAG grounding); non-KB keys pay nothing here.
+  // 6) Assemble the call from the key's config. Agent-mode keys
+  // (params.allowClientPrompt) additionally honor the client's system/developer
+  // messages, appended AFTER the key's own prompt (key stays authoritative-first;
+  // the security preamble still leads via buildSystem). If the key has a
+  // knowledgebase, embed the latest user message and fold the top-k matches into
+  // the system prompt (RAG grounding); non-KB keys pay nothing here.
+  const clientPrompt = key.params?.allowClientPrompt
+    ? collectClientSystemText(body.messages)
+    : null;
+  const basePrompt = composeSystemPrompt(key.systemPrompt, clientPrompt);
   const structured = key.outputSchema != null;
   const ctx: CallContext = {
     keyId: key.id,
     model: key.model,
-    systemPrompt: await systemPromptWithKb(key.systemPrompt, key.knowledgebaseId, messages),
+    systemPrompt: await systemPromptWithKb(basePrompt, key.knowledgebaseId, messages),
     params: resolveParams(key.params),
     structured,
     schema: structured ? normalizeOutputSchema(key.outputSchema) : key.outputSchema,
