@@ -46,6 +46,28 @@ async function audit(
   await db.insert(auditLog).values({ actor, action, target, after: after as object });
 }
 
+/**
+ * Field-level before/after diff of a key's params for the audit trail —
+ * flipping a security-relevant flag (allowClientPrompt) must leave a trace.
+ * All KeyParams fields are primitives, so strict inequality suffices; absent
+ * fields surface as null so the change survives JSON serialization.
+ */
+function paramsDiff(
+  before: KeyParams,
+  after: KeyParams,
+): { from: Record<string, unknown>; to: Record<string, unknown> } | null {
+  const fields = new Set([...Object.keys(before), ...Object.keys(after)]) as Set<keyof KeyParams>;
+  const from: Record<string, unknown> = {};
+  const to: Record<string, unknown> = {};
+  for (const f of fields) {
+    if (before[f] !== after[f]) {
+      from[f] = before[f] ?? null;
+      to[f] = after[f] ?? null;
+    }
+  }
+  return Object.keys(from).length > 0 ? { from, to } : null;
+}
+
 /** Validate an admin-chosen owner: '' / null → unassigned; otherwise must be a real user. */
 async function resolveOwner(ownerUserId: string | null | undefined): Promise<string | null> {
   if (!ownerUserId) return null;
@@ -136,7 +158,12 @@ function validateKeyInput(input: KeyFormInput): void {
   if (monthlyCostCapUsd != null && (!Number.isFinite(monthlyCostCapUsd) || monthlyCostCapUsd <= 0)) {
     throw new Error('Monthly cost budget must be a positive amount');
   }
-  const { temperature, topP, maxOutputTokens } = params;
+  const { temperature, topP, maxOutputTokens, allowClientPrompt } = params;
+  // Strict boolean: agent mode is security-relevant, so a crafted truthy value
+  // (string/number) must not slip into the jsonb and read as enabled.
+  if (allowClientPrompt !== undefined && typeof allowClientPrompt !== 'boolean') {
+    throw new Error('allowClientPrompt must be a boolean');
+  }
   if (
     temperature !== undefined &&
     (!Number.isFinite(temperature) || temperature < 0 || temperature > 2)
@@ -198,6 +225,9 @@ export async function createKey(input: KeyFormInput): Promise<{ fullKey: string 
     model: input.model,
     ownerUserId,
     monthlyCostCapUsd,
+    // Security-relevant, so its enablement is traceable from creation (updates
+    // record it via the params diff); omitted when off to keep entries compact.
+    ...(input.params.allowClientPrompt ? { allowClientPrompt: true } : {}),
   });
   revalidatePath('/admin/keys');
   return { fullKey };
@@ -234,17 +264,15 @@ export async function updateKey(
 
   const outputSchema = normalizedSchemaOrThrow(input.outputSchema);
 
-  // Read the prior KB only when we might change it, so we can audit the change
-  // (attaching/detaching a KB changes what data the key can surface).
-  let priorKb: string | null = null;
-  if (kbId !== undefined) {
-    const [row] = await getDb()
-      .select({ kb: apiKeys.knowledgebaseId })
-      .from(apiKeys)
-      .where(eq(apiKeys.id, input.id))
-      .limit(1);
-    priorKb = row?.kb ?? null;
-  }
+  // Read the prior row so the audit entries can record what changed: the KB
+  // (attaching/detaching one changes what data the key can surface) and the
+  // params diff (flipping allowClientPrompt is security-relevant).
+  const [prior] = await getDb()
+    .select({ kb: apiKeys.knowledgebaseId, params: apiKeys.params })
+    .from(apiKeys)
+    .where(eq(apiKeys.id, input.id))
+    .limit(1);
+  const priorKb = prior?.kb ?? null;
 
   // A model change invalidates a running eval: the run's champion is snapshotted
   // at start, but champion samples are captured from whatever the key serves
@@ -290,7 +318,12 @@ export async function updateKey(
   } else {
     await getDb().update(apiKeys).set(updateSet).where(eq(apiKeys.id, input.id));
   }
-  await audit(viewer.email, 'key.update', input.id, { name: input.name, model: input.model });
+  const diff = paramsDiff(prior?.params ?? {}, input.params);
+  await audit(viewer.email, 'key.update', input.id, {
+    name: input.name,
+    model: input.model,
+    ...(diff ? { params: diff } : {}),
+  });
   if (newOwner !== currentOwner) {
     await audit(viewer.email, 'key.reassign', input.id, { from: currentOwner, to: newOwner });
   }

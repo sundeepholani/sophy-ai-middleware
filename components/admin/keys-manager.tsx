@@ -963,6 +963,9 @@ function KeyForm({
   );
   const [rpm, setRpm] = useState(initial?.rpmLimit?.toString() ?? '');
   const [logContent, setLogContent] = useState(initial?.logContent ?? true);
+  const [allowClientPrompt, setAllowClientPrompt] = useState(
+    initial?.params.allowClientPrompt ?? false,
+  );
   const [schemaText, setSchemaText] = useState(
     initial?.outputSchema ? JSON.stringify(initial.outputSchema, null, 2) : '',
   );
@@ -1063,6 +1066,8 @@ function KeyForm({
         temperature: temp,
         maxOutputTokens: maxOut,
         topP: topPV,
+        // Off serializes out of the jsonb like the blank fields — absent = disabled.
+        allowClientPrompt: allowClientPrompt || undefined,
       },
       outputSchema,
       monthlyCostCapUsd: costCapV,
@@ -1339,6 +1344,25 @@ function KeyForm({
                 placeholder="1"
               />
             </div>
+          </div>
+          <div className="flex items-center justify-between gap-4 rounded-md border p-3">
+            <div>
+              <Label htmlFor={`${uid}-agent`} className="text-sm">
+                Agent mode — honor the client&apos;s prompt
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Appends the client&apos;s own system prompt (leading system/developer messages,
+                or <code>instructions</code>) after this key&apos;s prompt — for server-side
+                agentic SDK flows whose instructions change per request. Client prompts run at
+                operator level: enable only for keys used by server-side apps that build the
+                message array themselves and never forward end-user-authored system messages.
+              </p>
+            </div>
+            <Switch
+              id={`${uid}-agent`}
+              checked={allowClientPrompt}
+              onCheckedChange={setAllowClientPrompt}
+            />
           </div>
           <div className="space-y-1">
             <Label htmlFor={`${uid}-schema`} className="text-xs">
