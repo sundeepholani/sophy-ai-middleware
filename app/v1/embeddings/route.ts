@@ -86,6 +86,9 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  // 6) Embed + record usage + respond.
-  return handleEmbeddings({ keyId: key.id, model: key.model }, parsed.value);
+  // 6) Embed + record usage (+ content when the key logs it) + respond.
+  return handleEmbeddings(
+    { keyId: key.id, model: key.model, logContent: key.logContent },
+    parsed.value,
+  );
 }

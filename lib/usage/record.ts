@@ -147,3 +147,56 @@ export async function recordRequestLog(input: RecordRequestLogInput): Promise<vo
     console.error('[request-log] failed to insert request_log', err);
   }
 }
+
+export interface RecordEmbeddingLogInput {
+  /** Shared with the usage_events row id. */
+  id: string;
+  keyId: string;
+  /** The exact strings that were embedded (already normalized to an array). */
+  inputs: string[];
+  status: UsageStatus;
+}
+
+/**
+ * Shape embedded inputs into the request_logs `request` jsonb. Each input is a
+ * role-tagged block so the log-detail page's existing message renderer shows
+ * them as readable "INPUT" cards. The whole blob is size-capped exactly like the
+ * chat/responses path: if it exceeds the cap, store a truncated preview object
+ * (which the detail page then renders as raw JSON) rather than an oversized row.
+ * Pure — exported for unit testing.
+ */
+export function toEmbeddingLogRequest(
+  inputs: string[],
+): { role: string; content: string }[] | { truncated: true; preview: string } {
+  const blocks = inputs.map((content) => ({ role: 'input', content }));
+  const serialized = JSON.stringify(blocks);
+  return serialized.length > MAX_LOG_CHARS
+    ? { truncated: true, preview: serialized.slice(0, MAX_LOG_CHARS) }
+    : blocks;
+}
+
+/**
+ * Persist an embeddings request's inputs (gated by the key's logContent
+ * upstream). Embeddings have no text output, so `response` is null — the
+ * detail page shows "(no response captured)", which is honest here. Shares the
+ * usage_events id so the log-detail join finds it. Fully resilient.
+ */
+export async function recordEmbeddingLog(input: RecordEmbeddingLogInput): Promise<void> {
+  try {
+    await getDb()
+      .insert(requestLogs)
+      .values({
+        id: input.id,
+        apiKeyId: input.keyId,
+        surface: 'embedding',
+        systemPrompt: null,
+        request: toEmbeddingLogRequest(input.inputs) as object,
+        response: null,
+        streamed: false,
+        status: input.status,
+      })
+      .onConflictDoNothing();
+  } catch (err) {
+    console.error('[request-log] failed to insert embedding request_log', err);
+  }
+}

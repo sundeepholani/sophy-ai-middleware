@@ -11,10 +11,12 @@
  * pipeline (lib/kb/embed.ts) — request-scoped OIDC by default, explicit
  * AI_GATEWAY_API_KEY when set — and batches provider-side as needed.
  */
+import { randomUUID } from 'node:crypto';
 import { embedMany } from 'ai';
 import type { ProviderMetadata } from 'ai';
 import {
   recordUsage,
+  recordEmbeddingLog,
   extractGatewayCost,
   extractGatewayRequestId,
   ZERO_USAGE,
@@ -213,6 +215,8 @@ export interface EmbeddingsCallContext {
   keyId: string;
   /** Full AI Gateway embedding-model id, e.g. "openai/text-embedding-3-small". */
   model: string;
+  /** When true, capture the embedded inputs to request_logs (key's logContent). */
+  logContent: boolean;
 }
 
 /**
@@ -220,6 +224,10 @@ export interface EmbeddingsCallContext {
  * the cost row is durably written before the function returns — matching the
  * image handler. Embedding usage is input-only: tokens land in inputTokens and
  * totalTokens; outputTokens stays 0.
+ *
+ * When the key logs content, the embedded inputs are captured to request_logs
+ * under a shared event id (so the log-detail join finds them) — on success and
+ * on failure, mirroring the chat/responses surfaces.
  */
 export async function handleEmbeddings(
   ctx: EmbeddingsCallContext,
@@ -227,6 +235,11 @@ export async function handleEmbeddings(
 ): Promise<Response> {
   const startedAt = Date.now();
   const provider = providerOf(ctx.model);
+  const eventId = randomUUID();
+  const logInputs = (status: 'ok' | 'error') =>
+    ctx.logContent
+      ? recordEmbeddingLog({ id: eventId, keyId: ctx.keyId, inputs: parsed.values, status })
+      : Promise.resolve();
   try {
     const result = await embedMany({
       model: embeddingModel(ctx.model),
@@ -250,6 +263,7 @@ export async function handleEmbeddings(
     };
     const pm = result.providerMetadata as ProviderMetadata | undefined;
     await recordUsage({
+      id: eventId,
       keyId: ctx.keyId,
       provider,
       model: ctx.model,
@@ -260,11 +274,13 @@ export async function handleEmbeddings(
       responseKind: 'embedding',
       gatewayRequestId: extractGatewayRequestId(pm),
     });
+    await logInputs('ok');
 
     const payload = toEmbeddingsResponse(result.embeddings, ctx.model, parsed.encodingFormat, tokens);
     return Response.json(payload, { headers: { 'cache-control': 'no-store' } });
   } catch (err) {
     await recordUsage({
+      id: eventId,
       keyId: ctx.keyId,
       provider,
       model: ctx.model,
@@ -274,6 +290,7 @@ export async function handleEmbeddings(
       responseKind: 'embedding',
       errorMessage: err instanceof Error ? err.message : String(err),
     });
+    await logInputs('error');
     return openAiError(502, 'api_error', 'The embeddings request failed.', {
       code: 'upstream_error',
     });

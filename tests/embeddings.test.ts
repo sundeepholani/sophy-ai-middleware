@@ -6,6 +6,7 @@ import {
   modelSupportsEmbeddings,
 } from '@/lib/gateway/embeddings';
 import type { AvailableModel } from '@/lib/gateway/capabilities';
+import { toEmbeddingLogRequest } from '@/lib/usage/record';
 
 /** Decode the OpenAI base64 wire encoding. Node Buffers are views into a shared
  * pool, so the Float32Array must honor byteOffset/byteLength — reading `.buffer`
@@ -177,3 +178,25 @@ describe('modelSupportsEmbeddings', () => {
     expect(modelSupportsEmbeddings(model({ type: 'image' }))).toBe(false);
   });
 });
+
+describe('toEmbeddingLogRequest', () => {
+  it('shapes inputs into role-tagged blocks the log detail page can render', () => {
+    const r = toEmbeddingLogRequest(['hello', 'world']);
+    expect(r).toEqual([
+      { role: 'input', content: 'hello' },
+      { role: 'input', content: 'world' },
+    ]);
+  });
+
+  it('preserves an empty input list as an empty array (never a preview object)', () => {
+    expect(toEmbeddingLogRequest([])).toEqual([]);
+  });
+
+  it('falls back to a truncated preview object when the blob exceeds the cap', () => {
+    const big = 'x'.repeat(200_000);
+    const r = toEmbeddingLogRequest([big]) as { truncated: true; preview: string };
+    expect(Array.isArray(r)).toBe(false);
+    expect(r.truncated).toBe(true);
+    expect(r.preview.length).toBe(100_000);
+  });
+})

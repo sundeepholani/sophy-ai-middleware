@@ -194,10 +194,10 @@ export const requestLogs = pgTable(
   {
     id: uuid('id').primaryKey(), // == usage_events.id (app-generated, shared)
     apiKeyId: uuid('api_key_id').notNull(),
-    surface: text('surface'), // 'chat' | 'responses'
+    surface: text('surface'), // 'chat' | 'responses' | 'embedding'
     systemPrompt: text('system_prompt'),
-    request: jsonb('request'), // inbound messages sent to the model
-    response: text('response'), // outbound model text
+    request: jsonb('request'), // inbound messages sent to the model (embedding: the input strings)
+    response: text('response'), // outbound model text (null for embeddings — vectors, not text)
     streamed: boolean('streamed').notNull().default(false),
     status: text('status').$type<UsageStatus>(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
