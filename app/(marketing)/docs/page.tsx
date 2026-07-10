@@ -113,11 +113,14 @@ const ERROR_ROWS: { status: string; type: string; code: string; when: string }[]
   { status: '400', type: 'invalid_request_error', code: 'functions_unsupported', when: 'Legacy `functions` parameter used — send `tools` instead.' },
   { status: '400', type: 'invalid_request_error', code: 'stateful_unsupported', when: '`previous_response_id` used — Sophy is stateless.' },
   { status: '400', type: 'invalid_request_error', code: 'model_not_image', when: 'Image generation requested on a key whose model is not an image model.' },
+  { status: '400', type: 'invalid_request_error', code: 'upstream_invalid_request', when: 'The upstream model provider rejected the request (e.g. an image exceeding the provider’s dimension limit). The provider’s detail is passed through in `message`.' },
   { status: '403', type: 'invalid_request_error', code: 'file_access_denied', when: 'Referencing a file uploaded by a different key.' },
   { status: '413', type: 'invalid_request_error', code: 'file_too_large', when: 'Upload exceeds the 4 MB limit.' },
-  { status: '429', type: 'rate_limit_error', code: 'rate_limit_exceeded', when: 'Per-key requests-per-minute limit hit (see Retry-After).' },
+  { status: '429', type: 'rate_limit_error', code: 'rate_limit_exceeded', when: 'Per-key requests-per-minute limit hit, or the upstream provider’s rate limit / quota was exceeded (see Retry-After).' },
   { status: '402', type: 'insufficient_quota', code: 'quota_exceeded', when: 'Monthly cost cap for the key reached.' },
+  { status: '402', type: 'insufficient_quota', code: 'insufficient_quota', when: 'The upstream AI provider account has insufficient quota or credit.' },
   { status: '502', type: 'api_error', code: 'schema_validation_failed', when: 'Model output failed the key’s JSON Schema.' },
+  { status: '502', type: 'api_error', code: 'upstream_error', when: 'The upstream model request failed for another reason (provider/gateway auth, permission, not-found, or a 5xx).' },
 ];
 
 const QUICKSTART_SAMPLES = [
@@ -491,7 +494,12 @@ with open("out.png", "wb") as f:
         <Section id="errors" title="Errors">
           <P>
             Errors use the OpenAI envelope. All error responses are sent with{' '}
-            <Code>Cache-Control: no-store</Code>.
+            <Code>Cache-Control: no-store</Code>. When the upstream model provider rejects a request,
+            Sophy surfaces the matching status rather than a generic 5xx — a bad request (e.g. an
+            oversized image) comes back as <Code>400</Code>, a provider rate/quota limit as{' '}
+            <Code>429</Code> (with <Code>Retry-After</Code>), so a client&apos;s existing OpenAI error
+            handling keeps working. Retry a <Code>429</Code>; a <Code>400</Code> will not succeed on
+            resubmission.
           </P>
           <CodeBlock
             label="json"

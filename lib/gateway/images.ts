@@ -18,7 +18,8 @@ import {
   extractGatewayRequestId,
   ZERO_USAGE,
 } from '@/lib/usage/record';
-import { openAiError, type ImageGenerationRequest, type ImageGenerationResponse } from '@/lib/http/openai';
+import type { ImageGenerationRequest, ImageGenerationResponse } from '@/lib/http/openai';
+import { upstreamErrorResponse } from '@/lib/gateway/upstream-error';
 import { providerOf } from '@/lib/gateway/call';
 import { listAllModels } from '@/lib/gateway/models';
 import { type AvailableModel } from '@/lib/gateway/capabilities';
@@ -192,8 +193,6 @@ export async function handleImageGeneration(
       responseKind: 'image',
       errorMessage: err instanceof Error ? err.message : String(err),
     });
-    return openAiError(502, 'api_error', 'The image generation request failed.', {
-      code: 'upstream_error',
-    });
+    return upstreamErrorResponse(err, 'The image generation request failed.');
   }
 }

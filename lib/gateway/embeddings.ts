@@ -22,7 +22,8 @@ import {
   ZERO_USAGE,
   type NormalizedUsage,
 } from '@/lib/usage/record';
-import { openAiError, type EmbeddingsRequest, type EmbeddingsResponse } from '@/lib/http/openai';
+import type { EmbeddingsRequest, EmbeddingsResponse } from '@/lib/http/openai';
+import { upstreamErrorResponse } from '@/lib/gateway/upstream-error';
 import { providerOf } from '@/lib/gateway/call';
 import { embeddingModel } from '@/lib/kb/embed';
 import { listAllModels } from '@/lib/gateway/models';
@@ -291,8 +292,6 @@ export async function handleEmbeddings(
       errorMessage: err instanceof Error ? err.message : String(err),
     });
     await logInputs('error');
-    return openAiError(502, 'api_error', 'The embeddings request failed.', {
-      code: 'upstream_error',
-    });
+    return upstreamErrorResponse(err, 'The embeddings request failed.');
   }
 }

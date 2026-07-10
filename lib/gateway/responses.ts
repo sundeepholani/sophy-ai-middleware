@@ -31,6 +31,7 @@ import {
   ZERO_USAGE,
 } from '@/lib/usage/record';
 import { openAiError } from '@/lib/http/openai';
+import { upstreamErrorResponse } from '@/lib/gateway/upstream-error';
 import {
   buildResponseObject,
   mapResponsesUsage,
@@ -200,7 +201,7 @@ export async function handleResponsesNonStreaming(
       errorMessage: err instanceof Error ? err.message : String(err),
     });
     await logIf(null, 'error');
-    return openAiError(502, 'api_error', 'Upstream model request failed.', { code: 'upstream_error' });
+    return upstreamErrorResponse(err, 'Upstream model request failed.');
   }
 }
 
