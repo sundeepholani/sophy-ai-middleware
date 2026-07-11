@@ -9,13 +9,15 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 export const dynamic = 'force-dynamic';
 
-// 'failed' is reserved in the enum but unreachable today (only samples fail),
-// so it gets no pill; a defensive row under "All" is enough if one ever appears.
+// Running first — it's the landing default (the operator's live concern);
+// "All" is the explicit history view, so it sits last. 'failed' is reserved in
+// the enum but unreachable today (only samples fail), so it gets no pill; a
+// defensive row under "All" is enough if one ever appears.
 const FILTERS: { value: EvalRunStatus | 'all'; label: string }[] = [
-  { value: 'all', label: 'All' },
   { value: 'running', label: 'Running' },
   { value: 'completed', label: 'Completed' },
   { value: 'cancelled', label: 'Cancelled' },
+  { value: 'all', label: 'All' },
 ];
 
 export default async function EvalsPage({
@@ -25,15 +27,15 @@ export default async function EvalsPage({
 }) {
   const viewer = await requireViewer();
   const sp = await searchParams;
-  const status: EvalRunStatus | undefined =
-    sp.status === 'running' || sp.status === 'completed' || sp.status === 'cancelled'
+  const status: EvalRunStatus | 'all' =
+    sp.status === 'all' || sp.status === 'completed' || sp.status === 'cancelled'
       ? sp.status
-      : undefined;
+      : 'running'; // default tab — bare /admin/evals and ?status=running land here
 
   // One fetch serves both the tiles (always across ALL runs) and the table
   // (status-filtered) — runs are operator-initiated, so the table is small.
   const runs = await listEvalRuns(viewer);
-  const shown = status ? runs.filter((r) => r.status === status) : runs;
+  const shown = status === 'all' ? runs : runs.filter((r) => r.status === status);
 
   const runningN = runs.filter((r) => r.status === 'running').length;
   const completedN = runs.filter((r) => r.status === 'completed').length;
@@ -63,11 +65,11 @@ export default async function EvalsPage({
       {/* Status filter — applied server-side; search narrows within. */}
       <div className="inline-flex rounded-md border bg-muted/40 p-0.5">
         {FILTERS.map((f) => {
-          const active = (status ?? 'all') === f.value;
+          const active = status === f.value;
           return (
             <Link
               key={f.value}
-              href={f.value === 'all' ? '/admin/evals' : `/admin/evals?status=${f.value}`}
+              href={f.value === 'running' ? '/admin/evals' : `/admin/evals?status=${f.value}`}
               className={cn(
                 'rounded px-2.5 py-1 text-xs font-medium transition-colors',
                 active
@@ -84,7 +86,7 @@ export default async function EvalsPage({
       <EvalsTable
         runs={shown}
         emptyMessage={
-          status && runs.length > 0
+          status !== 'all' && runs.length > 0
             ? `No ${status} evals.`
             : 'No eval runs yet — start one from the flask icon on the API Keys page.'
         }
