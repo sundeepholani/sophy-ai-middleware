@@ -7,6 +7,7 @@ const COLUMNS: { title: string; links: { label: string; href: string }[] }[] = [
     links: [
       { label: 'Features', href: '/#features' },
       { label: 'How it works', href: '/#how-it-works' },
+      { label: 'Model evaluations', href: '/#evaluation' },
     ],
   },
   {
@@ -14,6 +15,7 @@ const COLUMNS: { title: string; links: { label: string; href: string }[] }[] = [
     links: [
       { label: 'API docs', href: '/docs' },
       { label: 'Quickstart', href: '/docs#quickstart' },
+      { label: 'Embeddings', href: '/docs#embeddings' },
     ],
   },
   {
@@ -32,8 +34,8 @@ export function SiteFooter() {
           <div className="max-w-xs space-y-3">
             <BrandMark href="/" />
             <p className="text-sm text-muted-foreground">
-              An OpenAI-compatible AI gateway. One key for every model — your prompts, limits, and
-              grounding live server-side.
+              A governed, OpenAI-compatible gateway for language, image, and embedding workloads.
+              Each key pins one model and carries its policy server-side.
             </p>
           </div>
           <div className="grid grid-cols-2 gap-8 sm:grid-cols-3 sm:gap-12">

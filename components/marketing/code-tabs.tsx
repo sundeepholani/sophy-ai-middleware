@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useId, useRef, useState, type KeyboardEvent } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -15,7 +15,26 @@ export type CodeSample = { label: string; code: string };
 export function CodeTabs({ samples, className }: { samples: CodeSample[]; className?: string }) {
   const [active, setActive] = useState(0);
   const [copied, setCopied] = useState(false);
+  const id = useId().replace(/:/g, '');
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const current = samples[active] ?? samples[0];
+
+  function selectTab(index: number) {
+    setActive(index);
+    tabRefs.current[index]?.focus();
+  }
+
+  function onTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let next: number | null = null;
+    if (event.key === 'ArrowRight') next = (index + 1) % samples.length;
+    if (event.key === 'ArrowLeft') next = (index - 1 + samples.length) % samples.length;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = samples.length - 1;
+    if (next == null) return;
+
+    event.preventDefault();
+    selectTab(next);
+  }
 
   async function copy() {
     try {
@@ -38,8 +57,15 @@ export function CodeTabs({ samples, className }: { samples: CodeSample[]; classN
               key={s.label}
               type="button"
               role="tab"
+              id={`code-tabs-${id}-tab-${i}`}
+              aria-controls={`code-tabs-${id}-panel-${i}`}
               aria-selected={i === active}
+              tabIndex={i === active ? 0 : -1}
+              ref={(element) => {
+                tabRefs.current[i] = element;
+              }}
               onClick={() => setActive(i)}
+              onKeyDown={(event) => onTabKeyDown(event, i)}
               className={cn(
                 'border-b-2 px-3 py-2.5 text-xs font-medium whitespace-nowrap transition-colors',
                 i === active
@@ -60,10 +86,24 @@ export function CodeTabs({ samples, className }: { samples: CodeSample[]; classN
           {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
           {copied ? 'Copied' : 'Copy'}
         </button>
+        <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          {copied ? 'Code copied to clipboard.' : ''}
+        </span>
       </div>
-      <pre className="overflow-x-auto p-4 text-[13px] leading-relaxed">
-        <code className="font-mono text-white/90">{current.code}</code>
-      </pre>
+      {samples.map((sample, i) => (
+        <div
+          key={sample.label}
+          role="tabpanel"
+          id={`code-tabs-${id}-panel-${i}`}
+          aria-labelledby={`code-tabs-${id}-tab-${i}`}
+          tabIndex={i === active ? 0 : -1}
+          hidden={i !== active}
+        >
+          <pre className="overflow-x-auto p-4 text-[13px] leading-relaxed">
+            <code className="font-mono text-white/90">{sample.code}</code>
+          </pre>
+        </div>
+      ))}
     </div>
   );
 }

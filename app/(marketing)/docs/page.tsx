@@ -1,30 +1,61 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { CodeTabs, CodeBlock } from '@/components/marketing/code-tabs';
-import { cn } from '@/lib/utils';
 
 export const metadata: Metadata = {
-  title: 'API Reference — Sophy',
+  title: 'Docs — Sophy',
   description:
-    'Sophy API reference: an OpenAI-compatible gateway at https://sophy.in/v1. Authentication, chat completions, responses, tool calling, models, files, errors, and rate limits.',
+    'Sophy documentation for Chat Completions, Responses, embeddings, image generation, tools, files, models, key policy, knowledgebases, evaluations, errors, and limits.',
 };
 
 const BASE_URL = 'https://sophy.in/v1';
 
-const NAV: { id: string; label: string }[] = [
-  { id: 'introduction', label: 'Introduction' },
-  { id: 'authentication', label: 'Authentication' },
-  { id: 'quickstart', label: 'Quickstart' },
-  { id: 'chat-completions', label: 'Chat Completions' },
-  { id: 'responses', label: 'Responses API' },
-  { id: 'tools', label: 'Tool calling' },
-  { id: 'images', label: 'Image generation' },
-  { id: 'models', label: 'Models' },
-  { id: 'files', label: 'Files' },
-  { id: 'key-behavior', label: 'Key-owned behavior' },
-  { id: 'errors', label: 'Errors' },
-  { id: 'rate-limits', label: 'Rate limits & quota' },
-];
+const NAV_GROUPS = [
+  {
+    label: 'Getting started',
+    items: [
+      { id: 'introduction', label: 'Introduction' },
+      { id: 'api-surfaces', label: 'API surfaces' },
+      { id: 'authentication', label: 'Authentication' },
+      { id: 'quickstart', label: 'Quickstart' },
+    ],
+  },
+  {
+    label: 'Language APIs',
+    items: [
+      { id: 'chat-completions', label: 'Chat Completions' },
+      { id: 'responses', label: 'Responses API' },
+      { id: 'multimodal', label: 'Multimodal input' },
+      { id: 'tools', label: 'Tool calling' },
+      { id: 'structured-output', label: 'Structured output' },
+    ],
+  },
+  {
+    label: 'Other APIs',
+    items: [
+      { id: 'embeddings', label: 'Embeddings' },
+      { id: 'images', label: 'Image generation' },
+      { id: 'files', label: 'Files' },
+      { id: 'models', label: 'Models' },
+    ],
+  },
+  {
+    label: 'Policy and operations',
+    items: [
+      { id: 'key-policy', label: 'Key-owned policy' },
+      { id: 'agent-mode', label: 'Agent mode' },
+      { id: 'knowledgebases', label: 'Knowledgebases' },
+      { id: 'operator-console', label: 'Operator console' },
+    ],
+  },
+  {
+    label: 'Reliability',
+    items: [
+      { id: 'errors', label: 'Errors' },
+      { id: 'rate-limits', label: 'Limits and quota' },
+    ],
+  },
+] as const;
 
 function Method({ method, path }: { method: string; path: string }) {
   return (
@@ -51,7 +82,10 @@ function Section({
       <h2 className="font-heading text-2xl font-semibold tracking-tight">
         <Link href={`#${id}`} className="group inline-flex items-center gap-2">
           {title}
-          <span className="text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">
+          <span
+            aria-hidden
+            className="text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+          >
             #
           </span>
         </Link>
@@ -73,31 +107,55 @@ function Code({ children }: { children: React.ReactNode }) {
   );
 }
 
+function Note({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 text-sm leading-relaxed">
+      <p className="font-medium text-foreground">{title}</p>
+      <div className="mt-1 text-muted-foreground">{children}</div>
+    </div>
+  );
+}
+
 function FieldTable({
+  caption,
   rows,
 }: {
+  caption: string;
   rows: { name: string; type: string; note: React.ReactNode }[];
 }) {
   return (
     <div className="overflow-x-auto rounded-xl ring-1 ring-border">
       <table className="w-full border-collapse text-left text-sm">
+        <caption className="sr-only">{caption}</caption>
         <thead className="bg-muted/60">
           <tr>
-            <th className="px-4 py-2.5 font-medium">Field</th>
-            <th className="px-4 py-2.5 font-medium">Type</th>
-            <th className="px-4 py-2.5 font-medium">Notes</th>
+            <th scope="col" className="px-4 py-2.5 font-medium">
+              Field
+            </th>
+            <th scope="col" className="px-4 py-2.5 font-medium">
+              Type
+            </th>
+            <th scope="col" className="px-4 py-2.5 font-medium">
+              Notes
+            </th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
-            <tr key={r.name} className="border-t align-top">
+          {rows.map((row, index) => (
+            <tr key={`${row.name}-${index}`} className="border-t align-top">
               <td className="px-4 py-2.5 font-mono text-[13px] whitespace-nowrap text-foreground">
-                {r.name}
+                {row.name}
               </td>
               <td className="px-4 py-2.5 font-mono text-[13px] whitespace-nowrap text-muted-foreground">
-                {r.type}
+                {row.type}
               </td>
-              <td className="px-4 py-2.5 text-muted-foreground">{r.note}</td>
+              <td className="px-4 py-2.5 text-muted-foreground">{row.note}</td>
             </tr>
           ))}
         </tbody>
@@ -107,20 +165,138 @@ function FieldTable({
 }
 
 const ERROR_ROWS: { status: string; type: string; code: string; when: string }[] = [
-  { status: '401', type: 'authentication_error', code: 'missing_api_key', when: 'No Authorization header.' },
-  { status: '401', type: 'authentication_error', code: 'invalid_api_key', when: 'Key is malformed, unknown, revoked, or expired.' },
-  { status: '400', type: 'invalid_request_error', code: 'tools_unsupported', when: 'Tools sent to a key configured for structured output.' },
-  { status: '400', type: 'invalid_request_error', code: 'functions_unsupported', when: 'Legacy `functions` parameter used — send `tools` instead.' },
-  { status: '400', type: 'invalid_request_error', code: 'stateful_unsupported', when: '`previous_response_id` used — Sophy is stateless.' },
-  { status: '400', type: 'invalid_request_error', code: 'model_not_image', when: 'Image generation requested on a key whose model is not an image model.' },
-  { status: '400', type: 'invalid_request_error', code: 'upstream_invalid_request', when: 'The upstream model provider rejected the request (e.g. an image exceeding the provider’s dimension limit). The provider’s detail is passed through in `message`.' },
-  { status: '403', type: 'invalid_request_error', code: 'file_access_denied', when: 'Referencing a file uploaded by a different key.' },
-  { status: '413', type: 'invalid_request_error', code: 'file_too_large', when: 'Upload exceeds the 4 MB limit.' },
-  { status: '429', type: 'rate_limit_error', code: 'rate_limit_exceeded', when: 'Per-key requests-per-minute limit hit, or the upstream provider’s rate limit / quota was exceeded (see Retry-After).' },
-  { status: '402', type: 'insufficient_quota', code: 'quota_exceeded', when: 'Monthly cost cap for the key reached.' },
-  { status: '402', type: 'insufficient_quota', code: 'insufficient_quota', when: 'The upstream AI provider account has insufficient quota or credit.' },
-  { status: '502', type: 'api_error', code: 'schema_validation_failed', when: 'Model output failed the key’s JSON Schema.' },
-  { status: '502', type: 'api_error', code: 'upstream_error', when: 'The upstream model request failed for another reason (provider/gateway auth, permission, not-found, or a 5xx).' },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'functions_unsupported',
+    when: 'Legacy Chat Completions `functions` was sent; use `tools`.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'stateful_unsupported',
+    when: 'Responses `previous_response_id` was sent; send the full input each call.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'tools_unsupported',
+    when: 'Function tools were sent to a key configured for structured output.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'invalid_url',
+    when: 'A Chat or Responses image/file part contains a malformed URL.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'model_not_image',
+    when: 'Image generation was requested with a known non-image key model.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'unsupported_response_format',
+    when: 'Image `response_format` was set to anything other than `b64_json`.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'model_not_embedding',
+    when: 'Embeddings were requested with a known non-embedding key model.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'token_input_unsupported',
+    when: 'Pre-tokenized embedding input was sent; use strings.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'unsupported_encoding_format',
+    when: 'Embedding `encoding_format` was not `float` or `base64`.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'dimensions_unsupported',
+    when: '`dimensions` was sent to a non-OpenAI embedding model.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'unsupported_file_type',
+    when: 'The uploaded file content type is outside the allowlist.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'upstream_invalid_request',
+    when: 'The model provider rejected the request as invalid; its actionable detail is returned.',
+  },
+  {
+    status: '401',
+    type: 'authentication_error',
+    code: 'missing_api_key',
+    when: 'No valid Bearer Authorization header was supplied.',
+  },
+  {
+    status: '401',
+    type: 'authentication_error',
+    code: 'invalid_api_key',
+    when: 'The key is malformed, unknown, revoked, or expired.',
+  },
+  {
+    status: '402',
+    type: 'insufficient_quota',
+    code: 'quota_exceeded',
+    when: 'The key reached its monthly proxy-traffic cost cap.',
+  },
+  {
+    status: '402',
+    type: 'insufficient_quota',
+    code: 'insufficient_quota',
+    when: 'The upstream AI provider account has insufficient quota or credit.',
+  },
+  {
+    status: '403',
+    type: 'invalid_request_error',
+    code: 'file_access_denied',
+    when: 'A request references a Sophy upload owned by another key.',
+  },
+  {
+    status: '413',
+    type: 'invalid_request_error',
+    code: 'file_too_large',
+    when: 'A file upload exceeds 4 MiB (4,194,304 bytes).',
+  },
+  {
+    status: '429',
+    type: 'rate_limit_error',
+    code: 'rate_limit_exceeded',
+    when: 'The key RPM limit or an upstream provider rate/quota limit was reached.',
+  },
+  {
+    status: '502',
+    type: 'api_error',
+    code: 'schema_validation_failed',
+    when: 'A buffered structured response could not satisfy the key schema.',
+  },
+  {
+    status: '502',
+    type: 'api_error',
+    code: 'upload_failed',
+    when: 'Sophy could not persist a file upload.',
+  },
+  {
+    status: '502',
+    type: 'api_error',
+    code: 'upstream_error',
+    when: 'An upstream auth, permission, not-found, unknown, or server failure occurred.',
+  },
 ];
 
 const QUICKSTART_SAMPLES = [
@@ -134,7 +310,7 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="sophy",   # ignored — the key owns the model
+    model="sophy",  # ignored — the key owns the model
     messages=[{"role": "user", "content": "Hello, Sophy!"}],
 )
 print(resp.choices[0].message.content)`,
@@ -149,7 +325,7 @@ const client = new OpenAI({
 });
 
 const resp = await client.chat.completions.create({
-  model: "sophy",   // ignored — the key owns the model
+  model: "sophy",  // ignored — the key owns the model
   messages: [{ role: "user", content: "Hello, Sophy!" }],
 });
 console.log(resp.choices[0].message.content);`,
@@ -169,141 +345,325 @@ console.log(resp.choices[0].message.content);`,
 export default function DocsPage() {
   return (
     <div className="mx-auto w-full max-w-7xl gap-12 px-4 py-12 sm:px-6 lg:grid lg:grid-cols-[220px_1fr] lg:px-8">
-      {/* Sidebar */}
       <aside className="hidden lg:block">
-        <nav className="sticky top-24 space-y-1">
-          <p className="px-3 pb-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-            On this page
-          </p>
-          {NAV.map((item) => (
-            <Link
-              key={item.id}
-              href={`#${item.id}`}
-              className="block rounded-md px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              {item.label}
-            </Link>
+        <nav
+          aria-label="Documentation sections"
+          className="sticky top-24 max-h-[calc(100vh-7rem)] space-y-5 overflow-y-auto pb-6"
+        >
+          {NAV_GROUPS.map((group) => (
+            <div key={group.label}>
+              <p className="px-3 pb-1.5 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
+                {group.label}
+              </p>
+              <div className="space-y-0.5">
+                {group.items.map((item) => (
+                  <Link
+                    key={item.id}
+                    href={`#${item.id}`}
+                    className="block rounded-md px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  >
+                    {item.label}
+                  </Link>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
       </aside>
 
-      {/* Content */}
-      <div className="min-w-0 max-w-3xl space-y-12">
+      <div className="min-w-0 max-w-4xl">
+        <details className="mb-10 rounded-xl bg-muted/50 p-4 ring-1 ring-border lg:hidden">
+          <summary className="cursor-pointer text-sm font-medium">On this page</summary>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            {NAV_GROUPS.map((group) => (
+              <div key={group.label}>
+                <p className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
+                  {group.label}
+                </p>
+                <div className="mt-1 space-y-1">
+                  {group.items.map((item) => (
+                    <Link
+                      key={item.id}
+                      href={`#${item.id}`}
+                      className="block py-1 text-sm text-primary hover:underline"
+                    >
+                      {item.label}
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </details>
+
         <header className="space-y-3">
-          <h1 className="font-heading text-4xl font-semibold tracking-tight">API Reference</h1>
+          <p className="text-sm font-medium text-primary">Sophy documentation</p>
+          <h1 className="font-heading text-4xl font-semibold tracking-tight">Build on a governed AI gateway</h1>
           <P>
-            Sophy speaks the OpenAI API. Point any OpenAI SDK at{' '}
-            <Code>{BASE_URL}</Code> with your Sophy key and your existing code works unchanged.
+            Use supported OpenAI client methods at <Code>{BASE_URL}</Code>. Each Sophy key is bound
+            to one model and carries its policy, limits, and optional knowledge server-side.
           </P>
         </header>
 
-        <Section id="introduction" title="Introduction">
-          <P>
-            Sophy is an OpenAI-compatible gateway. Each key carries its own model, system prompt,
-            parameters, optional JSON Schema, and optional knowledgebase — all server-side. You send
-            requests in the OpenAI wire format; Sophy resolves the configuration from your key,
-            routes the request to the model, and accounts for usage.
-          </P>
-          <P>
-            <strong className="text-foreground">You send:</strong> messages / input, whether to{' '}
-            <Code>stream</Code>, and (optionally) <Code>tools</Code>.{' '}
-            <strong className="text-foreground">The key owns:</strong> the model, system prompt, and
-            generation parameters — so any <Code>model</Code>, <Code>system</Code> message,{' '}
-            <Code>temperature</Code>, <Code>top_p</Code>, or <Code>max_tokens</Code> you send is
-            silently overridden.
-          </P>
-          <Method method="BASE URL" path={BASE_URL} />
-        </Section>
+        <div className="mt-12 space-y-12">
+          <Section id="introduction" title="Introduction">
+            <P>
+              Sophy is an OpenAI-compatible gateway and operator console. Applications send input in
+              familiar wire formats; Sophy authenticates the key, resolves its centrally managed
+              configuration, calls the bound model, and records usage.
+            </P>
+            <P>
+              Compatibility is intentionally scoped. Chat Completions and Responses cover text,
+              streaming, multimodal input, and function-tool loops. Dedicated routes cover
+              embeddings, image generation, short-lived file uploads, and the model bound to a key.
+              The sections below call out differences from the full OpenAI platform.
+            </P>
+            <Method method="BASE URL" path={BASE_URL} />
+          </Section>
 
-        <Section id="authentication" title="Authentication">
-          <P>
-            Authenticate with your Sophy key in the <Code>Authorization</Code> header as a bearer
-            token. Keys look like <Code>mw_live_…</Code> and are issued in the{' '}
-            <Link href="/admin/login" className="text-primary underline-offset-4 hover:underline">
-              operator console
-            </Link>{' '}
-            — there is no self-serve signup.
-          </P>
-          <CodeBlock label="header" code={`Authorization: Bearer mw_live_…`} />
-          <P>
-            A missing key returns <Code>401 missing_api_key</Code>; an invalid, revoked, or expired
-            key returns <Code>401 invalid_api_key</Code>. Revocation is immediate — the key is
-            validated against the database on every request.
-          </P>
-        </Section>
+          <Section id="api-surfaces" title="Supported API surfaces">
+            <div className="overflow-x-auto rounded-xl ring-1 ring-border">
+              <table className="w-full border-collapse text-left text-sm">
+                <caption className="sr-only">Supported Sophy API routes</caption>
+                <thead className="bg-muted/60">
+                  <tr>
+                    <th scope="col" className="px-4 py-2.5 font-medium">
+                      Method
+                    </th>
+                    <th scope="col" className="px-4 py-2.5 font-medium">
+                      Route
+                    </th>
+                    <th scope="col" className="px-4 py-2.5 font-medium">
+                      Required capability
+                    </th>
+                    <th scope="col" className="px-4 py-2.5 font-medium">
+                      Compatibility boundary
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    ['POST', '/chat/completions', 'Language generation', 'Text, streaming, multimodal input, function tools'],
+                    ['POST', '/responses', 'Language generation', 'Stateless; full input required on every call'],
+                    ['POST', '/embeddings', 'Embedding', 'String input; float or base64 vectors'],
+                    ['POST', '/images/generations', 'Image generation', 'Base64 image output only'],
+                    ['POST', '/files', 'Any', '201 response; 4 MiB; cleanup-eligible after 24 hours'],
+                    ['GET', '/models', 'Any', 'Returns only the model bound to this key'],
+                  ].map(([method, path, model, note]) => (
+                    <tr key={path} className="border-t align-top">
+                      <td className="px-4 py-2.5 font-mono text-[13px] text-primary">{method}</td>
+                      <td className="px-4 py-2.5 font-mono text-[13px] whitespace-nowrap text-foreground">
+                        /v1{path}
+                      </td>
+                      <td className="px-4 py-2.5 text-muted-foreground">{model}</td>
+                      <td className="px-4 py-2.5 text-muted-foreground">{note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <Note title="One key, one model">
+              <p>
+                Bind keys around workloads and call a route the bound model’s capabilities support.
+                The client-sent <Code>model</Code> never switches the key’s bound model.
+              </p>
+            </Note>
+          </Section>
 
-        <Section id="quickstart" title="Quickstart">
-          <P>Change two lines — the base URL and the API key — and make your first call.</P>
-          <CodeTabs samples={QUICKSTART_SAMPLES} />
-        </Section>
+          <Section id="authentication" title="Authentication">
+            <P>
+              Send the Sophy key as a Bearer token. Keys look like <Code>mw_live_…</Code> and are
+              issued by an operator in the{' '}
+              <Link href="/admin/login" className="text-primary underline-offset-4 hover:underline">
+                Sophy console
+              </Link>
+              ; there is no public self-serve signup.
+            </P>
+            <CodeBlock label="header" code="Authorization: Bearer mw_live_…" />
+            <P>
+              Missing Bearer authentication returns <Code>401 missing_api_key</Code>. A malformed,
+              unknown, revoked, or expired key returns <Code>401 invalid_api_key</Code>.
+              Keys are checked against the database on every request, so edits and revocation apply
+              immediately.
+            </P>
+          </Section>
 
-        <Section id="chat-completions" title="Chat Completions">
-          <Method method="POST" path={`${BASE_URL}/chat/completions`} />
-          <P>The standard OpenAI Chat Completions surface. Honored request fields:</P>
-          <FieldTable
-            rows={[
-              { name: 'messages', type: 'array', note: 'Required. The conversation. user / assistant / tool roles are kept; system messages are dropped (the key owns the prompt).' },
-              { name: 'stream', type: 'boolean', note: <>Optional. Stream the response as SSE chunks.</> },
-              { name: 'stream_options', type: 'object', note: <>Optional. <Code>{`{ include_usage: true }`}</Code> adds a final usage chunk.</> },
-              { name: 'tools', type: 'array', note: <>Optional. Function tool definitions, passed through to the model. See <Link href="#tools" className="text-primary underline-offset-4 hover:underline">Tool calling</Link>.</> },
-              { name: 'tool_choice', type: 'string | object', note: <><Code>auto</Code>, <Code>none</Code>, <Code>required</Code>, or <Code>{`{ type: "function", function: { name } }`}</Code>.</> },
-            ]}
-          />
-          <P>
-            <strong className="text-foreground">Ignored (key-owned):</strong> <Code>model</Code>,{' '}
-            <Code>system</Code> messages, <Code>temperature</Code>, <Code>top_p</Code>,{' '}
-            <Code>max_tokens</Code>.
-          </P>
-          <h3 className="font-heading pt-2 text-lg font-medium">Response</h3>
-          <CodeBlock
-            label="json"
-            code={`{
+          <Section id="quickstart" title="Quickstart">
+            <P>
+              Change the base URL and API key, then call one of the supported methods. The
+              placeholder <Code>model</Code> is required by some OpenAI SDK methods but Sophy uses
+              the model bound to the key.
+            </P>
+            <CodeTabs samples={QUICKSTART_SAMPLES} />
+          </Section>
+
+          <Section id="chat-completions" title="Chat Completions">
+            <Method method="POST" path={`${BASE_URL}/chat/completions`} />
+            <FieldTable
+              caption="Chat Completions request fields"
+              rows={[
+                {
+                  name: 'messages',
+                  type: 'array',
+                  note: (
+                    <>
+                      Required and non-empty. Supports user, assistant, and tool turns plus text,
+                      image, and file content. System/developer handling depends on{' '}
+                      <Link href="#agent-mode" className="text-primary underline-offset-4 hover:underline">
+                        Agent mode
+                      </Link>
+                      .
+                    </>
+                  ),
+                },
+                {
+                  name: 'stream',
+                  type: 'boolean',
+                  note: 'Optional. Emits OpenAI chat.completion.chunk SSE frames.',
+                },
+                {
+                  name: 'stream_options',
+                  type: 'object',
+                  note: (
+                    <>
+                      Optional. <Code>{'{ include_usage: true }'}</Code> adds a final usage-only
+                      chunk.
+                    </>
+                  ),
+                },
+                {
+                  name: 'tools',
+                  type: 'array',
+                  note: (
+                    <>
+                      Optional function definitions. Sophy returns calls but never executes them.
+                      See <Link href="#tools" className="text-primary underline-offset-4 hover:underline">Tool calling</Link>.
+                    </>
+                  ),
+                },
+                {
+                  name: 'tool_choice',
+                  type: 'string | object',
+                  note: (
+                    <>
+                      <Code>auto</Code>, <Code>none</Code>, <Code>required</Code>, or one named
+                      function.
+                    </>
+                  ),
+                },
+              ]}
+            />
+            <P>
+              <strong className="text-foreground">Key-owned or ignored:</strong>{' '}
+              <Code>model</Code>, <Code>temperature</Code>, <Code>top_p</Code>,{' '}
+              <Code>max_tokens</Code>, <Code>max_completion_tokens</Code>,{' '}
+              <Code>response_format</Code>, <Code>n</Code>, and <Code>user</Code>. Sophy applies the
+              key’s configured model and generation parameters instead.
+            </P>
+            <h3 className="font-heading pt-2 text-lg font-medium">Buffered response</h3>
+            <CodeBlock
+              label="json"
+              code={`{
   "id": "chatcmpl-…",
   "object": "chat.completion",
   "created": 1735689600,
   "model": "anthropic/claude-sonnet-4.6",
-  "choices": [
-    {
-      "index": 0,
-      "message": { "role": "assistant", "content": "Hello! How can I help?" },
-      "finish_reason": "stop"
-    }
-  ],
+  "choices": [{
+    "index": 0,
+    "message": { "role": "assistant", "content": "Hello! How can I help?" },
+    "finish_reason": "stop"
+  }],
   "usage": { "prompt_tokens": 9, "completion_tokens": 7, "total_tokens": 16 }
 }`}
-          />
-          <h3 className="font-heading pt-2 text-lg font-medium">Streaming</h3>
-          <P>
-            With <Code>stream: true</Code>, Sophy emits OpenAI <Code>chat.completion.chunk</Code>{' '}
-            events as <Code>data:</Code> lines, terminated by a <Code>data: [DONE]</Code> sentinel.
-          </P>
-          <CodeBlock
-            label="stream"
-            code={`data: {"id":"chatcmpl-…","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hel"},"finish_reason":null}]}
+            />
+            <h3 className="font-heading pt-2 text-lg font-medium">Streaming</h3>
+            <P>
+              A stream begins with an assistant-role chunk, emits text and/or tool-call deltas,
+              finishes with a reason chunk, optionally emits usage, and ends with{' '}
+              <Code>data: [DONE]</Code>.
+            </P>
+            <CodeBlock
+              label="stream"
+              code={`data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1735689600,"model":"anthropic/claude-sonnet-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
 
-data: {"id":"chatcmpl-…","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1735689600,"model":"anthropic/claude-sonnet-4.6","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
 
-data: {"id":"chatcmpl-…","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1735689600,"model":"anthropic/claude-sonnet-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 
 data: [DONE]`}
-          />
-        </Section>
+            />
+          </Section>
 
-        <Section id="responses" title="Responses API">
-          <Method method="POST" path={`${BASE_URL}/responses`} />
-          <P>
-            The OpenAI Responses surface, for clients using <Code>client.responses.create(...)</Code>
-            . Send the full <Code>input</Code> each call — Sophy is{' '}
-            <strong className="text-foreground">stateless</strong>, so{' '}
-            <Code>previous_response_id</Code> is rejected with{' '}
-            <Code>400 stateful_unsupported</Code>. As on the chat surface, the key owns the model and{' '}
-            <Code>instructions</Code>.
-          </P>
-          <CodeTabs
-            samples={[
-              {
-                label: 'python',
-                code: `from openai import OpenAI
+          <Section id="responses" title="Responses API">
+            <Method method="POST" path={`${BASE_URL}/responses`} />
+            <P>
+              Use <Code>client.responses.create(...)</Code> for a Responses-compatible text,
+              multimodal, streaming, or function-tool workflow. Sophy is stateless: send the full
+              conversation and any prior function calls/results in <Code>input</Code> on every
+              request.
+            </P>
+            <FieldTable
+              caption="Responses API request fields"
+              rows={[
+                {
+                  name: 'input',
+                  type: 'string | array',
+                  note: 'Required. Must yield at least one usable message or tool item; send the full state for this call.',
+                },
+                {
+                  name: 'stream',
+                  type: 'boolean',
+                  note: 'Optional. Emits numbered, typed Responses SSE events.',
+                },
+                {
+                  name: 'tools',
+                  type: 'array',
+                  note: 'Optional flat function-tool definitions. Non-function Responses tool types are ignored.',
+                },
+                {
+                  name: 'tool_choice',
+                  type: 'string | object',
+                  note: 'Optional. auto, none, required, or one named function.',
+                },
+                {
+                  name: 'instructions',
+                  type: 'string',
+                  note: (
+                    <>
+                      Used only when the key has{' '}
+                      <Link href="#agent-mode" className="text-primary underline-offset-4 hover:underline">
+                        Agent mode
+                      </Link>{' '}
+                      enabled; otherwise dropped.
+                    </>
+                  ),
+                },
+                {
+                  name: 'previous_response_id',
+                  type: 'string',
+                  note: (
+                    <>
+                      Not supported. Returns <Code>400 stateful_unsupported</Code>.
+                    </>
+                  ),
+                },
+                {
+                  name: 'store',
+                  type: 'boolean',
+                  note: 'Ignored. Sophy does not provide OpenAI-hosted response state and returns store: false.',
+                },
+              ]}
+            />
+            <P>
+              <strong className="text-foreground">Key-owned or ignored:</strong>{' '}
+              <Code>model</Code>, <Code>temperature</Code>, <Code>top_p</Code>,{' '}
+              <Code>max_output_tokens</Code>, and <Code>text.format</Code>.
+            </P>
+            <CodeTabs
+              samples={[
+                {
+                  label: 'python',
+                  code: `from openai import OpenAI
 
 client = OpenAI(base_url="${BASE_URL}", api_key="mw_live_…")
 
@@ -312,38 +672,124 @@ resp = client.responses.create(
     input="Write a haiku about gateways.",
 )
 print(resp.output_text)`,
-              },
-              {
-                label: 'curl',
-                code: `curl ${BASE_URL}/responses \\
+                },
+                {
+                  label: 'curl',
+                  code: `curl ${BASE_URL}/responses \\
   -H "Authorization: Bearer mw_live_…" \\
   -H "Content-Type: application/json" \\
-  -d '{ "model": "sophy", "input": "Write a haiku about gateways." }'`,
-              },
-            ]}
-          />
-          <P>
-            Streaming uses typed SSE events (<Code>response.created</Code>,{' '}
-            <Code>response.output_text.delta</Code>, <Code>response.completed</Code>, …), each with an
-            incrementing <Code>sequence_number</Code>. There is no <Code>[DONE]</Code> sentinel — the
-            stream ends at <Code>response.completed</Code>.
-          </P>
-        </Section>
+  -d '{"model":"sophy","input":"Write a haiku about gateways."}'`,
+                },
+              ]}
+            />
+            <CodeBlock
+              label="abridged json"
+              code={`{
+  "id": "resp_…",
+  "object": "response",
+  "created_at": 1735689600,
+  "status": "completed",
+  "model": "anthropic/claude-sonnet-4.6",
+  "store": false,
+  "output": [{
+    "id": "msg_…",
+    "type": "message",
+    "status": "completed",
+    "role": "assistant",
+    "content": [{ "type": "output_text", "text": "Silent routes converge…", "annotations": [] }]
+  }],
+  "usage": {
+    "input_tokens": 11,
+    "input_tokens_details": { "cached_tokens": 0 },
+    "output_tokens": 9,
+    "output_tokens_details": { "reasoning_tokens": 0 },
+    "total_tokens": 20
+  }
+}`}
+            />
+            <P>
+              Streaming uses events such as <Code>response.created</Code>,{' '}
+              <Code>response.output_text.delta</Code>,{' '}
+              <Code>response.function_call_arguments.delta</Code>, and{' '}
+              <Code>response.completed</Code>, each with an increasing{' '}
+              <Code>sequence_number</Code>. There is no <Code>[DONE]</Code> sentinel.
+            </P>
+          </Section>
 
-        <Section id="tools" title="Tool / function calling">
-          <P>
-            Sophy passes your tool definitions to the model and returns the model’s tool calls — it
-            never executes tools. Your client runs the function and sends the result back on the next
-            turn (the standard OpenAI tool loop). Works on both Chat Completions and the Responses
-            API.
-          </P>
-          <CodeBlock
-            label="python"
-            code={`tools = [{
+          <Section id="multimodal" title="Multimodal input">
+            <P>
+              Language keys can send public image/file URLs or URLs returned by{' '}
+              <Link href="#files" className="text-primary underline-offset-4 hover:underline">
+                <Code>POST /v1/files</Code>
+              </Link>
+              , provided the bound model supports the content type. Sophy ownership-checks its own
+              uploads; public external URLs pass through to the model provider.
+            </P>
+            <CodeTabs
+              samples={[
+                {
+                  label: 'chat',
+                  code: `uploaded_url = "https://…/uploads/<key>/invoice-….pdf"
+uploaded_filename = "invoice.pdf"
+
+resp = client.chat.completions.create(
+    model="sophy",
+    messages=[{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Summarize this document."},
+            {
+                "type": "file",
+                "file": {
+                    "file_url": uploaded_url,
+                    "filename": uploaded_filename,
+                },
+            },
+        ],
+    }],
+)`,
+                },
+                {
+                  label: 'responses',
+                  code: `uploaded_url = "https://…/uploads/<key>/photo-….png"
+
+resp = client.responses.create(
+    model="sophy",
+    input=[{
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "What is shown here?"},
+            {"type": "input_image", "image_url": uploaded_url},
+        ],
+    }],
+)`,
+                },
+              ]}
+            />
+            <Note title="Model support still matters">
+              <p>
+                The model bound to the key must accept the media you send. The model catalog in the
+                console exposes capabilities such as image analysis and file input.
+              </p>
+            </Note>
+          </Section>
+
+          <Section id="tools" title="Tool / function calling">
+            <P>
+              Sophy passes function definitions to the bound language model and maps its requested
+              calls back to the selected OpenAI wire format. Sophy never executes a tool. Your
+              application runs it, then sends the result and full conversation state on the next
+              call.
+            </P>
+            <CodeTabs
+              samples={[
+                {
+                  label: 'chat',
+                  code: `tools = [{
     "type": "function",
     "function": {
         "name": "get_weather",
-        "description": "Get the weather for a city",
+        "description": "Get weather for a city",
         "parameters": {
             "type": "object",
             "properties": {"city": {"type": "string"}},
@@ -352,158 +798,485 @@ print(resp.output_text)`,
     },
 }]
 
-# 1) Model decides to call the tool → finish_reason == "tool_calls"
-first = client.chat.completions.create(model="sophy", tools=tools,
-    messages=[{"role": "user", "content": "Weather in Paris?"}])
+first = client.chat.completions.create(
+    model="sophy",
+    tools=tools,
+    messages=[{"role": "user", "content": "Weather in Paris?"}],
+)
 call = first.choices[0].message.tool_calls[0]
 
-# 2) You run the tool, then send the result back
 second = client.chat.completions.create(model="sophy", tools=tools, messages=[
     {"role": "user", "content": "Weather in Paris?"},
     first.choices[0].message,
     {"role": "tool", "tool_call_id": call.id, "content": "18°C, sunny"},
-])
-print(second.choices[0].message.content)`}
-          />
-          <P>
-            Tool calling is mutually exclusive with structured output: a key configured with a JSON
-            Schema rejects <Code>tools</Code> with <Code>400 tools_unsupported</Code>. The legacy
-            top-level <Code>functions</Code> parameter is not supported (<Code>400
-            functions_unsupported</Code>) — use <Code>tools</Code>.
-          </P>
-        </Section>
+])`,
+                },
+                {
+                  label: 'responses',
+                  code: `tools = [{
+    "type": "function",
+    "name": "get_weather",
+    "description": "Get weather for a city",
+    "parameters": {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    },
+}]
 
-        <Section id="images" title="Image generation">
-          <Method method="POST" path={`${BASE_URL}/images/generations`} />
-          <P>
-            Generate images through the same OpenAI-compatible surface. The key owns the model, so
-            this works when your key’s model is an image model (e.g. <Code>openai/gpt-image-1</Code>)
-            — a key bound to a text model returns <Code>400 model_not_image</Code>. Honored fields:{' '}
-            <Code>prompt</Code> (required), <Code>n</Code>, <Code>size</Code>, and provider knobs like{' '}
-            <Code>quality</Code> and <Code>style</Code>. Images are returned inline as base64
-            (<Code>b64_json</Code>); <Code>{'response_format: "url"'}</Code> is not supported in v1.
-          </P>
-          <CodeTabs
-            samples={[
-              {
-                label: 'python',
-                code: `from openai import OpenAI
+first = client.responses.create(
+    model="sophy",
+    tools=tools,
+    input="Weather in Paris?",
+)
+call = next(item for item in first.output if item.type == "function_call")
+
+second = client.responses.create(model="sophy", tools=tools, input=[
+    {"role": "user", "content": "Weather in Paris?"},
+    {
+        "type": "function_call",
+        "call_id": call.call_id,
+        "name": call.name,
+        "arguments": call.arguments,
+    },
+    {
+        "type": "function_call_output",
+        "call_id": call.call_id,
+        "output": "18°C, sunny",
+    },
+])`,
+                },
+              ]}
+            />
+            <P>
+              Only function tools are supported; other Responses tool types are ignored. Chat uses the nested{' '}
+              <Code>{'{ type: "function", function: { ... } }'}</Code> shape; Responses uses the
+              flat <Code>{'{ type: "function", name, parameters }'}</Code> shape. Legacy Chat{' '}
+              <Code>functions</Code> returns <Code>400 functions_unsupported</Code>.
+            </P>
+            <Note title="Tools and structured output are mutually exclusive">
+              <p>
+                A key with a JSON Schema rejects <Code>tools</Code> with{' '}
+                <Code>400 tools_unsupported</Code> because both features compete for the model’s
+                output channel.
+              </p>
+            </Note>
+          </Section>
+
+          <Section id="structured-output" title="Structured output">
+            <P>
+              An operator can attach a JSON Schema to a language key. Sophy normalizes the schema
+              across supported model providers. Buffered calls use constrained generation,
+              tolerant JSON extraction and retry, then validate the completed object; streaming
+              uses schema-constrained generation with post-hoc validation.
+            </P>
+            <P>
+              The schema lives on the key. Client-sent Chat <Code>response_format</Code> and
+              Responses <Code>text.format</Code> do not replace it. Successful JSON is returned as
+              the assistant text, so parse <Code>choices[0].message.content</Code> or{' '}
+              <Code>response.output_text</Code>.
+            </P>
+            <Note title="Buffered and streaming failure behavior differs">
+              <p>
+                A buffered response that still fails validation returns{' '}
+                <Code>502 schema_validation_failed</Code>. Streamed bytes cannot be retracted after
+                a <Code>200</Code> begins; Sophy records a validation failure after completion, but
+                the client may already have received non-conforming text.
+              </p>
+            </Note>
+          </Section>
+
+          <Section id="embeddings" title="Embeddings">
+            <Method method="POST" path={`${BASE_URL}/embeddings`} />
+            <P>
+              Bind the key to an embedding model and use the standard OpenAI embeddings method. The
+              key-owned model is returned in the response, and usage records input tokens and
+              estimated cost.
+            </P>
+            <FieldTable
+              caption="Embeddings request fields"
+              rows={[
+                {
+                  name: 'input',
+                  type: 'string | string[]',
+                  note: 'Required. One non-empty string or 1–2,048 non-empty strings.',
+                },
+                {
+                  name: 'encoding_format',
+                  type: 'float | base64',
+                  note: 'Optional; defaults to float. Base64 contains little-endian float32 bytes.',
+                },
+                {
+                  name: 'dimensions',
+                  type: 'integer',
+                  note: 'Optional, 1–100,000, and supported only for openai/* embedding models. Provider limits may be narrower.',
+                },
+                {
+                  name: 'model',
+                  type: 'string',
+                  note: 'Ignored. The embedding model bound to the key wins.',
+                },
+                {
+                  name: 'user',
+                  type: 'string',
+                  note: 'Ignored.',
+                },
+              ]}
+            />
+            <P>
+              Pre-tokenized integer arrays are not portable across a gateway-bound model and return{' '}
+              <Code>400 token_input_unsupported</Code>.
+            </P>
+            <CodeTabs
+              samples={[
+                {
+                  label: 'python',
+                  code: `from openai import OpenAI
+
+client = OpenAI(base_url="${BASE_URL}", api_key="mw_live_…")
+
+resp = client.embeddings.create(
+    model="sophy",
+    input=["First document", "Second document"],
+    encoding_format="float",
+)
+print(resp.data[0].embedding)`,
+                },
+                {
+                  label: 'curl',
+                  code: `curl ${BASE_URL}/embeddings \\
+  -H "Authorization: Bearer mw_live_…" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "sophy",
+    "input": ["First document", "Second document"],
+    "encoding_format": "float"
+  }'`,
+                },
+              ]}
+            />
+            <CodeBlock
+              label="json"
+              code={`{
+  "object": "list",
+  "data": [
+    { "object": "embedding", "index": 0, "embedding": [0.012, -0.044, 0.008] },
+    { "object": "embedding", "index": 1, "embedding": [-0.031, 0.017, 0.052] }
+  ],
+  "model": "openai/text-embedding-3-small",
+  "usage": { "prompt_tokens": 5, "total_tokens": 5 }
+}`}
+            />
+          </Section>
+
+          <Section id="images" title="Image generation">
+            <Method method="POST" path={`${BASE_URL}/images/generations`} />
+            <P>
+              Bind the key to a supported image model. Generated images are returned inline as
+              base64 and are not stored by Sophy.
+            </P>
+            <FieldTable
+              caption="Image generation request fields"
+              rows={[
+                {
+                  name: 'prompt',
+                  type: 'string',
+                  note: 'Required and non-empty.',
+                },
+                {
+                  name: 'n',
+                  type: 'integer',
+                  note: 'Optional, from 1 to 10.',
+                },
+                {
+                  name: 'size',
+                  type: 'string',
+                  note: 'Optional WIDTHxHEIGHT syntax with 2–5 digits per side, such as 1024x1024; provider support varies.',
+                },
+                {
+                  name: 'response_format',
+                  type: 'b64_json',
+                  note: 'Optional. b64_json is the only supported format; url is rejected.',
+                },
+                {
+                  name: 'quality / style',
+                  type: 'string',
+                  note: 'Optional provider-specific options.',
+                },
+                {
+                  name: 'background / output_format',
+                  type: 'string',
+                  note: 'Optional provider-specific options; unsupported values may be ignored upstream.',
+                },
+                {
+                  name: 'model / user',
+                  type: 'string',
+                  note: 'Ignored. The image model bound to the key wins.',
+                },
+              ]}
+            />
+            <CodeTabs
+              samples={[
+                {
+                  label: 'python',
+                  code: `from openai import OpenAI
 import base64
 
 client = OpenAI(base_url="${BASE_URL}", api_key="mw_live_…")
 
 resp = client.images.generate(
-    model="sophy",                 # ignored — the key owns the image model
+    model="sophy",
     prompt="A red panda coding at a desk, watercolor",
     n=1,
     size="1024x1024",
 )
 with open("out.png", "wb") as f:
     f.write(base64.b64decode(resp.data[0].b64_json))`,
-              },
-              {
-                label: 'curl',
-                code: `curl ${BASE_URL}/images/generations \\
+                },
+                {
+                  label: 'curl',
+                  code: `curl ${BASE_URL}/images/generations \\
   -H "Authorization: Bearer mw_live_…" \\
   -H "Content-Type: application/json" \\
-  -d '{ "prompt": "A red panda coding at a desk, watercolor", "size": "1024x1024" }'`,
-              },
-            ]}
-          />
-          <CodeBlock
-            label="json"
-            code={`{
+  -d '{"prompt":"A red panda coding at a desk, watercolor","size":"1024x1024"}'`,
+                },
+              ]}
+            />
+            <CodeBlock
+              label="json"
+              code={`{
   "created": 1735689600,
-  "data": [ { "b64_json": "iVBORw0KGgoAAAANSUhEUgAA…" } ]
+  "data": [{ "b64_json": "iVBORw0KGgoAAAANSUhEUgAA…" }]
 }`}
-          />
-        </Section>
+            />
+          </Section>
 
-        <Section id="models" title="Models">
-          <Method method="GET" path={`${BASE_URL}/models`} />
-          <P>
-            Returns the single model bound to your key, in OpenAI list shape. (The model is chosen on
-            the key, not per request.)
-          </P>
-          <CodeBlock
-            label="json"
-            code={`{
-  "object": "list",
-  "data": [
-    { "id": "anthropic/claude-sonnet-4.6", "object": "model", "created": 0, "owned_by": "sophy" }
-  ]
-}`}
-          />
-        </Section>
-
-        <Section id="files" title="Files">
-          <Method method="POST" path={`${BASE_URL}/files`} />
-          <P>
-            Upload an image or document as <Code>multipart/form-data</Code> (field name{' '}
-            <Code>file</Code>) and reference the returned URL in a multimodal request. Limits: max{' '}
-            <strong className="text-foreground">4 MB</strong>; allowed types are PDF, PNG, JPEG, WebP,
-            GIF, plain text, CSV, and JSON. Uploads are scoped to the issuing key — referencing
-            another key’s file returns <Code>403 file_access_denied</Code>.
-          </P>
-          <CodeBlock
-            label="curl"
-            code={`curl ${BASE_URL}/files \\
+          <Section id="files" title="Files">
+            <Method method="POST" path={`${BASE_URL}/files`} />
+            <P>
+              Upload a file as <Code>multipart/form-data</Code> using the field name{' '}
+              <Code>file</Code>. Success returns <Code>201</Code>. Use the returned URL in a Chat
+              file/image part or a Responses <Code>input_file</Code>/<Code>input_image</Code> part.
+            </P>
+            <P>
+              Accepted content types are PDF, PNG, JPEG, WebP, GIF, plain text, CSV, and JSON. The
+              maximum size is 4 MiB (4,194,304 bytes). Uploads become eligible for batched cleanup
+              after 24 hours, so they are request staging—not durable file storage or a precise
+              expiry service.
+            </P>
+            <CodeBlock
+              label="curl"
+              code={`curl ${BASE_URL}/files \\
   -H "Authorization: Bearer mw_live_…" \\
   -F "file=@./invoice.pdf"`}
-          />
-          <CodeBlock
-            label="json"
-            code={`{
-  "id": "https://…/uploads/<key>/invoice.pdf",
-  "url": "https://…/uploads/<key>/invoice.pdf",
+            />
+            <CodeBlock
+              label="201 json"
+              code={`{
+  "id": "https://…/uploads/<key>/invoice-….pdf",
+  "url": "https://…/uploads/<key>/invoice-….pdf",
+  "pathname": "uploads/<key>/invoice-….pdf",
   "filename": "invoice.pdf",
   "bytes": 48213,
   "contentType": "application/pdf"
 }`}
-          />
-        </Section>
+            />
+            <P>
+              Upload URLs are public but unguessable so model providers can fetch them; treat each
+              URL as a bearer URL, not a secret store. When a Sophy URL is submitted back through
+              the API, Sophy checks its issuing key, and cross-key reuse returns{' '}
+              <Code>403 file_access_denied</Code>.
+            </P>
+          </Section>
 
-        <Section id="key-behavior" title="Key-owned behavior">
-          <P>
-            Three things are configured on the key and applied automatically — you do not control
-            them per request:
-          </P>
-          <ul className="space-y-3 text-[15px] text-muted-foreground">
-            <li>
-              <strong className="text-foreground">Model, prompt &amp; parameters.</strong> The key
-              owns the model, system prompt, temperature, top-p, and max output tokens. Client-sent
-              values for these are ignored, so an operator can repoint a model or revise a prompt
-              without any client change.
-            </li>
-            <li>
-              <strong className="text-foreground">Structured output.</strong> If the key has a JSON
-              Schema attached, every response is validated against it and returned as JSON. The schema
-              is normalized to work on any model the key uses — optional fields are kept (as nullable)
-              and provider-specific strictness is handled for you — so you can repoint the model
-              without rewriting the schema. Output that fails validation returns{' '}
-              <Code>502 schema_validation_failed</Code>.
-            </li>
-            <li>
-              <strong className="text-foreground">Knowledgebase grounding.</strong> If the key has a
-              knowledgebase attached, Sophy retrieves the most relevant snippets for each request and
-              folds them into the system prompt automatically — your request body stays the same.
-            </li>
-          </ul>
-        </Section>
+          <Section id="models" title="Models">
+            <Method method="GET" path={`${BASE_URL}/models`} />
+            <P>
+              Returns exactly the model currently bound to the authenticated key in OpenAI list
+              shape. This route does not return the full console catalog and does not select a model
+              for a later request.
+            </P>
+            <CodeBlock
+              label="json"
+              code={`{
+  "object": "list",
+  "data": [
+    {
+      "id": "anthropic/claude-sonnet-4.6",
+      "object": "model",
+      "created": 0,
+      "owned_by": "sophy"
+    }
+  ]
+}`}
+            />
+          </Section>
 
-        <Section id="errors" title="Errors">
-          <P>
-            Errors use the OpenAI envelope. All error responses are sent with{' '}
-            <Code>Cache-Control: no-store</Code>. When the upstream model provider rejects a request,
-            Sophy surfaces the matching status rather than a generic 5xx — a bad request (e.g. an
-            oversized image) comes back as <Code>400</Code>, a provider rate/quota limit as{' '}
-            <Code>429</Code> (with <Code>Retry-After</Code>), so a client&apos;s existing OpenAI error
-            handling keeps working. Retry a <Code>429</Code>; a <Code>400</Code> will not succeed on
-            resubmission.
-          </P>
-          <CodeBlock
-            label="json"
-            code={`{
+          <Section id="key-policy" title="Key-owned policy">
+            <P>
+              The key is Sophy’s unit of configuration. Operators can change its policy without
+              changing or redeploying the client. The next request reads the latest values.
+            </P>
+            <FieldTable
+              caption="Configuration stored on a Sophy key"
+              rows={[
+                {
+                  name: 'model',
+                  type: 'model id',
+                  note: 'One model id. Use API routes supported by its catalog capabilities.',
+                },
+                {
+                  name: 'system prompt',
+                  type: 'string',
+                  note: 'Authoritative prompt for language calls. Client prompts are dropped by default.',
+                },
+                {
+                  name: 'generation params',
+                  type: 'object',
+                  note: 'Temperature, top-p, and max output tokens for language calls.',
+                },
+                {
+                  name: 'output schema',
+                  type: 'JSON Schema',
+                  note: 'Optional structured output policy for language calls.',
+                },
+                {
+                  name: 'knowledgebase',
+                  type: 'reference',
+                  note: 'Optional grounding source for Chat and Responses.',
+                },
+                {
+                  name: 'RPM / monthly cap',
+                  type: 'number',
+                  note: 'Optional request-rate and proxy-traffic cost controls.',
+                },
+                {
+                  name: 'content logging',
+                  type: 'boolean',
+                  note: 'Captures buffered Chat, buffered/streaming Responses, and embedding inputs. Streaming Chat and image prompts record usage metadata only.',
+                },
+                {
+                  name: 'owner / status',
+                  type: 'policy',
+                  note: 'Console scope, active/revoked views, rotation, and immediate revocation.',
+                },
+              ]}
+            />
+            <P>
+              Client values for model and generation parameters are silently ignored. Client prompt
+              behavior is controlled separately by Agent mode.
+            </P>
+            <P>
+              When a language request has an effective system prompt, Sophy prepends a fixed
+              platform security preamble before the key and any Agent-mode client instructions.
+              Eligible multi-turn Anthropic requests also receive an ephemeral prompt-cache
+              breakpoint; cache reads appear in Responses usage as <Code>cached_tokens</Code>.
+            </P>
+          </Section>
+
+          <Section id="agent-mode" title="Agent mode">
+            <P>
+              Standard keys are governed mode: Sophy drops client <Code>system</Code> and{' '}
+              <Code>developer</Code> messages plus Responses <Code>instructions</Code>, then uses
+              the key-owned prompt.
+            </P>
+            <P>
+              For a trusted server-side agent whose instructions must vary per request, an operator
+              can enable <strong className="text-foreground">Agent mode</strong> on the key. Sophy
+              keeps the key prompt ahead of client instructions (after Sophy’s fixed security
+              preamble), then appends:
+            </P>
+            <ul className="list-disc space-y-2 pl-5 text-[15px] leading-relaxed text-muted-foreground">
+              <li>
+                Chat: consecutive leading <Code>system</Code>/<Code>developer</Code> messages, up to
+                the first non-system turn.
+              </li>
+              <li>
+                Responses: <Code>instructions</Code>, followed by leading system/developer input
+                items.
+              </li>
+            </ul>
+            <P>
+              Later system-role items in the transcript are still dropped. Model, generation
+              parameters, schema, knowledge, budgets, and rate limits remain key-owned.
+            </P>
+            <Note title="Trust boundary">
+              <p>
+                Enable Agent mode only for server-side applications that construct their own
+                message array. Client instructions become operator-level input; never forward
+                end-user-authored leading system/developer content on an Agent-mode key.
+              </p>
+            </Note>
+          </Section>
+
+          <Section id="knowledgebases" title="Knowledgebases">
+            <P>
+              Operators can create shared knowledgebases from PDF, DOCX, Markdown, plain text, CSV,
+              and JSON documents up to 4 MiB each. Sophy extracts, chunks, and embeds sources in the
+              background, then lets multiple keys attach to the same collection.
+            </P>
+            <P>
+              On Chat or Responses requests with usable user text, Sophy embeds the latest user
+              text (capped at its first 8,000 characters), retrieves the six closest chunks, and
+              adds them to the effective prompt. Image- or file-only turns have no retrieval query.
+              If retrieval times out or fails, the model call continues without grounding.
+            </P>
+            <P>
+              Knowledgebase ingestion and query-embedding spend is tracked separately from client
+              proxy traffic in the console.
+            </P>
+          </Section>
+
+          <Section id="operator-console" title="Operator console">
+            <P>
+              The console manages more than API keys. Passwordless admin/editor access and
+              ownership rules keep operators in scope, while changes are written to an audit log.
+            </P>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {[
+                {
+                  title: 'Models',
+                  body: 'Search and compare the catalog by provider, type, capabilities, context window, and estimated pricing.',
+                },
+                {
+                  title: 'Keys and knowledge',
+                  body: 'Create, edit, rotate, revoke, bulk-update, assign ownership, and attach shared knowledgebases.',
+                },
+                {
+                  title: 'Usage and logs',
+                  body: 'Filter requests, tokens, estimated cost, latency, model mix, errors, and source-tagged spend.',
+                },
+                {
+                  title: 'Champion vs challenger evals',
+                  body: 'Shadow successful live text requests, blind-judge results, and compare quality, cost, latency, and projected impact.',
+                },
+              ].map((item) => (
+                <div key={item.title} className="rounded-xl bg-muted/40 p-4 ring-1 ring-border">
+                  <h3 className="font-heading text-base font-medium">{item.title}</h3>
+                  <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">{item.body}</p>
+                </div>
+              ))}
+            </div>
+            <Note title="Evaluation behavior and privacy">
+              <p>
+                Evals observe eligible successful text requests only; requests containing
+                media/file content or supplying tools are skipped. While a run is active,
+                replayable sample content is temporarily captured even when normal content logging
+                is off, then purged when the run ends. Sophy recommends a winner but never switches
+                the key automatically.
+              </p>
+            </Note>
+          </Section>
+
+          <Section id="errors" title="Errors and retries">
+            <P>
+              Before a response stream starts, Sophy-generated failures use the OpenAI error
+              envelope below with <Code>Cache-Control: no-store</Code>. Field validation errors may
+              use <Code>code: null</Code> and identify the field in <Code>param</Code>.
+            </P>
+            <CodeBlock
+              label="json"
+              code={`{
   "error": {
     "message": "Invalid API key.",
     "type": "authentication_error",
@@ -511,54 +1284,97 @@ with open("out.png", "wb") as f:
     "code": "invalid_api_key"
   }
 }`}
-          />
-          <div className="overflow-x-auto rounded-xl ring-1 ring-border">
-            <table className="w-full border-collapse text-left text-sm">
-              <thead className="bg-muted/60">
-                <tr>
-                  <th className="px-4 py-2.5 font-medium">Status</th>
-                  <th className="px-4 py-2.5 font-medium">Type</th>
-                  <th className="px-4 py-2.5 font-medium">Code</th>
-                  <th className="px-4 py-2.5 font-medium">When</th>
-                </tr>
-              </thead>
-              <tbody>
-                {ERROR_ROWS.map((r) => (
-                  <tr key={r.code} className="border-t align-top">
-                    <td className="px-4 py-2.5 font-mono text-[13px] whitespace-nowrap text-foreground">
-                      {r.status}
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-[13px] whitespace-nowrap text-muted-foreground">
-                      {r.type}
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-[13px] whitespace-nowrap text-muted-foreground">
-                      {r.code}
-                    </td>
-                    <td className="px-4 py-2.5 text-muted-foreground">{r.when}</td>
+            />
+            <div className="overflow-x-auto rounded-xl ring-1 ring-border">
+              <table className="w-full border-collapse text-left text-sm">
+                <caption className="sr-only">Named Sophy API error codes</caption>
+                <thead className="bg-muted/60">
+                  <tr>
+                    <th scope="col" className="px-4 py-2.5 font-medium">
+                      Status
+                    </th>
+                    <th scope="col" className="px-4 py-2.5 font-medium">
+                      Type
+                    </th>
+                    <th scope="col" className="px-4 py-2.5 font-medium">
+                      Code
+                    </th>
+                    <th scope="col" className="px-4 py-2.5 font-medium">
+                      When
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {ERROR_ROWS.map((row) => (
+                    <tr key={row.code} className="border-t align-top">
+                      <td className="px-4 py-2.5 font-mono text-[13px] whitespace-nowrap text-foreground">
+                        {row.status}
+                      </td>
+                      <td className="px-4 py-2.5 font-mono text-[13px] whitespace-nowrap text-muted-foreground">
+                        {row.type}
+                      </td>
+                      <td className="px-4 py-2.5 font-mono text-[13px] whitespace-nowrap text-muted-foreground">
+                        {row.code}
+                      </td>
+                      <td className="px-4 py-2.5 text-muted-foreground">{row.when}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <P>
+              Upstream client-input rejections (400/413/422) become{' '}
+              <Code>400 upstream_invalid_request</Code> with a capped actionable message. Upstream
+              rate limits preserve <Code>429</Code> and forward <Code>Retry-After</Code> when
+              present; insufficient upstream credit becomes <Code>402</Code>. Auth, permission,
+              not-found, unknown, and server failures are intentionally hidden behind{' '}
+              <Code>502 upstream_error</Code>.
+            </P>
+            <Note title="Errors after streaming starts">
+              <p>
+                Once an SSE response has begun with <Code>200</Code>, a later model failure cannot
+                be replaced by a JSON error envelope. Chat still attempts a final{' '}
+                <Code>[DONE]</Code> but may lack its normal finish/usage chunks; Responses may omit{' '}
+                <Code>response.completed</Code>.
+              </p>
+            </Note>
+          </Section>
+
+          <Section id="rate-limits" title="Rate limits and monthly quota">
+            <P>
+              Chat, Responses, embeddings, and image generation enforce the key’s optional
+              requests-per-minute limit and monthly cost cap before the paid model call.{' '}
+              <Code>/files</Code> and <Code>/models</Code> do not consume those request counters.
+            </P>
+            <ul className="list-disc space-y-2 pl-5 text-[15px] leading-relaxed text-muted-foreground">
+              <li>
+                RPM uses a fixed 60-second window. Exceeding it returns{' '}
+                <Code>429 rate_limit_exceeded</Code> with <Code>Retry-After</Code> in seconds.
+              </li>
+              <li>
+                Monthly quota uses the current UTC calendar month and counts only client proxy
+                traffic. Reaching it returns <Code>402 quota_exceeded</Code>.
+              </li>
+              <li>
+                Evaluation and knowledgebase spend is recorded under separate sources for
+                visibility and does not consume a key’s proxy-traffic cap.
+              </li>
+            </ul>
+            <P>
+              Console cost values are gateway estimates for operational decisions, not a
+              billing-grade ledger.
+            </P>
+          </Section>
+
+          <div className="rounded-xl bg-muted/50 p-6 ring-1 ring-border">
+            <P>
+              Need a key or a policy change?{' '}
+              <Link href="/admin/login" className="text-primary underline-offset-4 hover:underline">
+                Sign in to the Sophy console
+              </Link>
+              .
+            </P>
           </div>
-        </Section>
-
-        <Section id="rate-limits" title="Rate limits & quota">
-          <P>
-            Each key has a requests-per-minute limit and an optional monthly cost cap, both enforced
-            at the gateway. Exceeding the rate limit returns <Code>429 rate_limit_exceeded</Code> with
-            a <Code>Retry-After</Code> header (seconds). Reaching the monthly cost cap returns{' '}
-            <Code>402 quota_exceeded</Code>. Limits are configured per key in the console.
-          </P>
-        </Section>
-
-        <div className={cn('rounded-xl bg-muted/50 p-6 ring-1 ring-border')}>
-          <P>
-            Need a key or a configuration change?{' '}
-            <Link href="/admin/login" className="text-primary underline-offset-4 hover:underline">
-              Sign in to the console
-            </Link>
-            .
-          </P>
         </div>
       </div>
     </div>
