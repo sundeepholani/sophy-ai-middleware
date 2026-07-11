@@ -27,6 +27,7 @@ import {
   requireViewer,
 } from '@/lib/auth/viewer';
 import { issueKey, generateKey } from '@/lib/auth/api-key';
+import { recordedEvalSpendUsd } from '@/lib/eval/spend';
 import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
 import { schemaCompileError } from '@/lib/gateway/openai-map';
 import { getSettings } from '@/lib/admin/settings';
@@ -331,6 +332,8 @@ export async function updateKey(
     await audit(viewer.email, 'key.kb', input.id, { from: priorKb, to: kbId });
   }
   revalidatePath('/admin/keys');
+  // A model change may have cancelled a running eval (stoppedEval above).
+  revalidatePath('/admin/evals');
   return { requiresEvalStop: false, stoppedEval };
 }
 
@@ -420,6 +423,13 @@ async function cancelRunningEvalsForKey(
     .where(and(eq(evalRuns.apiKeyId, keyId), eq(evalRuns.status, 'running')))
     .returning({ id: evalRuns.id });
   for (const run of cancelled) {
+    // Freeze the run's spend BEFORE purging the sample rows it's summed from —
+    // real gateway dollars were spent; cancelling must not erase the record.
+    // Post-flip, the cron won't judge this run's samples, so the sum is stable.
+    await db
+      .update(evalRuns)
+      .set({ evalCostUsd: await recordedEvalSpendUsd(db, run.id) })
+      .where(eq(evalRuns.id, run.id));
     await db.delete(evalSamples).where(eq(evalSamples.runId, run.id));
     await audit(actorEmail, 'eval.cancel', run.id, { cause }, db);
   }
@@ -490,6 +500,7 @@ export async function startEvalRun(input: StartEvalInput): Promise<void> {
     targetN,
   });
   revalidatePath('/admin/keys');
+  revalidatePath('/admin/evals');
 }
 
 // ---- Bulk key operations -----------------------------------------------------
@@ -609,6 +620,7 @@ export async function bulkUpdateKeyModel(input: {
   // snapshot has diverged from the DB (revoked elsewhere, eval started…), so
   // this is exactly when the table needs a resync.
   revalidatePath('/admin/keys');
+  revalidatePath('/admin/evals');
   return { done, skipped, stoppedEvals };
 }
 
@@ -685,23 +697,33 @@ export async function bulkStartEvalRuns(input: {
   // Unconditional for the same reason as bulkUpdateKeyModel: skips signal a
   // stale client snapshot, so resync the table either way.
   revalidatePath('/admin/keys');
+  revalidatePath('/admin/evals');
   return { done, skipped, stoppedEvals };
 }
 
 export async function cancelEvalRun(runId: string): Promise<void> {
   const { viewer } = await assertCanManageRun(runId);
-  const db = getDb();
-  const cancelled = await db
-    .update(evalRuns)
-    .set({ status: 'cancelled', completedAt: new Date() })
-    .where(and(eq(evalRuns.id, runId), eq(evalRuns.status, 'running')))
-    .returning({ id: evalRuns.id });
-  // Privacy option A: purge captured content for the abandoned run.
-  if (cancelled.length > 0) {
-    await db.delete(evalSamples).where(eq(evalSamples.runId, runId));
-  }
+  // One transaction: the frozen spend and the sample purge stand or fall
+  // together — never a purge without the spend snapshot it depends on.
+  await getDb().transaction(async (tx) => {
+    const cancelled = await tx
+      .update(evalRuns)
+      .set({ status: 'cancelled', completedAt: new Date() })
+      .where(and(eq(evalRuns.id, runId), eq(evalRuns.status, 'running')))
+      .returning({ id: evalRuns.id });
+    if (cancelled.length > 0) {
+      // Freeze the run's spend BEFORE the purge deletes the rows it's summed from.
+      await tx
+        .update(evalRuns)
+        .set({ evalCostUsd: await recordedEvalSpendUsd(tx, runId) })
+        .where(eq(evalRuns.id, runId));
+      // Privacy option A: purge captured content for the abandoned run.
+      await tx.delete(evalSamples).where(eq(evalSamples.runId, runId));
+    }
+  });
   await audit(viewer.email, 'eval.cancel', runId, null);
   revalidatePath('/admin/keys');
+  revalidatePath('/admin/evals');
 }
 
 /**

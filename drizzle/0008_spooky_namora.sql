@@ -1,0 +1,1 @@
+ALTER TABLE "eval_runs" ADD COLUMN "eval_cost_usd" numeric(12, 6);

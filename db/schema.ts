@@ -273,6 +273,13 @@ export const evalRuns = pgTable(
     status: text('status').$type<EvalRunStatus>().notNull().default('running'),
     /** Frozen verdict + aggregates, written at completion. */
     summary: jsonb('summary').$type<Record<string, unknown> | null>(),
+    /**
+     * Frozen challenger + judge spend, written when the run ends — completed OR
+     * cancelled — so the number survives the cancel-time sample purge (which
+     * hard-deletes the rows a live aggregate would sum). Null for runs that
+     * ended before this column existed; readers fall back to the live aggregate.
+     */
+    evalCostUsd: numeric('eval_cost_usd', { precision: 12, scale: 6 }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     completedAt: timestamp('completed_at', { withTimezone: true }),
     emailedAt: timestamp('emailed_at', { withTimezone: true }),
