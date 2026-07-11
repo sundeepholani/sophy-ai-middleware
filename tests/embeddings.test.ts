@@ -17,7 +17,6 @@ function decodeB64(b64: string): number[] {
 }
 
 const MODEL = 'openai/text-embedding-3-small';
-const KEY = 'key_123';
 
 function model(partial: Partial<AvailableModel>): AvailableModel {
   return {
@@ -37,40 +36,41 @@ function model(partial: Partial<AvailableModel>): AvailableModel {
 
 describe('parseEmbeddingsRequest', () => {
   it('rejects a missing or empty input', () => {
-    expect(parseEmbeddingsRequest({}, MODEL, KEY)).toMatchObject({ ok: false, param: 'input' });
-    expect(parseEmbeddingsRequest({ input: '' }, MODEL, KEY)).toMatchObject({ ok: false, param: 'input' });
-    expect(parseEmbeddingsRequest({ input: [] }, MODEL, KEY)).toMatchObject({ ok: false, param: 'input' });
+    expect(parseEmbeddingsRequest({}, MODEL)).toMatchObject({ ok: false, param: 'input' });
+    expect(parseEmbeddingsRequest({ input: '' }, MODEL)).toMatchObject({ ok: false, param: 'input' });
+    expect(parseEmbeddingsRequest({ input: [] }, MODEL)).toMatchObject({ ok: false, param: 'input' });
   });
 
-  it('normalizes a single string to a 1-element array and attaches gateway attribution', () => {
-    const r = parseEmbeddingsRequest({ input: 'hello' }, MODEL, KEY);
+  it('normalizes a single string to a 1-element array without gateway metadata', () => {
+    const r = parseEmbeddingsRequest({ input: 'hello' }, MODEL);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.values).toEqual(['hello']);
     expect(r.value.encodingFormat).toBe('float');
-    expect(r.value.providerOptions.gateway).toMatchObject({ user: KEY });
+    // No gateway user/tags metadata (billed surcharge; Sophy attributes internally).
+    expect(r.value.providerOptions.gateway).toBeUndefined();
     // No knobs set → no provider-specific options bucket.
     expect(r.value.providerOptions.openai).toBeUndefined();
   });
 
   it('accepts an array of strings in order', () => {
-    const r = parseEmbeddingsRequest({ input: ['a', 'b', 'c'] }, MODEL, KEY);
+    const r = parseEmbeddingsRequest({ input: ['a', 'b', 'c'] }, MODEL);
     expect(r.ok && r.value.values).toEqual(['a', 'b', 'c']);
   });
 
   it('rejects token-array inputs with a distinct code', () => {
-    expect(parseEmbeddingsRequest({ input: [1, 2, 3] }, MODEL, KEY)).toMatchObject({
+    expect(parseEmbeddingsRequest({ input: [1, 2, 3] }, MODEL)).toMatchObject({
       ok: false,
       code: 'token_input_unsupported',
     });
-    expect(parseEmbeddingsRequest({ input: [[1, 2], [3]] }, MODEL, KEY)).toMatchObject({
+    expect(parseEmbeddingsRequest({ input: [[1, 2], [3]] }, MODEL)).toMatchObject({
       ok: false,
       code: 'token_input_unsupported',
     });
   });
 
   it('rejects arrays containing empty strings', () => {
-    expect(parseEmbeddingsRequest({ input: ['a', ''] }, MODEL, KEY)).toMatchObject({
+    expect(parseEmbeddingsRequest({ input: ['a', ''] }, MODEL)).toMatchObject({
       ok: false,
       param: 'input',
     });
@@ -78,34 +78,34 @@ describe('parseEmbeddingsRequest', () => {
 
   it('rejects oversized batches', () => {
     const big = Array.from({ length: 2049 }, () => 'x');
-    expect(parseEmbeddingsRequest({ input: big }, MODEL, KEY)).toMatchObject({ ok: false, param: 'input' });
+    expect(parseEmbeddingsRequest({ input: big }, MODEL)).toMatchObject({ ok: false, param: 'input' });
   });
 
   it('validates encoding_format', () => {
-    expect(parseEmbeddingsRequest({ input: 'x', encoding_format: 'float' }, MODEL, KEY)).toMatchObject({
+    expect(parseEmbeddingsRequest({ input: 'x', encoding_format: 'float' }, MODEL)).toMatchObject({
       ok: true,
     });
-    const b64 = parseEmbeddingsRequest({ input: 'x', encoding_format: 'base64' }, MODEL, KEY);
+    const b64 = parseEmbeddingsRequest({ input: 'x', encoding_format: 'base64' }, MODEL);
     expect(b64.ok && b64.value.encodingFormat).toBe('base64');
     expect(
-      parseEmbeddingsRequest({ input: 'x', encoding_format: 'hex' as never }, MODEL, KEY),
+      parseEmbeddingsRequest({ input: 'x', encoding_format: 'hex' as never }, MODEL),
     ).toMatchObject({ ok: false, code: 'unsupported_encoding_format' });
   });
 
   it('forwards dimensions to the provider bucket only when set and valid', () => {
-    const r = parseEmbeddingsRequest({ input: 'x', dimensions: 256 }, MODEL, KEY);
+    const r = parseEmbeddingsRequest({ input: 'x', dimensions: 256 }, MODEL);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.providerOptions.openai).toMatchObject({ dimensions: 256 });
-    expect(parseEmbeddingsRequest({ input: 'x', dimensions: 0 }, MODEL, KEY)).toMatchObject({
+    expect(parseEmbeddingsRequest({ input: 'x', dimensions: 0 }, MODEL)).toMatchObject({
       ok: false,
       param: 'dimensions',
     });
-    expect(parseEmbeddingsRequest({ input: 'x', dimensions: 1.5 }, MODEL, KEY)).toMatchObject({
+    expect(parseEmbeddingsRequest({ input: 'x', dimensions: 1.5 }, MODEL)).toMatchObject({
       ok: false,
       param: 'dimensions',
     });
-    expect(parseEmbeddingsRequest({ input: 'x', dimensions: 100_001 }, MODEL, KEY)).toMatchObject({
+    expect(parseEmbeddingsRequest({ input: 'x', dimensions: 100_001 }, MODEL)).toMatchObject({
       ok: false,
       param: 'dimensions',
     });
@@ -113,25 +113,25 @@ describe('parseEmbeddingsRequest', () => {
 
   it('rejects dimensions on non-OpenAI embedding models (SDK would silently ignore it)', () => {
     expect(
-      parseEmbeddingsRequest({ input: 'x', dimensions: 256 }, 'google/gemini-embedding-001', KEY),
+      parseEmbeddingsRequest({ input: 'x', dimensions: 256 }, 'google/gemini-embedding-001'),
     ).toMatchObject({ ok: false, code: 'dimensions_unsupported', param: 'dimensions' });
     // Without dimensions, non-OpenAI models are fine.
     expect(
-      parseEmbeddingsRequest({ input: 'x' }, 'google/gemini-embedding-001', KEY),
+      parseEmbeddingsRequest({ input: 'x' }, 'google/gemini-embedding-001'),
     ).toMatchObject({ ok: true });
   });
 
   it('distinguishes token arrays from other non-string array items', () => {
-    expect(parseEmbeddingsRequest({ input: ['a', {} as never] }, MODEL, KEY)).toMatchObject({
+    expect(parseEmbeddingsRequest({ input: ['a', {} as never] }, MODEL)).toMatchObject({
       ok: false,
       param: 'input',
     });
-    const mixed = parseEmbeddingsRequest({ input: ['a', {} as never] }, MODEL, KEY);
+    const mixed = parseEmbeddingsRequest({ input: ['a', {} as never] }, MODEL);
     expect(!mixed.ok && mixed.code).toBeUndefined();
   });
 
   it('ignores the client model field entirely (key owns the model)', () => {
-    const r = parseEmbeddingsRequest({ model: 'text-embedding-3-small', input: 'x' }, MODEL, KEY);
+    const r = parseEmbeddingsRequest({ model: 'text-embedding-3-small', input: 'x' }, MODEL);
     expect(r.ok).toBe(true);
   });
 });

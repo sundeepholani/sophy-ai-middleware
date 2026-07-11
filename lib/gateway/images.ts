@@ -75,7 +75,6 @@ export type ParseImageResult =
 export function parseImageRequest(
   body: ImageGenerationRequest,
   model: string,
-  keyId: string,
 ): ParseImageResult {
   if (typeof body.prompt !== 'string' || body.prompt.trim() === '') {
     return { ok: false, status: 400, message: 'Missing required parameter: prompt.', param: 'prompt' };
@@ -116,9 +115,9 @@ export function parseImageRequest(
   if (body.background != null) knobs.background = body.background;
   if (body.output_format != null) knobs.output_format = body.output_format;
 
-  const providerOptions: Record<string, Record<string, unknown>> = {
-    gateway: { user: keyId, tags: [`key:${keyId}`.slice(0, 64)] },
-  };
+  // No gateway user/tags metadata: attribution lives in Sophy's own
+  // usage_events, and the gateway bills a per-request surcharge for tags.
+  const providerOptions: Record<string, Record<string, unknown>> = {};
   if (Object.keys(knobs).length > 0) providerOptions[providerOf(model)] = knobs;
 
   return { ok: true, value: { prompt: body.prompt, n, size, providerOptions } };

@@ -90,7 +90,6 @@ export type ParseEmbeddingsResult =
 export function parseEmbeddingsRequest(
   body: EmbeddingsRequest,
   model: string,
-  keyId: string,
 ): ParseEmbeddingsResult {
   const input = body.input;
   if (input == null || input === '') {
@@ -168,9 +167,9 @@ export function parseEmbeddingsRequest(
     knobs.dimensions = body.dimensions;
   }
 
-  const providerOptions: Record<string, Record<string, unknown>> = {
-    gateway: { user: keyId, tags: [`key:${keyId}`.slice(0, 64)] },
-  };
+  // No gateway user/tags metadata: attribution lives in Sophy's own
+  // usage_events, and the gateway bills a per-request surcharge for tags.
+  const providerOptions: Record<string, Record<string, unknown>> = {};
   if (Object.keys(knobs).length > 0) providerOptions[providerOf(model)] = knobs;
 
   return {

@@ -51,7 +51,7 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   // 4) Validate + normalize the request (prompt required; n/size/format checks).
-  const parsed = parseImageRequest(body, key.model, key.id);
+  const parsed = parseImageRequest(body, key.model);
   if (!parsed.ok) {
     return openAiError(parsed.status, 'invalid_request_error', parsed.message, {
       code: parsed.code,

@@ -85,11 +85,6 @@ export function providerOf(model: string): string {
   return model.split('/')[0] ?? 'unknown';
 }
 
-function gatewayProviderOptions(ctx: CallContext) {
-  return {
-    gateway: { user: ctx.keyId, tags: [`key:${ctx.keyId}`.slice(0, 64)] },
-  };
-}
 
 /**
  * Anthropic prompt caching. Marking the last message as an ephemeral cache
@@ -130,7 +125,6 @@ export function commonCall(ctx: CallContext, messages: ModelMessage[]) {
     // Client tools are passed through (no execute → the model emits calls, the
     // SDK returns them). Only set when present so non-tool calls are unchanged.
     ...(ctx.tools ? { tools: ctx.tools, toolChoice: ctx.toolChoice } : {}),
-    providerOptions: gatewayProviderOptions(ctx) as never,
   };
 }
 

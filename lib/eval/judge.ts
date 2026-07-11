@@ -162,7 +162,6 @@ export async function judge(args: {
         system: JUDGE_SYSTEM,
         prompt,
         abortSignal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
-        providerOptions: { gateway: { tags: ['eval:judge'] } } as never,
       },
       JUDGE_SCHEMA,
     );
