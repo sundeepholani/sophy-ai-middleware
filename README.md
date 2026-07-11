@@ -1,160 +1,193 @@
 # Sophy
 
-A central **AI gateway proxy** for your organization. Client systems stop holding
-their own OpenAI/Anthropic keys and instead call Sophy with a key it
-issues. **Each key carries its own model + system prompt + quota**, all editable
-from a UI with **no client change and no redeploy**. You also get central
-usage/cost visibility.
+Sophy is a central AI gateway for an organization. Client applications use
+Sophy-issued keys instead of holding provider credentials. Each key owns one
+configured model plus its prompt, generation parameters, optional output schema,
+knowledgebase, rate limit, and monthly USD budget. Operators can change that
+configuration without changing or redeploying the client.
 
-It exposes an **OpenAI-compatible** API — both **Chat Completions**
-(`/v1/chat/completions`) and the **Responses API** (`/v1/responses`) — so existing
-clients only change `base_url` + `api_key`. Outbound calls go through the **Vercel AI Gateway**
-(provider keys held there as BYOK); everything above it — your client keys, their
-per-key config, quotas, and the admin console — is owned here.
+Sophy exposes a practical OpenAI-compatible surface for Chat Completions,
+Responses, embeddings, image generation, model discovery, and temporary file
+uploads. Outbound calls use Vercel AI Gateway; Sophy owns client keys, policy,
+usage accounting, evaluations, and the admin console.
 
-> Design rationale, alternatives considered, and the adversarial review are in
-> the plan: `~/.claude/plans/we-are-implementing-ai-snug-mitten.md`.
+> Migrating an application? Give its developers
+> [AI API Migration.md](AI%20API%20Migration.md).
 
-> **Migrating a client app?** Hand developers **[AI API Migration.md](AI%20API%20Migration.md)** — a
-> copy-paste guide for switching from the OpenAI or Anthropic (Claude) SDKs to Sophy.
+## How requests work
 
-## How it works
-
-```
-client (OpenAI SDK, baseURL=<mw>/v1, api_key=mw_live_…)
-  -> auth the key  (the key carries: model, system prompt, params, schema, quota)
-  -> rate limit -> quota pre-check
-  -> inject the key's system prompt (drop client system) -> reject tools
-  -> AI Gateway -> provider
-  -> map to OpenAI response ; record usage
+```text
+client (OpenAI SDK, baseURL=<sophy>/v1, apiKey=mw_live_...)
+  -> authenticate the Sophy key
+  -> enforce the key's rate limit and monthly budget
+  -> apply the key's model, prompt, parameters, schema, and knowledgebase
+  -> pass supported input/tools through Vercel AI Gateway
+  -> return an OpenAI-shaped response and record usage
 ```
 
-- **The key is the whole config.** The `model` field a client sends is **ignored** —
-  the key's configured model always wins. Edit a key's model/prompt in the UI and
-  it applies on the next request (config is read straight off the key, no cache).
-- **Stores:** Postgres (Supabase) is the source of truth and also runs the
-  hot-path counters (rate limit via an atomic counter table; quota as a sum over
-  `usage_events`; cron lock via a `locks` row). Vercel Blob holds uploaded files.
-  (No Redis, no routes/prompts tables — the whole stack is Supabase + Vercel.)
+- **The key is the configuration.** A client-sent `model` is ignored on every
+  surface. On Chat/Responses, the key's temperature, top-p, maximum output
+  tokens, and prompt also win. By default, client `system`/`developer` messages
+  and Responses `instructions` are ignored.
+- **Agent mode is explicit.** An operator can enable it for a trusted server-side
+  application. Sophy then appends leading client system/developer instructions
+  after the key-owned prompt. Do not enable it for clients that forward
+  end-user-authored system messages.
+- **Tools are passthrough.** Function tools work on Chat Completions and
+  Responses. Sophy returns model tool calls but never executes them; the client
+  runs each tool and sends its result in the next request.
+- **One key selects one model.** Bind separate keys to language, image, or
+  embedding models as needed. `GET /v1/models` returns the one model configured
+  for the presented key.
+- **Configuration is live.** Edits and revocation are read from Postgres on each
+  request, so they apply immediately without a config cache.
+
+## Supported API surface
+
+| Endpoint | Current behavior |
+|---|---|
+| `POST /v1/chat/completions` | Buffered or streaming text, multimodal input, function tools, tool-result turns, and key-configured structured output. Legacy top-level `functions` is not supported; use `tools`. |
+| `POST /v1/responses` | Buffered or streaming text, multimodal input, function tools, tool-result turns, and key-configured structured output. It is stateless: `previous_response_id` is rejected, so send the full input each time. |
+| `POST /v1/embeddings` | A string or up to 2,048 strings; `float` and `base64` encodings. Token-array inputs are not supported. `dimensions` is supported only for `openai/*` embedding models. |
+| `POST /v1/images/generations` | Uses the key's image model and returns `b64_json` only. Supports 1-10 images and validates `WIDTHxHEIGHT` size strings; provider-specific options still depend on the selected model. Generated images are not stored by Sophy. |
+| `POST /v1/files` | Multipart `file` upload, at most 4 MiB (4,194,304 bytes). Allowed types: PDF, PNG, JPEG, WebP, GIF, plain text, CSV, and JSON. Uploads become eligible for cleanup after 24 hours. |
+| `GET /v1/models` | Returns the model configured on the authenticated key, not the full operator catalog. |
+
+Tool calling and key-configured structured output cannot be used in the same
+request because they compete for the model's output channel. Non-streaming
+structured output fails closed when validation fails. Streaming output is
+validated after completion, but already-streamed bytes cannot be retracted.
+
+Validation and buffered failures return OpenAI-shaped errors. Common statuses
+are `400` for an invalid or unsupported request, `401` for a
+missing/invalid/revoked key, `402` for an exhausted monthly budget or upstream
+credit, `403` for a cross-key file reference, `413` for an oversized upload,
+`429` for a rate limit, and `502` for an upstream or structured-output failure.
+A `Retry-After` header is included when available for rate limits. An upstream
+failure after SSE streaming begins ends the stream; it cannot be replaced with a
+JSON error response.
+
+## Operate Sophy
+
+The passwordless admin console is at `/admin`. The first administrator is
+bootstrapped from `BOOTSTRAP_ADMIN_EMAIL`; admins can invite more users by
+email. Admins see the whole organization, while editors see and manage only
+their owned keys and related usage, logs, and evaluations.
+
+- **Overview** — trailing-30-day requests, tokens, estimated cost, Sophy spend,
+  and errors.
+- **API Keys** — create, edit, rotate, revoke, search, and bulk-change keys.
+  Configure model, prompt, generation parameters, agent mode, JSON schema,
+  knowledgebase, monthly USD budget, RPM limit, ownership, and optional content
+  logging. Secrets are shown once; rotation preserves configuration and history.
+- **Models** — search and sort the gateway catalog by provider, type, context
+  window, price, and capabilities such as image input, file input, tool use, and
+  reasoning. The key picker can filter by the same capabilities.
+- **Usage** — 7/30/90-day request, token, and estimated-cost analytics with
+  key/model filters, absolute/share charts, and breakdowns by key, model, and
+  source. Gateway cost is a real-time estimate, not a billing-grade invoice.
+- **Logs** — recent proxy and evaluation calls with model, tokens, cost, kind,
+  streaming status, and errors. Per-key content logging captures buffered Chat,
+  buffered/streaming Responses, and embedding inputs for 30 days; streaming Chat
+  and image generation record usage metadata only. Usage metadata remains after
+  content expires.
+- **Evals** — run champion-vs-challenger evaluations on live text traffic. A
+  blind judge reports win rate, confidence interval, cost, latency, projected
+  monthly impact, and a recommendation. Results update in the console and can be
+  emailed; Sophy does not switch the model automatically. Evals skip requests
+  containing media/file content or supplying tools. While a run is active, its
+  text samples are captured independently of the key's content-logging setting
+  and raw prompts/outputs are purged when the run completes or is cancelled.
+- **Knowledgebases** — upload text, Markdown, CSV, JSON, PDF, or DOCX documents.
+  The cron extracts, chunks, and embeds them; attached keys retrieve relevant
+  passages for Chat Completions and Responses requests.
+- **Users / Settings** — manage admin/editor roles and choose the evaluation judge
+  model and summary-email recipient.
 
 ## Stack
 
-Next.js 16 (App Router) · AI SDK v6 · Vercel AI Gateway · Supabase Postgres (Drizzle)
-· Vercel Blob · shadcn/ui · iron-session.
+Next.js 16 (App Router), AI SDK v6, Vercel AI Gateway, Supabase Postgres
+(Drizzle), Vercel Blob, shadcn/ui, and iron-session.
 
-## Provision (Vercel)
+## Provision on Vercel
 
-1. **Link the project** and add Marketplace integrations:
+1. Link the project and add Supabase:
+
    ```bash
    vercel link
-   vercel integration add supabase   # Postgres -> POSTGRES_URL / POSTGRES_URL_NON_POOLING
+   vercel integration add supabase
    ```
-   The Supabase integration auto-sets `POSTGRES_URL` (pooled) and
-   `POSTGRES_URL_NON_POOLING` (direct); a manual setup uses `DATABASE_URL` /
-   `DATABASE_URL_UNPOOLED` (Supabase → Project Settings → Database → Connection
-   string: transaction pooler `:6543` for the app, direct `:5432` for migrations).
-   Enable **Vercel Blob** (-> `BLOB_READ_WRITE_TOKEN`) and **AI Gateway** in the
-   dashboard. In AI Gateway, add your org's **OpenAI/Anthropic keys as BYOK**.
-2. **Set secrets** (generate with `openssl rand -hex 32`):
-   `KEY_HASH_PEPPER`, `SESSION_PASSWORD`, `CRON_SECRET`, and the admin login:
+
+   The integration supplies pooled and direct Postgres URLs. For manual setup,
+   use `DATABASE_URL` for the app and `DATABASE_URL_UNPOOLED` for migrations.
+   Enable Vercel Blob and AI Gateway, then configure the required provider
+   credentials in AI Gateway.
+
+2. Configure the environment variables documented in `.env.example`:
+
+   - `KEY_HASH_PEPPER`, `SESSION_PASSWORD`, and `CRON_SECRET`
+   - `BOOTSTRAP_ADMIN_EMAIL` and the canonical production `APP_ORIGIN`
+   - `BLOB_READ_WRITE_TOKEN`
+   - `AI_GATEWAY_API_KEY` for local calls and cron-driven evaluation/KB work
+   - ZeptoMail variables for production sign-in links and optional evaluation
+     summaries
+
+   Generate random secrets with `openssl rand -hex 32`.
+
+3. Apply database migrations:
+
    ```bash
-   # admin password hash:
-   node -e "console.log(require('bcryptjs').hashSync(process.argv[1],12))" 'your-admin-password'
-   # -> ADMIN_PASSWORD_HASH ; also set ADMIN_USERNAME (default "admin")
-   ```
-   See `.env.example` for the full list. Locally, copy it to `.env.local`.
-3. **Migrate the database:**
-   ```bash
-   pnpm db:migrate     # applies drizzle/ migrations (uses DATABASE_URL_UNPOOLED)
+   pnpm db:migrate
    ```
 
 ## Develop
 
 ```bash
 pnpm install
-pnpm dev               # http://localhost:3000  (-> /admin)
-pnpm typecheck         # tsc --noEmit
-pnpm test              # vitest unit tests
-pnpm build             # production build
+pnpm dev        # http://localhost:3000
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
-Cron is configured in `vercel.ts` (`/api/cron/rollup`, every 15 min) — idempotent
-usage rollups + stale-blob sweep, guarded by `CRON_SECRET` + a Redis lock.
+The idempotent `/api/cron/rollup` job runs every 15 minutes. It rolls up usage,
+purges 30-day request content, sweeps 24-hour client uploads, processes model
+evaluations, and ingests knowledgebase documents. `CRON_SECRET` protects the
+route, and a Postgres lock prevents overlapping runs; Redis is not used.
 
-## Operate (admin console)
-
-`/admin` (sign in with the configured admin credentials):
-
-- **API Keys** — the one screen that matters. Create or edit a key with its
-  **model** (dropdown), **system prompt**, optional advanced fields (temperature,
-  max tokens, output JSON schema), and quota (monthly token cap + RPM). New keys
-  are shown once. Revoke is instant. Edits apply on the next request.
-- **Usage / Logs** — token & cost trends and recent requests.
-
-## Migrate a client system
-
-The entire client-side change:
+## Minimal client migration
 
 ```ts
-// BEFORE
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-await openai.chat.completions.create({
-  model: 'gpt-4o',
-  messages: [{ role: 'system', content: 'You are…' }, { role: 'user', content: q }],
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.SOPHY_API_KEY,
+  baseURL: "https://sophy.in/v1",
 });
 
-// AFTER
-const openai = new OpenAI({
-  apiKey: process.env.MIDDLEWARE_KEY,           // key issued by the middleware
-  baseURL: 'https://<your-mw-host>/v1',
-});
-await openai.chat.completions.create({
-  model: 'anything',                            // ignored — the key sets the model
-  messages: [{ role: 'user', content: q }],     // operator owns the system prompt
+const response = await client.chat.completions.create({
+  model: "sophy", // required by many SDKs, ignored by Sophy
+  messages: [{ role: "user", content: "Hello" }],
 });
 ```
 
-Notes: the `model` field is ignored (the key's model wins); client `system`
-messages are dropped (the key's system prompt is used); **tool/function calling
-is rejected with a 400**; large files use `POST /v1/files` (multipart, ≤4 MB) and
-the returned URL as a content part.
+See [AI API Migration.md](AI%20API%20Migration.md) for tools, agent mode,
+multimodal input, files, embeddings, image generation, limits, and error handling.
 
-### Responses API clients
+## Verify end to end
 
-Both surfaces are supported, so clients on the newer **Responses API** also migrate
-with just `base_url` + `api_key` — keep using `client.responses.create(...)`:
-
-```ts
-const openai = new OpenAI({ apiKey: process.env.MIDDLEWARE_KEY, baseURL: 'https://<your-mw-host>/v1' });
-const r = await openai.responses.create({ model: 'anything', input: 'Hello' }); // model/instructions ignored
-console.log(r.output_text);
-```
-
-`POST /v1/responses` supports text + structured output (buffered and streaming).
-Same key-owns-config rules apply; `previous_response_id` (stateful) and `tools`
-are rejected with a 400.
-
-## Verify end-to-end
-
-With a key created (model + system prompt):
-
-1. **Smoke** — point an OpenAI SDK at `/v1`, key = the issued `mw_*` key (the
-   `model` field can be anything); get a completion.
-2. **Model switch** — change the key's model in the UI; re-run; confirm the new
-   provider served it (Logs) with no client change/redeploy.
-3. **Prompt update** — edit the key's system prompt; confirm new behavior on the
-   next request.
-4. **Structured** — set a key's output JSON schema; confirm validated JSON; bad
-   output returns an OpenAI-shaped error, never a 200 with invalid JSON.
-5. **Streaming + abort** — stream, disconnect after the first frame; a
-   `usage_event` with non-zero tokens is still recorded (drain via
-   `consumeStream` + `onFinish`).
-6. **Limits** — exceed RPM -> 429; exceed monthly token cap -> 402.
-7. **Revocation** — revoke a key; next request -> 401 immediately.
-8. **Tools** — send `tools:[…]` -> OpenAI-shaped 400.
-9. **Files** — upload via `/v1/files`, reference the URL; another key can't.
-10. **Auth separation** — admin cookie rejected on `/v1/*`; `mw_*` key
-    rejected on `/api/admin/*`.
+1. Create a key and call the endpoint that matches its configured model type.
+2. Change its model or prompt and confirm the next request uses the new config.
+3. Test buffered and streaming Chat/Responses calls.
+4. Pass function tools, execute the returned calls client-side, and send results.
+5. If a schema is configured, verify a non-streaming reply is valid JSON.
+6. Exercise embeddings or image generation with a matching key.
+7. Exceed RPM and monthly USD budget limits; expect `429` and `402`.
+8. Rotate or revoke a key; the old secret must fail immediately.
+9. Upload a file and confirm another key cannot reuse its public-but-unguessable
+   Sophy URL through the API.
+10. Confirm admin cookies cannot authenticate `/v1/*` and API keys cannot access
+    admin actions.
 
 ## Deploy
 
@@ -162,6 +195,6 @@ With a key created (model + system prompt):
 vercel deploy --prod
 ```
 
-Proxy routes run on the Node.js runtime with `maxDuration = 800`. In production,
-proxy→Gateway auth uses Vercel OIDC automatically; `AI_GATEWAY_API_KEY` is the
-local/fallback path.
+Proxy routes use the Node.js runtime. In production, request handlers use Vercel
+OIDC for gateway authentication; `AI_GATEWAY_API_KEY` remains the local and cron
+credential.

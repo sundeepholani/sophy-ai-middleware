@@ -9,7 +9,8 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Sophy",
-  description: "Sophy — central AI gateway proxy: own API keys, UI-driven routing, prompts, quota.",
+  description:
+    "Sophy — a governed AI gateway for language, image, and embedding models, with centralized policy, knowledge, usage, and evaluations.",
 };
 
 // Render every page/route next to the database (Supabase ap-south-1 / Mumbai),
