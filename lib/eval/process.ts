@@ -50,7 +50,6 @@ async function replayChallenger(
     topP: params.topP,
     maxOutputTokens: params.maxOutputTokens,
     abortSignal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
-    providerOptions: { gateway: { tags: ['eval:challenger'] } } as never,
   };
   if (structured && outputSchema) {
     // Tolerant structured generation: an output that wraps/pads its JSON (common

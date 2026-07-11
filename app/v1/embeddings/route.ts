@@ -60,7 +60,7 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   // 4) Validate + normalize the request (input required; format/dimensions checks).
-  const parsed = parseEmbeddingsRequest(body, key.model, key.id);
+  const parsed = parseEmbeddingsRequest(body, key.model);
   if (!parsed.ok) {
     return openAiError(parsed.status, 'invalid_request_error', parsed.message, {
       code: parsed.code,
