@@ -6,8 +6,9 @@
  * system prompt, the user request, and two outputs labelled "Response A/B" in a
  * randomized order. We map A/B back to champion/challenger after the verdict.
  */
-import type { ModelMessage } from 'ai';
+import type { LanguageModelUsage, ModelMessage } from 'ai';
 import { generateStructured, StructuredAttemptError } from '@/lib/gateway/structured';
+import { normalizeUsage, type NormalizedUsage } from '@/lib/usage/record';
 import { evalModel } from '@/lib/eval/model';
 import type { EvalWinner } from '@/db/schema';
 
@@ -22,13 +23,15 @@ const MAX_CONVERSATION_CHARS = 60_000;
 const MAX_RESPONSE_CHARS = 40_000;
 
 /**
- * A judge failure that still carries the gateway cost of the billed attempt(s),
- * so the caller can persist the spend even though no verdict was produced.
+ * A judge failure that still carries the gateway cost (and tokens, when known)
+ * of the billed attempt(s), so the caller can persist the spend even though no
+ * verdict was produced.
  */
 export class JudgeError extends Error {
   constructor(
     message: string,
     readonly costUsd: number | null,
+    readonly usage?: LanguageModelUsage,
   ) {
     super(message);
     this.name = 'JudgeError';
@@ -40,6 +43,8 @@ export interface JudgeVerdict {
   confidence: number; // 0..1
   reason: string;
   costUsd: number | null;
+  /** Tokens across every billed judge attempt — for the usage_events row. */
+  usage: NormalizedUsage;
   orderSwapped: boolean; // true ⇒ challenger was shown as "Response A"
 }
 
@@ -161,15 +166,17 @@ export async function judge(args: {
         model: evalModel(args.judgeModel),
         system: JUDGE_SYSTEM,
         prompt,
-        abortSignal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
       },
       JUDGE_SCHEMA,
+      // Fresh 60s budget PER attempt: a shared signal would leave the tolerant
+      // retry seconds from abort after a slow strict attempt — a paid failure.
+      { attemptTimeoutMs: JUDGE_TIMEOUT_MS },
     );
   } catch (e) {
     // The retry failed after a completed (billed) strict attempt — surface the
     // known judge spend to the caller instead of losing it with the sample.
     if (e instanceof StructuredAttemptError) {
-      throw new JudgeError(`judge call failed after a billed attempt: ${e.message}`, e.costUsd);
+      throw new JudgeError(`judge call failed after a billed attempt: ${e.message}`, e.costUsd, e.usage);
     }
     throw e;
   }
@@ -179,11 +186,16 @@ export async function judge(args: {
     throw new JudgeError(
       `judge did not return a valid verdict: ${result.errors ?? 'unparseable output'}`,
       result.costUsd,
+      result.usage,
     );
   }
   const out = result.value as { winner?: unknown; confidence?: unknown; reason?: unknown };
   if (out.winner !== 'A' && out.winner !== 'B' && out.winner !== 'tie') {
-    throw new JudgeError(`judge returned an invalid winner: ${JSON.stringify(out.winner)}`, result.costUsd);
+    throw new JudgeError(
+      `judge returned an invalid winner: ${JSON.stringify(out.winner)}`,
+      result.costUsd,
+      result.usage,
+    );
   }
   let winner: EvalWinner;
   if (out.winner === 'tie') winner = 'tie';
@@ -197,6 +209,7 @@ export async function judge(args: {
     reason: typeof out.reason === 'string' ? out.reason.slice(0, 2000) : '',
     // Aggregated across attempts — the tolerant retry path bills two calls.
     costUsd: result.costUsd,
+    usage: normalizeUsage(result.usage),
     orderSwapped: swapped,
   };
 }

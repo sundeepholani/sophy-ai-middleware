@@ -64,6 +64,13 @@
       "when": 1783708673696,
       "tag": "0008_spooky_namora",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1783763485868,
+      "tag": "0009_melted_nightshade",
+      "breakpoints": true
     }
   ]
 }

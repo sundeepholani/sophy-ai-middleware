@@ -72,13 +72,15 @@ export function LogsTable({ logs }: { logs: LogListRow[] }) {
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                   <LocalTime value={l.createdAt.toISOString()} />
                 </TableCell>
-                <TableCell className="font-medium">{l.keyName ?? l.apiKeyId.slice(0, 8)}</TableCell>
+                <TableCell className="font-medium">
+                  {l.keyName ?? (l.apiKeyId ? l.apiKeyId.slice(0, 8) : '—')}
+                </TableCell>
                 <TableCell className="font-mono text-xs">
                   <span className="inline-flex items-center gap-1.5">
                     {l.model ?? '—'}
-                    {l.source === 'challenger' && (
+                    {l.source !== 'proxy' && (
                       <Badge variant="secondary" className="font-sans">
-                        challenger
+                        {l.source}
                       </Badge>
                     )}
                   </span>

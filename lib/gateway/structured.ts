@@ -228,11 +228,21 @@ function withJsonInstruction(system: string | undefined, schema: Record<string, 
  *
  * Other upstream errors (timeouts/transient/auth failures) re-throw so callers
  * handle them exactly as before.
+ *
+ * `opts.attemptTimeoutMs` gives EACH attempt its own fresh abort budget. Without
+ * it, a caller-supplied `args.abortSignal` is shared across attempts — a slow
+ * strict attempt leaves the retry seconds from abort, guaranteeing a paid
+ * failure. Callers that time-bound the call should prefer this option.
  */
 export async function generateStructured(
   args: GenerateTextArgs,
   schema: Record<string, unknown>,
+  opts?: { attemptTimeoutMs?: number },
 ): Promise<StructuredResult> {
+  const withAttemptSignal = (a: GenerateTextArgs): GenerateTextArgs =>
+    opts?.attemptTimeoutMs != null
+      ? { ...a, abortSignal: AbortSignal.timeout(opts.attemptTimeoutMs) }
+      : a;
   let strictText = '';
   let usage: StructuredResult['usage'];
   let providerMetadata: StructuredResult['providerMetadata'];
@@ -242,10 +252,12 @@ export async function generateStructured(
 
   // ---- 1) strict structured mode -------------------------------------------
   try {
-    const r = await generateText({
-      ...args,
-      experimental_output: Output.object({ schema: jsonSchema(schema) }),
-    });
+    const r = await generateText(
+      withAttemptSignal({
+        ...args,
+        experimental_output: Output.object({ schema: jsonSchema(schema) }),
+      }),
+    );
     const obj = r.experimental_output as unknown;
     const strict = validateAgainstSchema(obj, schema);
     const strictCost = extractGatewayCost(r.providerMetadata);
@@ -285,7 +297,9 @@ export async function generateStructured(
   const baseSystem = typeof args.system === 'string' ? args.system : undefined;
   let r2: Awaited<ReturnType<typeof generateText>>;
   try {
-    r2 = await generateText({ ...args, system: withJsonInstruction(baseSystem, schema) });
+    r2 = await generateText(
+      withAttemptSignal({ ...args, system: withJsonInstruction(baseSystem, schema) }),
+    );
   } catch (e) {
     if (costUsd != null || usage) {
       throw new StructuredAttemptError(e instanceof Error ? e.message : String(e), costUsd, usage, e);

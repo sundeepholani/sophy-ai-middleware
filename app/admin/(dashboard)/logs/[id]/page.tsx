@@ -50,11 +50,17 @@ export default async function LogDetailPage({
           ← Logs
         </Link>
         <h1 className="mt-1 text-2xl font-semibold">
-          {event.source === 'challenger' ? 'Eval challenger call' : 'Request detail'}
+          {event.source === 'challenger'
+            ? 'Eval challenger call'
+            : event.source === 'judge'
+              ? 'Eval judge call'
+              : event.source === 'kb'
+                ? 'Knowledgebase embedding call'
+                : 'Request detail'}
         </h1>
         <p className="text-sm text-muted-foreground">
           <LocalTime value={event.createdAt.toISOString()} /> · key{' '}
-          {event.keyName ?? event.apiKeyId.slice(0, 8)} ·{' '}
+          {event.keyName ?? (event.apiKeyId ? event.apiKeyId.slice(0, 8) : '— (cron)')} ·{' '}
           <span className="font-mono">{event.model}</span>
         </p>
       </div>
@@ -81,7 +87,7 @@ export default async function LogDetailPage({
 
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <Badge variant={event.status === 'ok' ? 'default' : 'destructive'}>{event.status}</Badge>
-        {event.source === 'challenger' && <Badge variant="secondary">challenger</Badge>}
+        {event.source !== 'proxy' && <Badge variant="secondary">{event.source}</Badge>}
         {content?.surface && <Badge variant="outline">{content.surface}</Badge>}
         {event.streamed && <Badge variant="outline">stream</Badge>}
         {meta && <span className="text-muted-foreground">{meta}</span>}
