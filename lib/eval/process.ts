@@ -18,6 +18,7 @@ import { extractGatewayCost, normalizeUsage } from '@/lib/usage/record';
 import { judge, type JudgeVerdict } from '@/lib/eval/judge';
 import { evalModel } from '@/lib/eval/model';
 import { summarize, type JudgedSample } from '@/lib/eval/aggregate';
+import { recordedEvalSpendUsd } from '@/lib/eval/spend';
 import { getSettings } from '@/lib/admin/settings';
 import { formatEvalEmail, sendEvalEmail } from '@/lib/eval/email';
 
@@ -243,6 +244,11 @@ async function finalizeRuns(): Promise<number> {
       challengerModel: run.challengerModel,
     });
 
+    // Freeze the run's own spend (challenger + judge) alongside the summary.
+    // The sample rows survive completion, but freezing here keeps the number
+    // consistent with cancelled runs, whose samples are purged.
+    const evalCostUsd = await recordedEvalSpendUsd(db, run.id);
+
     // Claim the run (flip running → completed, guarded) BEFORE any side effect,
     // so an overlapping cron can't also send the email. Only the winner proceeds.
     const done = await db
@@ -250,6 +256,7 @@ async function finalizeRuns(): Promise<number> {
       .set({
         status: 'completed',
         summary: summary as unknown as Record<string, unknown>,
+        evalCostUsd,
         completedAt: new Date(),
       })
       .where(and(eq(evalRuns.id, run.id), eq(evalRuns.status, 'running')))

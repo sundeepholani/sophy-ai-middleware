@@ -57,6 +57,13 @@
       "when": 1782711376725,
       "tag": "0007_good_alex_wilder",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1783708673696,
+      "tag": "0008_spooky_namora",
+      "breakpoints": true
     }
   ]
 }

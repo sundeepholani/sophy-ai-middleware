@@ -11,6 +11,7 @@ import {
   Users,
   Library,
   Boxes,
+  FlaskConical,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { SessionRole } from '@/lib/auth/session-config';
@@ -20,6 +21,7 @@ const ITEMS = [
   { href: '/admin/keys', label: 'API Keys', icon: KeyRound },
   { href: '/admin/models', label: 'Models', icon: Boxes },
   { href: '/admin/usage', label: 'Usage', icon: BarChart3 },
+  { href: '/admin/evals', label: 'Evals', icon: FlaskConical },
   { href: '/admin/logs', label: 'Logs', icon: ScrollText },
   { href: '/admin/knowledgebases', label: 'Knowledgebases', icon: Library, adminOnly: true },
   { href: '/admin/users', label: 'Users', icon: Users, adminOnly: true },

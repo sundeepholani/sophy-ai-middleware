@@ -19,6 +19,7 @@ import {
   kbDocuments,
   type KeyParams,
   type EvalRunStatus,
+  type EvalSampleStatus,
   type EvalWinner,
   type UserRole,
   type UserStatus,
@@ -26,7 +27,8 @@ import {
   type UsageStatus,
   type ResponseKind,
 } from '@/db/schema';
-import type { EvalSummary } from '@/lib/eval/aggregate';
+import type { EvalRecommendation, EvalSummary } from '@/lib/eval/aggregate';
+import { evalSpendExpr } from '@/lib/eval/spend';
 import { scopeToOwner, type Viewer } from '@/lib/auth/viewer';
 
 export async function getOverview(viewer: Viewer) {
@@ -679,6 +681,252 @@ export async function getKeyEvals(viewer: Viewer, onlyKeyId?: string): Promise<R
     };
   }
   return out;
+}
+
+/** One row per eval run — every run ever, newest first (the evals page). */
+export interface EvalRunListRow {
+  id: string;
+  apiKeyId: string;
+  /** null ⇒ the key was deleted after the run (no FK — orphan rows are kept). */
+  keyName: string | null;
+  championModel: string;
+  challengerModel: string;
+  judgeModel: string;
+  targetN: number;
+  capturedN: number;
+  judgedN: number;
+  failedN: number;
+  status: EvalRunStatus;
+  /** From the frozen summary — completed runs only. */
+  recommendation: EvalRecommendation | null;
+  headline: string | null;
+  challengerWinRate: number | null;
+  /** Challenger + judge spend: frozen at run end, live aggregate while running
+   *  (and for runs that ended before the frozen column existed). */
+  evalCostUsd: number | null;
+  createdAt: Date;
+  /** End of the run — set on completion AND on cancel. */
+  completedAt: Date | null;
+}
+
+/**
+ * Every eval run, current and historical, with per-run sample tallies and eval
+ * spend. Unlike getKeyEvals (latest run per key, for the keys-page modal) this
+ * returns ALL runs. Unbounded like listKeys — runs are operator-initiated, so
+ * the table grows with admin activity, not traffic.
+ */
+export async function listEvalRuns(viewer: Viewer): Promise<EvalRunListRow[]> {
+  const db = getDb();
+  const runs = await db
+    .select({
+      id: evalRuns.id,
+      apiKeyId: evalRuns.apiKeyId,
+      keyName: apiKeys.name,
+      championModel: evalRuns.championModel,
+      challengerModel: evalRuns.challengerModel,
+      judgeModel: evalRuns.judgeModel,
+      targetN: evalRuns.targetN,
+      capturedN: evalRuns.capturedN,
+      status: evalRuns.status,
+      summary: evalRuns.summary,
+      evalCostUsd: evalRuns.evalCostUsd,
+      createdAt: evalRuns.createdAt,
+      completedAt: evalRuns.completedAt,
+    })
+    .from(evalRuns)
+    .leftJoin(apiKeys, eq(evalRuns.apiKeyId, apiKeys.id))
+    .where(scopeToOwner(viewer, evalRuns.apiKeyId))
+    .orderBy(desc(evalRuns.createdAt));
+
+  const ids = runs.map((r) => r.id);
+  const tallies = ids.length
+    ? await db
+        .select({
+          runId: evalSamples.runId,
+          judged: sql<string>`count(*) filter (where ${evalSamples.status} = 'judged')`,
+          failed: sql<string>`count(*) filter (where ${evalSamples.status} = 'failed')`,
+          spend: evalSpendExpr(),
+        })
+        .from(evalSamples)
+        .where(inArray(evalSamples.runId, ids))
+        .groupBy(evalSamples.runId)
+    : [];
+  const tallyByRun = new Map(tallies.map((t) => [t.runId, t]));
+
+  return runs.map((r) => {
+    const t = tallyByRun.get(r.id);
+    const summary = (r.summary as EvalSummary | null) ?? null;
+    return {
+      id: r.id,
+      apiKeyId: r.apiKeyId,
+      keyName: r.keyName,
+      championModel: r.championModel,
+      challengerModel: r.challengerModel,
+      judgeModel: r.judgeModel,
+      targetN: r.targetN,
+      capturedN: r.capturedN,
+      judgedN: t ? Number(t.judged) : 0,
+      failedN: t ? Number(t.failed) : 0,
+      status: r.status,
+      recommendation: summary?.recommendation ?? null,
+      headline: summary?.headline ?? null,
+      challengerWinRate: summary?.challengerWinRate ?? null,
+      // Frozen-at-end value first; live aggregate for running runs and for
+      // runs that ended before eval_cost_usd existed (cancelled ones: null).
+      evalCostUsd:
+        r.evalCostUsd != null
+          ? Number(r.evalCostUsd)
+          : t?.spend != null
+            ? Number(t.spend)
+            : null,
+      createdAt: r.createdAt,
+      completedAt: r.completedAt,
+    };
+  });
+}
+
+/** A sample row on the run-detail page. Content columns are purged at run end,
+ *  so only verdict/cost/latency/token metadata is carried. */
+export interface EvalSampleListRow {
+  id: string;
+  status: EvalSampleStatus;
+  winner: EvalWinner | null;
+  confidence: number | null;
+  judgeReason: string | null;
+  orderSwapped: boolean;
+  championCostUsd: number | null;
+  championLatencyMs: number | null;
+  challengerCostUsd: number | null;
+  challengerLatencyMs: number | null;
+  judgeCostUsd: number | null;
+  errorMessage: string | null;
+  /** Refreshed when a conversation continues — NOT first-capture time. */
+  createdAt: Date;
+  judgedAt: Date | null;
+}
+
+export interface EvalRunDetail {
+  id: string;
+  apiKeyId: string;
+  keyName: string | null;
+  championModel: string;
+  challengerModel: string;
+  judgeModel: string;
+  targetN: number;
+  capturedN: number;
+  status: EvalRunStatus;
+  summary: EvalSummary | null;
+  createdAt: Date;
+  completedAt: Date | null;
+  emailedAt: Date | null;
+  /** All of the run's samples, newest activity first (≤ targetN ≤ 1000 rows).
+   *  Cancelled runs have none — their samples are hard-deleted. */
+  samples: EvalSampleListRow[];
+  judgedN: number;
+  failedN: number;
+  pendingN: number;
+  /** Challenger + judge spend for this run. */
+  evalCostUsd: number | null;
+  /** Judged-only denominators, matching getKeyEvals (champion cost exists at
+   *  capture, challenger cost only at judge time — averaging over all samples
+   *  would compare different populations). */
+  avgChampionCostUsd: number | null;
+  avgChallengerCostUsd: number | null;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** One eval run with its full sample history — the /admin/evals/[id] page. */
+export async function getEvalRunDetail(viewer: Viewer, id: string): Promise<EvalRunDetail | null> {
+  // A crafted non-UUID path param would otherwise throw a Postgres uuid-cast
+  // error (22P02) and render the error boundary; treat it as not-found instead.
+  if (!UUID_RE.test(id)) return null;
+  const db = getDb();
+  // Owner scope ANDs with the id, so an editor requesting another user's run id
+  // gets no row (→ the page 404s) rather than someone else's eval.
+  const [run] = await db
+    .select({
+      id: evalRuns.id,
+      apiKeyId: evalRuns.apiKeyId,
+      keyName: apiKeys.name,
+      championModel: evalRuns.championModel,
+      challengerModel: evalRuns.challengerModel,
+      judgeModel: evalRuns.judgeModel,
+      targetN: evalRuns.targetN,
+      capturedN: evalRuns.capturedN,
+      status: evalRuns.status,
+      summary: evalRuns.summary,
+      evalCostUsd: evalRuns.evalCostUsd,
+      createdAt: evalRuns.createdAt,
+      completedAt: evalRuns.completedAt,
+      emailedAt: evalRuns.emailedAt,
+    })
+    .from(evalRuns)
+    .leftJoin(apiKeys, eq(evalRuns.apiKeyId, apiKeys.id))
+    .where(and(eq(evalRuns.id, id), scopeToOwner(viewer, evalRuns.apiKeyId)))
+    .limit(1);
+  if (!run) return null;
+
+  const sampleRows = await db
+    .select({
+      id: evalSamples.id,
+      status: evalSamples.status,
+      winner: evalSamples.winner,
+      confidence: evalSamples.confidence,
+      judgeReason: evalSamples.judgeReason,
+      orderSwapped: evalSamples.orderSwapped,
+      championCostUsd: evalSamples.championCostUsd,
+      championLatencyMs: evalSamples.championLatencyMs,
+      challengerCostUsd: evalSamples.challengerCostUsd,
+      challengerLatencyMs: evalSamples.challengerLatencyMs,
+      judgeCostUsd: evalSamples.judgeCostUsd,
+      errorMessage: evalSamples.errorMessage,
+      createdAt: evalSamples.createdAt,
+      judgedAt: evalSamples.judgedAt,
+    })
+    .from(evalSamples)
+    .where(eq(evalSamples.runId, id))
+    .orderBy(desc(CHALLENGER_TS));
+
+  const samples: EvalSampleListRow[] = sampleRows.map((s) => ({
+    ...s,
+    confidence: s.confidence != null ? Number(s.confidence) : null,
+    championCostUsd: s.championCostUsd != null ? Number(s.championCostUsd) : null,
+    challengerCostUsd: s.challengerCostUsd != null ? Number(s.challengerCostUsd) : null,
+    judgeCostUsd: s.judgeCostUsd != null ? Number(s.judgeCostUsd) : null,
+  }));
+
+  const judged = samples.filter((s) => s.status === 'judged');
+  const avg = (values: (number | null)[]): number | null => {
+    const nums = values.filter((v): v is number => v != null);
+    return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
+  };
+  // Frozen-at-end spend first; live sum for running runs and pre-column ends.
+  const liveSpend = samples.length
+    ? samples.reduce((sum, s) => sum + (s.challengerCostUsd ?? 0) + (s.judgeCostUsd ?? 0), 0)
+    : null;
+  return {
+    id: run.id,
+    apiKeyId: run.apiKeyId,
+    keyName: run.keyName,
+    championModel: run.championModel,
+    challengerModel: run.challengerModel,
+    judgeModel: run.judgeModel,
+    targetN: run.targetN,
+    capturedN: run.capturedN,
+    status: run.status,
+    summary: (run.summary as EvalSummary | null) ?? null,
+    createdAt: run.createdAt,
+    completedAt: run.completedAt,
+    emailedAt: run.emailedAt,
+    samples,
+    judgedN: judged.length,
+    failedN: samples.filter((s) => s.status === 'failed').length,
+    pendingN: samples.filter((s) => s.status === 'pending').length,
+    evalCostUsd: run.evalCostUsd != null ? Number(run.evalCostUsd) : liveSpend,
+    avgChampionCostUsd: avg(judged.map((s) => s.championCostUsd)),
+    avgChallengerCostUsd: avg(judged.map((s) => s.challengerCostUsd)),
+  };
 }
 
 // ---- Knowledgebases ----------------------------------------------------------

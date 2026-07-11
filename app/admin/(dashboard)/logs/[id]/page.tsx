@@ -70,8 +70,11 @@ export default async function LogDetailPage({
             </>
           )}
           . Its cost is tracked by the eval, not billed to the key.{' '}
-          <Link href="/admin/keys" className="text-primary hover:underline">
-            View evals
+          <Link
+            href={event.evalRunId ? `/admin/evals/${event.evalRunId}` : '/admin/evals'}
+            className="text-primary hover:underline"
+          >
+            View eval run
           </Link>
         </div>
       )}
