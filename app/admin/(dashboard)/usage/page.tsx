@@ -50,8 +50,10 @@ export default async function UsagePage({
       <div>
         <h1 className="text-2xl font-semibold">Usage</h1>
         <p className="text-sm text-muted-foreground">
-          Token volume and cost, broken down by key and model. Cost is our real-time estimate from
-          the AI Gateway; reconcile against the Gateway report for billing-grade numbers.
+          Token volume and cost, broken down by key and model. Cost includes eval challenger and
+          judge spend — charged to the key, and by model to the challenger and judge models. It is
+          our real-time estimate from the AI Gateway; reconcile against the Gateway report for
+          billing-grade numbers.
         </p>
       </div>
 

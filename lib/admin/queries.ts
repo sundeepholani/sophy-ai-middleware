@@ -29,6 +29,13 @@ import {
 } from '@/db/schema';
 import type { EvalRecommendation, EvalSummary } from '@/lib/eval/aggregate';
 import { evalSpendExpr } from '@/lib/eval/spend';
+import {
+  evalCostByKey,
+  evalCostByModel,
+  evalCostTotal,
+  evalStackRows,
+  type EvalCostCell,
+} from '@/lib/admin/usage-eval';
 import { scopeToOwner, type Viewer } from '@/lib/auth/viewer';
 
 export async function getOverview(viewer: Viewer) {
@@ -114,6 +121,53 @@ function usageWhere(viewer: Viewer, f: UsageFilters) {
 
 const tokensExpr = sql`${usageEvents.inputTokens} + ${usageEvents.outputTokens}`;
 
+/**
+ * Eval-only spend (challenger replay + judge call) for the usage page, bucketed
+ * per day × key × challenger-model × judge-model. Champion cost is NOT here —
+ * it's the live request, already in usage_events. Derived from JUDGED samples
+ * (cost columns survive the content purge); cancelled runs have no samples, so
+ * their spend isn't represented. Bucketed by judged_at (when the spend
+ * happened), owner-scoped, and honoring the range + key filter. The model
+ * filter is applied per-attribution in JS (challenger vs judge), so it isn't
+ * in the WHERE. Reducers in lib/admin/usage-eval.ts turn cells into totals.
+ */
+async function evalCostCells(viewer: Viewer, f: UsageFilters): Promise<EvalCostCell[]> {
+  const since = new Date(Date.now() - f.sinceDays * 24 * 60 * 60 * 1000);
+  const conds = [eq(evalSamples.status, 'judged'), gte(evalSamples.judgedAt, since)];
+  if (f.keyId) conds.push(eq(evalRuns.apiKeyId, f.keyId));
+  const dayTrunc = sql`date_trunc('day', ${evalSamples.judgedAt})`;
+  const rows = await getDb()
+    .select({
+      day: sql<string>`to_char(${dayTrunc}, 'YYYY-MM-DD')`,
+      apiKeyId: evalRuns.apiKeyId,
+      keyName: apiKeys.name,
+      challengerModel: evalRuns.challengerModel,
+      judgeModel: evalRuns.judgeModel,
+      challengerCost: sql<string>`coalesce(sum(${evalSamples.challengerCostUsd}),0)`,
+      judgeCost: sql<string>`coalesce(sum(${evalSamples.judgeCostUsd}),0)`,
+    })
+    .from(evalSamples)
+    .innerJoin(evalRuns, eq(evalSamples.runId, evalRuns.id))
+    .leftJoin(apiKeys, eq(evalRuns.apiKeyId, apiKeys.id))
+    .where(and(...conds, scopeToOwner(viewer, evalRuns.apiKeyId)))
+    .groupBy(
+      dayTrunc,
+      evalRuns.apiKeyId,
+      apiKeys.name,
+      evalRuns.challengerModel,
+      evalRuns.judgeModel,
+    );
+  return rows.map((r) => ({
+    day: r.day,
+    apiKeyId: r.apiKeyId,
+    keyName: r.keyName,
+    challengerModel: r.challengerModel,
+    judgeModel: r.judgeModel,
+    challengerCost: Number(r.challengerCost),
+    judgeCost: Number(r.judgeCost),
+  }));
+}
+
 export async function getUsageSeries(viewer: Viewer, f: UsageFilters) {
   const rows = await getDb()
     .select({
@@ -183,13 +237,17 @@ export async function getUsageStacked(
           .groupBy(dayTrunc, usageEvents.apiKeyId, apiKeys.name)
           .orderBy(dayTrunc);
 
-  return rows.map((r) => ({
+  const proxy = rows.map((r) => ({
     day: r.day,
     cat: r.cat ?? 'unknown',
     requests: Number(r.requests),
     tokens: Number(r.tokens),
     cost: Number(r.cost),
   }));
+  // Append eval spend as extra (day, cat) rows — the client re-aggregates per
+  // (day, cat), so same-bucket rows sum. Cost-only (requests/tokens 0).
+  const evalRows = evalStackRows(await evalCostCells(viewer, f), dim, f.model);
+  return [...proxy, ...evalRows];
 }
 
 export async function getUsageTotals(viewer: Viewer, f: UsageFilters) {
@@ -202,11 +260,13 @@ export async function getUsageTotals(viewer: Viewer, f: UsageFilters) {
     })
     .from(usageEvents)
     .where(usageWhere(viewer, f));
+  // Fold challenger + judge spend into cost only; requests/tokens stay proxy.
+  const evalCost = evalCostTotal(await evalCostCells(viewer, f), f.model);
   return {
     requests: Number(agg?.requests ?? 0),
     inputTokens: Number(agg?.inputTokens ?? 0),
     outputTokens: Number(agg?.outputTokens ?? 0),
-    cost: Number(agg?.cost ?? 0),
+    cost: Number(agg?.cost ?? 0) + evalCost,
   };
 }
 
@@ -216,6 +276,12 @@ export interface UsageBreakdownRow {
   inputTokens: number;
   outputTokens: number;
   cost: number;
+}
+
+// A key/model that has ONLY eval spend in range (no proxy traffic) still needs
+// a breakdown row — zero requests/tokens, cost from the eval fold.
+function emptyBreakdown(label: string, cost: number): UsageBreakdownRow {
+  return { label, requests: 0, inputTokens: 0, outputTokens: 0, cost };
 }
 
 export async function getUsageByKey(viewer: Viewer, f: UsageFilters): Promise<UsageBreakdownRow[]> {
@@ -233,13 +299,35 @@ export async function getUsageByKey(viewer: Viewer, f: UsageFilters): Promise<Us
     .where(usageWhere(viewer, f))
     .groupBy(usageEvents.apiKeyId, apiKeys.name)
     .orderBy(desc(sql`sum(${tokensExpr})`));
-  return rows.map((r) => ({
-    label: r.keyName ?? `${r.keyId.slice(0, 8)}… (deleted)`,
-    requests: Number(r.requests),
-    inputTokens: Number(r.inputTokens),
-    outputTokens: Number(r.outputTokens),
-    cost: Number(r.cost),
-  }));
+
+  // Merge on api key id: eval spend lands on the same key, adding a row for any
+  // key with eval-only spend in range. Labelled like proxy (name, or a
+  // truncated id for a deleted key).
+  const byId = new Map<string, { keyName: string | null; row: UsageBreakdownRow }>();
+  for (const r of rows) {
+    byId.set(r.keyId, {
+      keyName: r.keyName,
+      row: {
+        label: r.keyName ?? `${r.keyId.slice(0, 8)}… (deleted)`,
+        requests: Number(r.requests),
+        inputTokens: Number(r.inputTokens),
+        outputTokens: Number(r.outputTokens),
+        cost: Number(r.cost),
+      },
+    });
+  }
+  for (const [keyId, ev] of evalCostByKey(await evalCostCells(viewer, f), f.model)) {
+    const existing = byId.get(keyId);
+    if (existing) existing.row.cost += ev.cost;
+    else byId.set(keyId, {
+      keyName: ev.keyName,
+      row: emptyBreakdown(ev.keyName ?? `${keyId.slice(0, 8)}… (deleted)`, ev.cost),
+    });
+  }
+  // Cost-first now that cost carries eval spend; tokens break ties.
+  return [...byId.values()]
+    .map((v) => v.row)
+    .sort((a, b) => b.cost - a.cost || b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens));
 }
 
 export async function getUsageByModel(viewer: Viewer, f: UsageFilters): Promise<UsageBreakdownRow[]> {
@@ -253,26 +341,57 @@ export async function getUsageByModel(viewer: Viewer, f: UsageFilters): Promise<
     })
     .from(usageEvents)
     .where(usageWhere(viewer, f))
-    .groupBy(usageEvents.model)
-    .orderBy(desc(sql`sum(${tokensExpr})`));
-  return rows.map((r) => ({
-    label: r.model ?? '—',
-    requests: Number(r.requests),
-    inputTokens: Number(r.inputTokens),
-    outputTokens: Number(r.outputTokens),
-    cost: Number(r.cost),
-  }));
+    .groupBy(usageEvents.model);
+
+  // Merge on model id: challenger cost on the challenger model, judge cost on
+  // the judge model. A judge/challenger model with no proxy traffic gets its
+  // own row.
+  const byModel = new Map<string, UsageBreakdownRow>();
+  for (const r of rows) {
+    const label = r.model ?? '—';
+    byModel.set(label, {
+      label,
+      requests: Number(r.requests),
+      inputTokens: Number(r.inputTokens),
+      outputTokens: Number(r.outputTokens),
+      cost: Number(r.cost),
+    });
+  }
+  for (const [model, cost] of evalCostByModel(await evalCostCells(viewer, f), f.model)) {
+    const existing = byModel.get(model);
+    if (existing) existing.cost += cost;
+    else byModel.set(model, emptyBreakdown(model, cost));
+  }
+  return [...byModel.values()].sort(
+    (a, b) => b.cost - a.cost || b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens),
+  );
 }
 
-/** Distinct models seen in the last 90 days (scoped) — drives the model filter dropdown. */
+/**
+ * Distinct models seen in the last 90 days (scoped) — drives the model filter
+ * dropdown. Includes eval challenger/judge models (they now carry cost on the
+ * usage page), so an operator can filter to a judge-only model even when it
+ * served no client traffic.
+ */
 export async function listUsedModels(viewer: Viewer): Promise<string[]> {
   const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-  const rows = await getDb()
-    .selectDistinct({ model: usageEvents.model })
-    .from(usageEvents)
-    .where(and(gte(usageEvents.createdAt, since), scopeToOwner(viewer, usageEvents.apiKeyId)))
-    .orderBy(usageEvents.model);
-  return rows.map((r) => r.model).filter((m): m is string => !!m);
+  const [proxyRows, evalRows] = await Promise.all([
+    getDb()
+      .selectDistinct({ model: usageEvents.model })
+      .from(usageEvents)
+      .where(and(gte(usageEvents.createdAt, since), scopeToOwner(viewer, usageEvents.apiKeyId))),
+    getDb()
+      .selectDistinct({ challenger: evalRuns.challengerModel, judge: evalRuns.judgeModel })
+      .from(evalRuns)
+      .where(and(gte(evalRuns.createdAt, since), scopeToOwner(viewer, evalRuns.apiKeyId))),
+  ]);
+  const models = new Set<string>();
+  for (const r of proxyRows) if (r.model) models.add(r.model);
+  for (const r of evalRows) {
+    models.add(r.challenger);
+    models.add(r.judge);
+  }
+  return [...models].sort();
 }
 
 export interface LogDetailEvent {
