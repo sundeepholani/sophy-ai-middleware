@@ -32,6 +32,14 @@ import {
 export type UsageStatus = 'ok' | 'validation_failed' | 'error';
 export type ResponseKind = 'text' | 'structured' | 'image' | 'embedding';
 export type KeyStatus = 'active' | 'revoked';
+/**
+ * What kind of gateway call a usage_event records. 'proxy' = a client request
+ * served through a key (the only kind that counts toward the key's quota and
+ * the client-facing usage charts). The rest are Sophy's own spend: eval
+ * challenger replays / judge verdicts (billed per call — re-judging a continued
+ * conversation adds rows rather than overwriting) and knowledgebase embeddings.
+ */
+export type UsageSource = 'proxy' | 'eval_challenger' | 'eval_judge' | 'kb_ingest' | 'kb_query';
 
 /** Operator-set generation parameters applied to every call on a key. */
 export interface KeyParams {
@@ -148,7 +156,10 @@ export const usageEvents = pgTable(
   'usage_events',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    apiKeyId: uuid('api_key_id').notNull(),
+    /** Null for spend not attributable to a key (kb_ingest runs from the cron). */
+    apiKeyId: uuid('api_key_id'),
+    /** See UsageSource — only 'proxy' rows are client traffic. */
+    source: text('source').$type<UsageSource>().notNull().default('proxy'),
     provider: text('provider'),
     model: text('model'),
     inputTokens: integer('input_tokens').notNull().default(0),

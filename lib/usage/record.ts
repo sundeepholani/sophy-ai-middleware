@@ -5,7 +5,13 @@
  */
 import type { LanguageModelUsage, ProviderMetadata, ModelMessage } from 'ai';
 import { getDb } from '@/db/client';
-import { usageEvents, requestLogs, type UsageStatus, type ResponseKind } from '@/db/schema';
+import {
+  usageEvents,
+  requestLogs,
+  type UsageStatus,
+  type ResponseKind,
+  type UsageSource,
+} from '@/db/schema';
 
 export interface NormalizedUsage {
   inputTokens: number;
@@ -53,7 +59,11 @@ export function extractGatewayRequestId(pm: ProviderMetadata | undefined): strin
 export interface RecordUsageInput {
   /** Optional explicit id; pass it to correlate with a request_logs row. */
   id?: string;
-  keyId: string;
+  /** Null only for spend with no owning key (kb_ingest from the cron). */
+  keyId: string | null;
+  /** Defaults to 'proxy' (a client request). Non-proxy rows are Sophy's own
+   *  spend and are excluded from key quotas and client-facing usage totals. */
+  source?: UsageSource;
   provider?: string | null;
   model?: string | null;
   usage: NormalizedUsage;
@@ -74,6 +84,7 @@ export async function recordUsage(input: RecordUsageInput): Promise<void> {
       .values({
         ...(input.id ? { id: input.id } : {}),
         apiKeyId: input.keyId,
+        source: input.source ?? 'proxy',
         provider: input.provider ?? null,
         model: input.model ?? null,
         inputTokens: input.usage.inputTokens,

@@ -15,6 +15,8 @@ import { kbDocuments, kbChunks, knowledgebases } from '@/db/schema';
 import { extractText } from '@/lib/kb/extract';
 import { chunkText } from '@/lib/kb/chunk';
 import { embedTexts, EMBEDDING_DIM } from '@/lib/kb/embed';
+import { recordUsage } from '@/lib/usage/record';
+import { providerOf } from '@/lib/gateway/call';
 
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 // Bound the paid embed call: a hung/slow gateway must not eat the whole cron
@@ -75,9 +77,30 @@ export async function processKbIngestion(opts?: { batch?: number; deadlineMs?: n
       const chunks = chunkText(text);
       if (chunks.length === 0) throw new Error('no extractable text');
 
-      const { embeddings, tokens } = await embedTexts(doc.embeddingModel, chunks, {
+      const embedStart = Date.now();
+      const { embeddings, tokens, costUsd } = await embedTexts(doc.embeddingModel, chunks, {
         abortSignal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
         maxRetries: 1,
+      });
+      // Book the paid embed call (source='kb_ingest'). No owning key — ingestion
+      // is operator/cron work — so api_key_id is null and this spend stays out
+      // of every key quota. recordUsage never throws into this path.
+      await recordUsage({
+        keyId: null,
+        source: 'kb_ingest',
+        provider: providerOf(doc.embeddingModel),
+        model: doc.embeddingModel,
+        usage: {
+          inputTokens: tokens ?? 0,
+          outputTokens: 0,
+          totalTokens: tokens ?? 0,
+          cachedInputTokens: 0,
+          reasoningTokens: 0,
+        },
+        costUsd,
+        latencyMs: Date.now() - embedStart,
+        status: 'ok',
+        responseKind: 'embedding',
       });
       if (embeddings.length !== chunks.length) {
         throw new Error(`embedding count mismatch: ${embeddings.length} vs ${chunks.length}`);

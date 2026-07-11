@@ -3,6 +3,7 @@ import {
   getUsageTotals,
   getUsageByKey,
   getUsageByModel,
+  getUsageBySource,
   listKeys,
   listUsedModels,
   type UsageFilters,
@@ -37,12 +38,13 @@ export default async function UsagePage({
   const model = sp.model && models.includes(sp.model) ? sp.model : undefined;
   const filters: UsageFilters = { sinceDays, keyId, model };
 
-  const [stackedModel, stackedKey, totals, byKey, byModel] = await Promise.all([
+  const [stackedModel, stackedKey, totals, byKey, byModel, bySource] = await Promise.all([
     getUsageStacked(viewer, filters, 'model'),
     getUsageStacked(viewer, filters, 'key'),
     getUsageTotals(viewer, filters),
     getUsageByKey(viewer, filters),
     getUsageByModel(viewer, filters),
+    getUsageBySource(viewer, filters),
   ]);
 
   return (
@@ -50,8 +52,10 @@ export default async function UsagePage({
       <div>
         <h1 className="text-2xl font-semibold">Usage</h1>
         <p className="text-sm text-muted-foreground">
-          Token volume and cost, broken down by key and model. Cost is our real-time estimate from
-          the AI Gateway; reconcile against the Gateway report for billing-grade numbers.
+          Token volume and cost, broken down by key, model, and source. Cost counts every gateway
+          call Sophy makes — client traffic plus eval challenger/judge and knowledgebase embedding
+          spend — while requests and tokens count client traffic only. It is our real-time estimate
+          from the AI Gateway; reconcile against the Gateway report for billing-grade numbers.
         </p>
       </div>
 
@@ -80,6 +84,7 @@ export default async function UsagePage({
       <div className="grid gap-4 lg:grid-cols-2">
         <UsageBreakdownCard title="By key" head="Key" rows={byKey} />
         <UsageBreakdownCard title="By model" head="Model" rows={byModel} />
+        <UsageBreakdownCard title="By source" head="Source" rows={bySource} />
       </div>
     </div>
   );

@@ -11,9 +11,11 @@
  */
 import { and, eq, sql } from 'drizzle-orm';
 import type { ModelMessage } from 'ai';
+import { waitUntil } from '@vercel/functions';
 import { getDb } from '@/db/client';
 import { kbChunks, kbDocuments, knowledgebases } from '@/db/schema';
 import { embedQuery } from '@/lib/kb/embed';
+import { recordUsage } from '@/lib/usage/record';
 
 const TOP_K = 6;
 const MAX_QUERY_CHARS = 8000; // bound the query embedding input
@@ -62,7 +64,7 @@ function formatContextBlock(snippets: string[]): string {
 export async function retrieveContext(
   knowledgebaseId: string,
   queryText: string,
-  opts?: { topK?: number },
+  opts?: { topK?: number; keyId?: string },
 ): Promise<string> {
   const q = queryText.trim().slice(0, MAX_QUERY_CHARS);
   if (!q) return '';
@@ -77,10 +79,34 @@ export async function retrieveContext(
       .limit(1);
     if (!kb) return ''; // KB deleted out from under the key — degrade gracefully
 
-    const { embedding } = await embedQuery(kb.embeddingModel, q, {
+    const embedStart = Date.now();
+    const { embedding, tokens, costUsd } = await embedQuery(kb.embeddingModel, q, {
       abortSignal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
       maxRetries: 0,
     });
+    // Book the paid query embedding (source='kb_query') OFF the hot path —
+    // retrieval sits in front of the user-visible response, so the insert runs
+    // under waitUntil. Attributed to the serving key but excluded from its
+    // quota (quota counts source='proxy' only).
+    waitUntil(
+      recordUsage({
+        keyId: opts?.keyId ?? null,
+        source: 'kb_query',
+        provider: kb.embeddingModel.split('/')[0] ?? 'unknown',
+        model: kb.embeddingModel,
+        usage: {
+          inputTokens: tokens ?? 0,
+          outputTokens: 0,
+          totalTokens: tokens ?? 0,
+          cachedInputTokens: 0,
+          reasoningTokens: 0,
+        },
+        costUsd,
+        latencyMs: Date.now() - embedStart,
+        status: 'ok',
+        responseKind: 'embedding',
+      }),
+    );
     const vec = JSON.stringify(embedding); // pgvector text input: "[...]"
 
     // Join the parent document and require status='ingested' so we only ever
@@ -112,9 +138,11 @@ export async function systemPromptWithKb(
   basePrompt: string | null,
   knowledgebaseId: string | null,
   messages: ModelMessage[],
+  /** The serving key, so the query-embedding spend is attributed to it. */
+  keyId?: string,
 ): Promise<string | null> {
   if (!knowledgebaseId) return basePrompt;
-  const block = await retrieveContext(knowledgebaseId, latestUserText(messages));
+  const block = await retrieveContext(knowledgebaseId, latestUserText(messages), { keyId });
   if (!block) return basePrompt;
   return basePrompt ? `${basePrompt}\n\n${block}` : block;
 }

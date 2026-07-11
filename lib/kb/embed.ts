@@ -12,7 +12,9 @@
  */
 import { createGateway } from '@ai-sdk/gateway';
 import { embed, embedMany } from 'ai';
+import type { ProviderMetadata } from 'ai';
 import { env } from '@/lib/env';
+import { extractGatewayCost } from '@/lib/usage/record';
 
 export const EMBEDDING_DIM = 1536;
 
@@ -35,14 +37,20 @@ export async function embedTexts(
   modelId: string,
   values: string[],
   opts?: { abortSignal?: AbortSignal; maxRetries?: number },
-): Promise<{ embeddings: number[][]; tokens: number | null }> {
-  const { embeddings, usage } = await embedMany({
+): Promise<{ embeddings: number[][]; tokens: number | null; costUsd: number | null }> {
+  const result = await embedMany({
     model: embeddingModel(modelId),
     values,
     abortSignal: opts?.abortSignal,
     maxRetries: opts?.maxRetries,
   });
-  return { embeddings, tokens: usage?.tokens ?? null };
+  return {
+    embeddings: result.embeddings,
+    tokens: result.usage?.tokens ?? null,
+    // Zero-markup gateway cost, so callers can record this spend (it was
+    // previously discarded — billed but invisible to usage accounting).
+    costUsd: extractGatewayCost(result.providerMetadata as ProviderMetadata | undefined),
+  };
 }
 
 /**
@@ -54,12 +62,16 @@ export async function embedQuery(
   modelId: string,
   value: string,
   opts?: { abortSignal?: AbortSignal; maxRetries?: number },
-): Promise<{ embedding: number[]; tokens: number | null }> {
-  const { embedding, usage } = await embed({
+): Promise<{ embedding: number[]; tokens: number | null; costUsd: number | null }> {
+  const result = await embed({
     model: embeddingModel(modelId),
     value,
     abortSignal: opts?.abortSignal,
     maxRetries: opts?.maxRetries,
   });
-  return { embedding, tokens: usage?.tokens ?? null };
+  return {
+    embedding: result.embedding,
+    tokens: result.usage?.tokens ?? null,
+    costUsd: extractGatewayCost(result.providerMetadata as ProviderMetadata | undefined),
+  };
 }

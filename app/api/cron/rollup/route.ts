@@ -6,7 +6,7 @@
  * Guarded by CRON_SECRET (Vercel sends it as a Bearer token) + a Redis lock so
  * overlapping invocations don't double-work.
  */
-import { gte, lt, sql } from 'drizzle-orm';
+import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import { usageEvents, usageRollups, requestLogs } from '@/db/schema';
 import { acquireLock, releaseLock } from '@/lib/counters';
@@ -34,10 +34,13 @@ async function rollupRecentDays(): Promise<number> {
       errors: sql<string>`coalesce(count(*) filter (where ${usageEvents.status} <> 'ok'),0)`,
     })
     .from(usageEvents)
-    .where(gte(usageEvents.createdAt, since))
+    // Client traffic only: rollups are per-key request/error/cost history, and
+    // eval/kb rows (key-attributed or keyless) would skew those semantics.
+    .where(and(gte(usageEvents.createdAt, since), eq(usageEvents.source, 'proxy')))
     .groupBy(usageEvents.apiKeyId, sql`date_trunc('day', ${usageEvents.createdAt})`);
 
   for (const r of rows) {
+    if (!r.apiKeyId) continue; // proxy rows always carry a key; guard for the type
     await getDb()
       .insert(usageRollups)
       .values({

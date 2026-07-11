@@ -12,9 +12,15 @@ import { generateText } from 'ai';
 import type { ModelMessage } from 'ai';
 import { getDb } from '@/db/client';
 import { evalRuns, evalSamples, usageEvents, type EvalWinner, type KeyParams } from '@/db/schema';
-import { buildSystem } from '@/lib/gateway/call';
+import { buildSystem, providerOf } from '@/lib/gateway/call';
 import { generateStructured, StructuredAttemptError } from '@/lib/gateway/structured';
-import { extractGatewayCost, normalizeUsage } from '@/lib/usage/record';
+import {
+  extractGatewayCost,
+  normalizeUsage,
+  recordUsage,
+  ZERO_USAGE,
+  type NormalizedUsage,
+} from '@/lib/usage/record';
 import { judge, JudgeError, type JudgeVerdict } from '@/lib/eval/judge';
 import { evalModel } from '@/lib/eval/model';
 import { summarize, type JudgedSample } from '@/lib/eval/aggregate';
@@ -49,15 +55,18 @@ async function replayChallenger(
     temperature: params.temperature,
     topP: params.topP,
     maxOutputTokens: params.maxOutputTokens,
-    abortSignal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
   };
   if (structured && outputSchema) {
     // Tolerant structured generation: an output that wraps/pads its JSON (common
     // for non-OpenAI/Anthropic models) is recovered instead of crashing. A truly
     // unparseable one comes back schemaValid:false with the raw text preserved, so
     // the caller records it as a graded "challenger loses" with the real output
-    // visible — not a dropped sample.
-    const r = await generateStructured(callArgs, outputSchema);
+    // visible — not a dropped sample. attemptTimeoutMs gives the strict attempt
+    // and the tolerant retry each their own 60s budget (a shared signal would
+    // leave the retry seconds from abort — a paid failure).
+    const r = await generateStructured(callArgs, outputSchema, {
+      attemptTimeoutMs: MODEL_TIMEOUT_MS,
+    });
     const u = normalizeUsage(r.usage);
     return {
       output: r.text,
@@ -69,7 +78,7 @@ async function replayChallenger(
       outputTokens: u.outputTokens,
     };
   }
-  const r = await generateText(callArgs);
+  const r = await generateText({ ...callArgs, abortSignal: AbortSignal.timeout(MODEL_TIMEOUT_MS) });
   const u = normalizeUsage(r.usage);
   return {
     output: r.text,
@@ -126,6 +135,7 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
       structured: evalSamples.structured,
       outputSchema: evalSamples.outputSchema,
       championOutput: evalSamples.championOutput,
+      apiKeyId: evalRuns.apiKeyId,
       challengerModel: evalRuns.challengerModel,
       judgeModel: evalRuns.judgeModel,
     })
@@ -145,6 +155,13 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
       eq(evalSamples.status, 'pending'),
       sql`${evalSamples.createdAt}::text = ${p.createdAtText}`,
     );
+    // Which paid call is in flight — the catch below books the error usage
+    // event against the right source/model. stageBooked flips true once the
+    // in-flight stage's usage event is recorded 'ok', so a LATER failure (a
+    // sample UPDATE throwing) doesn't double-book the same gateway call as a
+    // phantom error event.
+    let stage: 'challenger' | 'judge' = 'challenger';
+    let stageBooked = false;
     try {
       const messages = (p.request ?? []) as ModelMessage[];
       const params = (p.params ?? {}) as KeyParams;
@@ -156,6 +173,28 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
         p.structured,
         p.outputSchema ?? null,
       );
+      // Book the challenger call as a first-class usage event AT CALL TIME:
+      // unlike the sample columns (overwritten on re-judge, purged on cancel),
+      // these rows accumulate and survive, so eval spend is always accounted.
+      const challengerUsage: NormalizedUsage = {
+        inputTokens: challenger.inputTokens,
+        outputTokens: challenger.outputTokens,
+        totalTokens: challenger.inputTokens + challenger.outputTokens,
+        cachedInputTokens: 0,
+        reasoningTokens: 0,
+      };
+      await recordUsage({
+        keyId: p.apiKeyId,
+        source: 'eval_challenger',
+        provider: providerOf(p.challengerModel),
+        model: p.challengerModel,
+        usage: challengerUsage,
+        costUsd: challenger.costUsd,
+        latencyMs: challenger.latencyMs,
+        status: 'ok',
+        responseKind: p.structured ? 'structured' : 'text',
+      });
+      stageBooked = true;
       // Persist the challenger result BEFORE the judge call (status stays
       // 'pending'): the challenger was billed the moment it returned, so a
       // judge failure/timeout must not lose its cost. Production 2026-07-10:
@@ -184,9 +223,13 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
           confidence: 1,
           reason: 'Challenger output failed the key’s JSON schema.',
           costUsd: null,
+          usage: { ...ZERO_USAGE },
           orderSwapped: false,
         };
       } else {
+        stage = 'judge';
+        stageBooked = false;
+        const judgeStart = Date.now();
         verdict = await judge({
           judgeModel: p.judgeModel,
           systemPrompt: p.systemPrompt,
@@ -195,6 +238,19 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
           challengerOutput: challenger.output,
           randomSwap: Math.random() < 0.5,
         });
+        // Book the judge call the same way (only when one actually ran).
+        await recordUsage({
+          keyId: p.apiKeyId,
+          source: 'eval_judge',
+          provider: providerOf(p.judgeModel),
+          model: p.judgeModel,
+          usage: verdict.usage,
+          costUsd: verdict.costUsd,
+          latencyMs: Date.now() - judgeStart,
+          status: 'ok',
+          responseKind: 'structured',
+        });
+        stageBooked = true;
       }
       // Re-assert the challenger fields alongside the verdict (idempotent with
       // the pre-persist) and require the same version: if the continuation
@@ -227,13 +283,32 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
       // cron write — a sample reset by a newer turn is left for re-processing.
       const judgeCost = err instanceof JudgeError ? err.costUsd : null;
       const challengerCost = err instanceof StructuredAttemptError ? err.costUsd : null;
+      const errorMessage = err instanceof Error ? err.message.slice(0, 500) : String(err);
+      // Book the failed stage's usage event too — the carried cost/usage is
+      // exactly the billed-but-unrecorded spend class from the Jul-10 incident.
+      // Skipped when the stage's call already got its 'ok' row (the throw came
+      // from a later sample UPDATE, not from a gateway call).
+      const carried = err instanceof JudgeError || err instanceof StructuredAttemptError ? err : null;
+      if (!stageBooked) {
+        await recordUsage({
+          keyId: p.apiKeyId,
+          source: stage === 'judge' ? 'eval_judge' : 'eval_challenger',
+          provider: providerOf(stage === 'judge' ? p.judgeModel : p.challengerModel),
+          model: stage === 'judge' ? p.judgeModel : p.challengerModel,
+          usage: carried ? normalizeUsage(carried.usage) : { ...ZERO_USAGE },
+          costUsd: carried?.costUsd,
+          status: 'error',
+          responseKind: stage === 'judge' || p.structured ? 'structured' : 'text',
+          errorMessage,
+        });
+      }
       await db
         .update(evalSamples)
         .set({
           status: 'failed',
           ...(judgeCost != null ? { judgeCostUsd: String(judgeCost) } : {}),
           ...(challengerCost != null ? { challengerCostUsd: String(challengerCost) } : {}),
-          errorMessage: err instanceof Error ? err.message.slice(0, 500) : String(err),
+          errorMessage,
         })
         .where(sameVersion);
     }
@@ -282,10 +357,19 @@ async function finalizeRuns(): Promise<number> {
     }));
 
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    // Client traffic only: this run's own challenger/judge rows (and kb_query
+    // rows) carry the same key id — counting them would inflate the projected
+    // monthly savings in the summary/email by ~2-3x.
     const [{ cnt }] = await db
       .select({ cnt: sql<string>`count(*)` })
       .from(usageEvents)
-      .where(and(eq(usageEvents.apiKeyId, run.apiKeyId), gte(usageEvents.createdAt, since)));
+      .where(
+        and(
+          eq(usageEvents.apiKeyId, run.apiKeyId),
+          eq(usageEvents.source, 'proxy'),
+          gte(usageEvents.createdAt, since),
+        ),
+      );
 
     const summary = summarize(samples, {
       monthlyRequests: Number(cnt) || null,

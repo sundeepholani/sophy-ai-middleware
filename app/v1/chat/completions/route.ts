@@ -137,7 +137,7 @@ export async function POST(req: Request): Promise<Response> {
   const ctx: CallContext = {
     keyId: key.id,
     model: key.model,
-    systemPrompt: await systemPromptWithKb(basePrompt, key.knowledgebaseId, messages),
+    systemPrompt: await systemPromptWithKb(basePrompt, key.knowledgebaseId, messages, key.id),
     params: resolveParams(key.params),
     structured,
     schema: structured ? normalizeOutputSchema(key.outputSchema) : key.outputSchema,
