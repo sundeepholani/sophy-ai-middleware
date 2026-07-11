@@ -22,6 +22,7 @@
 import { generateText, Output, jsonSchema, NoObjectGeneratedError } from 'ai';
 import type { LanguageModelUsage, ProviderMetadata, FinishReason } from 'ai';
 import { validateAgainstSchema } from '@/lib/gateway/openai-map';
+import { extractGatewayCost } from '@/lib/usage/record';
 
 /**
  * True when the provider rejected our JSON schema in its native structured mode
@@ -124,12 +125,63 @@ export interface StructuredResult {
   text: string;
   /** Schema/parse error detail when invalid; null when valid. */
   errors: string | null;
+  /** Token usage summed across EVERY billed attempt (strict + plain-text retry). */
   usage: LanguageModelUsage | undefined;
+  /** The LAST attempt's provider metadata (gateway request id correlation). */
   providerMetadata: ProviderMetadata | undefined;
+  /**
+   * Zero-markup gateway cost summed across every attempt that reported one, or
+   * null when none did. Callers must charge THIS, not extractGatewayCost of
+   * providerMetadata — the retry path makes two billed calls and the metadata
+   * only carries the last one.
+   */
+  costUsd: number | null;
   /** The finish reason of the call whose output we used (for truncation/filter signal). */
   finishReason: FinishReason | undefined;
   /** True when the tolerant fallback rescued an output the strict parser rejected. */
   recovered: boolean;
+}
+
+/** Sum two usage reports field-by-field; undefined inputs contribute nothing. */
+export function sumUsage(
+  a: LanguageModelUsage | undefined,
+  b: LanguageModelUsage | undefined,
+): LanguageModelUsage | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const n = (x: number | undefined) => x ?? 0;
+  return {
+    inputTokens: n(a.inputTokens) + n(b.inputTokens),
+    outputTokens: n(a.outputTokens) + n(b.outputTokens),
+    totalTokens: n(a.totalTokens) + n(b.totalTokens),
+    cachedInputTokens: n(a.cachedInputTokens) + n(b.cachedInputTokens),
+    reasoningTokens: n(a.reasoningTokens) + n(b.reasoningTokens),
+  } as LanguageModelUsage;
+}
+
+/** Sum gateway costs; null only when NO attempt reported a cost. */
+export function sumCost(a: number | null, b: number | null): number | null {
+  if (a == null) return b;
+  if (b == null) return a;
+  return a + b;
+}
+
+/**
+ * The plain-text retry failed AFTER a completed (billed) strict attempt. The
+ * strict attempt's cost/usage are carried here so callers can still charge
+ * them — recording ZERO_USAGE for a request whose first attempt completed is
+ * exactly the billed-but-unrecorded class behind the 2026-07-10 incident.
+ */
+export class StructuredAttemptError extends Error {
+  constructor(
+    message: string,
+    readonly costUsd: number | null,
+    readonly usage: LanguageModelUsage | undefined,
+    readonly cause: unknown,
+  ) {
+    super(message);
+    this.name = 'StructuredAttemptError';
+  }
 }
 
 type GenerateTextArgs = Parameters<typeof generateText>[0];
@@ -138,10 +190,11 @@ function ok(
   value: unknown,
   usage: StructuredResult['usage'],
   providerMetadata: StructuredResult['providerMetadata'],
+  costUsd: number | null,
   finishReason: FinishReason | undefined,
   recovered: boolean,
 ): StructuredResult {
-  return { valid: true, value, text: JSON.stringify(value), errors: null, usage, providerMetadata, finishReason, recovered };
+  return { valid: true, value, text: JSON.stringify(value), errors: null, usage, providerMetadata, costUsd, finishReason, recovered };
 }
 
 /**
@@ -183,6 +236,7 @@ export async function generateStructured(
   let strictText = '';
   let usage: StructuredResult['usage'];
   let providerMetadata: StructuredResult['providerMetadata'];
+  let costUsd: number | null = null;
   let finishReason: FinishReason | undefined;
   let strictErrors: string | null = null;
 
@@ -194,17 +248,22 @@ export async function generateStructured(
     });
     const obj = r.experimental_output as unknown;
     const strict = validateAgainstSchema(obj, schema);
-    if (strict.valid) return ok(obj, r.usage, r.providerMetadata, r.finishReason, false);
+    const strictCost = extractGatewayCost(r.providerMetadata);
+    if (strict.valid) return ok(obj, r.usage, r.providerMetadata, strictCost, r.finishReason, false);
     strictText = r.text;
     usage = r.usage;
     providerMetadata = r.providerMetadata;
+    costUsd = strictCost;
     finishReason = r.finishReason;
     strictErrors = strict.errors;
   } catch (e) {
     if (NoObjectGeneratedError.isInstance(e)) {
       strictText = typeof e.text === 'string' ? e.text : '';
       usage = e.usage;
-      providerMetadata = undefined; // the error carries no gateway cost metadata
+      // The error carries no gateway cost metadata — the attempt WAS billed but
+      // its cost is unrecoverable here; usage (tokens) still counts toward the
+      // aggregate so the under-record is visible in token totals.
+      providerMetadata = undefined;
       finishReason = e.finishReason;
     } else if (!isSchemaRejection(e)) {
       throw e; // genuine upstream error (auth/rate-limit/timeout) → propagate
@@ -216,22 +275,37 @@ export async function generateStructured(
 
   // ---- 2) tolerant extract of the strict attempt ---------------------------
   const fromStrict = coerceToSchema(strictText, schema);
-  if (fromStrict.valid) return ok(fromStrict.value, usage, providerMetadata, finishReason, true);
+  if (fromStrict.valid) return ok(fromStrict.value, usage, providerMetadata, costUsd, finishReason, true);
 
   // ---- 3) plain-text retry with an explicit JSON+schema instruction ---------
   // A real failure here (timeout/transient) propagates — it's an upstream error,
-  // not a schema validation outcome.
+  // not a schema validation outcome. But when the STRICT attempt completed (and
+  // was billed), its cost/usage ride along on a StructuredAttemptError so the
+  // caller's error accounting can still charge them.
   const baseSystem = typeof args.system === 'string' ? args.system : undefined;
-  const r2 = await generateText({ ...args, system: withJsonInstruction(baseSystem, schema) });
+  let r2: Awaited<ReturnType<typeof generateText>>;
+  try {
+    r2 = await generateText({ ...args, system: withJsonInstruction(baseSystem, schema) });
+  } catch (e) {
+    if (costUsd != null || usage) {
+      throw new StructuredAttemptError(e instanceof Error ? e.message : String(e), costUsd, usage, e);
+    }
+    throw e;
+  }
+  // BOTH attempts were billed: aggregate tokens and cost so accounting charges
+  // the retry path fully instead of silently dropping the strict attempt.
+  const totalUsage = sumUsage(usage, r2.usage);
+  const totalCost = sumCost(costUsd, extractGatewayCost(r2.providerMetadata));
   const c2 = coerceToSchema(r2.text, schema);
-  if (c2.valid) return ok(c2.value, r2.usage, r2.providerMetadata, r2.finishReason, true);
+  if (c2.valid) return ok(c2.value, totalUsage, r2.providerMetadata, totalCost, r2.finishReason, true);
   return {
     valid: false,
     value: undefined,
     text: r2.text,
     errors: c2.errors ?? fromStrict.errors ?? strictErrors,
-    usage: r2.usage,
+    usage: totalUsage,
     providerMetadata: r2.providerMetadata,
+    costUsd: totalCost,
     finishReason: r2.finishReason,
     recovered: false,
   };

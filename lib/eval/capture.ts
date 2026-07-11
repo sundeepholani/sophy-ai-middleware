@@ -20,11 +20,10 @@
  * (option A) and is purged when the run ends.
  */
 import { and, eq, sql } from 'drizzle-orm';
-import type { ModelMessage, ProviderMetadata } from 'ai';
+import type { ModelMessage } from 'ai';
 import { waitUntil } from '@vercel/functions';
 import { getDb } from '@/db/client';
 import { evalRuns, evalSamples, type KeyParams } from '@/db/schema';
-import { extractGatewayCost } from '@/lib/usage/record';
 import type { CallContext } from '@/lib/gateway/call';
 
 const MAX_OUTPUT_CHARS = 100_000;
@@ -257,18 +256,49 @@ async function captureEvalSample(input: CaptureInput): Promise<void> {
 }
 
 /**
+ * True when any message carries a non-text part (image, file, tool payload).
+ * Pure — exported for unit testing.
+ */
+export function hasNonTextParts(messages: ModelMessage[]): boolean {
+  for (const m of messages) {
+    const content = (m as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+    for (const p of content) {
+      if (typeof p === 'string') continue;
+      if (p && typeof p === 'object' && (p as { type?: unknown }).type === 'text') continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Schedule a champion capture without blocking the response. No-op (a single
  * indexed lookup) when the key has no active run.
+ *
+ * Conversations containing non-text parts (images/files) are NOT captured:
+ * the challenger replay would re-bill the media, the judge can't see it (its
+ * prompt is text-only), and `request` is stored uncapped — a single base64
+ * image captured here produced ~850K-token judge prompts in production
+ * (2026-07-10, ~$30 billed / $0 recorded). Text-only tasks remain evaluable.
  */
 export function scheduleChampionCapture(
   ctx: CallContext,
   messages: ModelMessage[],
   surface: 'chat' | 'responses',
   output: string,
-  providerMetadata: ProviderMetadata | undefined,
+  /**
+   * The cost the caller CHARGED for this request (usage_events.cost_usd) — on
+   * structured paths that is the aggregate across attempts, which last-attempt
+   * providerMetadata cannot express. Keeping one source ties championCostUsd to
+   * the linked usage_events row and keeps the champion-vs-challenger cost
+   * comparison symmetric (the challenger side records its aggregate too).
+   */
+  costUsd: number | null,
   startMs: number,
   usageEventId?: string,
 ): void {
+  if (hasNonTextParts(messages)) return;
   waitUntil(
     captureEvalSample({
       keyId: ctx.keyId,
@@ -283,7 +313,7 @@ export function scheduleChampionCapture(
       structured: ctx.structured,
       outputSchema: ctx.schema,
       championOutput: output,
-      championCostUsd: extractGatewayCost(providerMetadata),
+      championCostUsd: costUsd,
       championLatencyMs: Date.now() - startMs,
       usageEventId,
     }),

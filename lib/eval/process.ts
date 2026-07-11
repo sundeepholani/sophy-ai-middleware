@@ -13,9 +13,9 @@ import type { ModelMessage } from 'ai';
 import { getDb } from '@/db/client';
 import { evalRuns, evalSamples, usageEvents, type EvalWinner, type KeyParams } from '@/db/schema';
 import { buildSystem } from '@/lib/gateway/call';
-import { generateStructured } from '@/lib/gateway/structured';
+import { generateStructured, StructuredAttemptError } from '@/lib/gateway/structured';
 import { extractGatewayCost, normalizeUsage } from '@/lib/usage/record';
-import { judge, type JudgeVerdict } from '@/lib/eval/judge';
+import { judge, JudgeError, type JudgeVerdict } from '@/lib/eval/judge';
 import { evalModel } from '@/lib/eval/model';
 import { summarize, type JudgedSample } from '@/lib/eval/aggregate';
 import { recordedEvalSpendUsd } from '@/lib/eval/spend';
@@ -62,7 +62,8 @@ async function replayChallenger(
     const u = normalizeUsage(r.usage);
     return {
       output: r.text,
-      costUsd: extractGatewayCost(r.providerMetadata),
+      // Aggregated across attempts — the tolerant retry path bills two calls.
+      costUsd: r.costUsd,
       latencyMs: Date.now() - start,
       schemaValid: r.valid,
       inputTokens: u.inputTokens,
@@ -112,6 +113,14 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
   const pending = await db
     .select({
       sampleId: evalSamples.id,
+      // Version marker: the continuation reset in capture.ts stamps a fresh
+      // createdAt, so every cron-side UPDATE below guards on (status='pending'
+      // AND createdAt=<this>) — a sample reset mid-processing is left alone
+      // for re-processing instead of being half-overwritten.
+      // Compared as ::text, NOT as a Date: timestamptz carries microseconds
+      // and the JS Date round-trip truncates to milliseconds, so a Date-equality
+      // guard would never match rows stamped by the DB's now() default.
+      createdAtText: sql<string>`${evalSamples.createdAt}::text`,
       systemPrompt: evalSamples.systemPrompt,
       request: evalSamples.request,
       params: evalSamples.params,
@@ -128,6 +137,15 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
 
   let judged = 0;
   for (const p of pending) {
+    // Cron-side writes only land on the exact sample version we selected: the
+    // multi-turn continuation reset (capture.ts) re-stamps createdAt while
+    // resetting the row to pending, so a stale write matches 0 rows and the
+    // reset sample is re-processed whole next tick instead of half-overwritten.
+    const sameVersion = and(
+      eq(evalSamples.id, p.sampleId),
+      eq(evalSamples.status, 'pending'),
+      sql`${evalSamples.createdAt}::text = ${p.createdAtText}`,
+    );
     try {
       const messages = (p.request ?? []) as ModelMessage[];
       const params = (p.params ?? {}) as KeyParams;
@@ -139,6 +157,24 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
         p.structured,
         p.outputSchema ?? null,
       );
+      // Persist the challenger result BEFORE the judge call (status stays
+      // 'pending'): the challenger was billed the moment it returned, so a
+      // judge failure/timeout must not lose its cost. Production 2026-07-10:
+      // every judge failure discarded the paid challenger call entirely.
+      const prePersisted = await db
+        .update(evalSamples)
+        .set({
+          challengerOutput: challenger.output.slice(0, MAX_OUTPUT_CHARS),
+          challengerCostUsd: challenger.costUsd != null ? String(challenger.costUsd) : null,
+          challengerLatencyMs: challenger.latencyMs,
+          challengerInputTokens: challenger.inputTokens,
+          challengerOutputTokens: challenger.outputTokens,
+        })
+        .where(sameVersion)
+        .returning({ id: evalSamples.id });
+      // Sample was reset (next turn arrived) or deleted while the challenger
+      // ran — don't spend a judge call on a stale comparison.
+      if (prePersisted.length === 0) continue;
       let verdict: JudgeVerdict;
       if (p.structured && !challenger.schemaValid) {
         // Champion captures are always schema-valid (the proxy fail-closes on
@@ -161,7 +197,11 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
           randomSwap: Math.random() < 0.5,
         });
       }
-      await db
+      // Re-assert the challenger fields alongside the verdict (idempotent with
+      // the pre-persist) and require the same version: if the continuation
+      // reset landed during the judge call this matches 0 rows and the sample
+      // stays pending for a fresh turn-2 evaluation.
+      const finalized = await db
         .update(evalSamples)
         .set({
           challengerOutput: challenger.output.slice(0, MAX_OUTPUT_CHARS),
@@ -177,16 +217,26 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
           status: 'judged',
           judgedAt: new Date(),
         })
-        .where(eq(evalSamples.id, p.sampleId));
-      judged++;
+        .where(sameVersion)
+        .returning({ id: evalSamples.id });
+      if (finalized.length > 0) judged++;
     } catch (err) {
+      // Billed-but-failed calls still carry their cost: JudgeError = judge
+      // attempt(s), StructuredAttemptError escaping replayChallenger = the
+      // challenger's completed strict attempt. Persist whichever applies so a
+      // failed sample accounts for its spend. Version-guarded like every other
+      // cron write — a sample reset by a newer turn is left for re-processing.
+      const judgeCost = err instanceof JudgeError ? err.costUsd : null;
+      const challengerCost = err instanceof StructuredAttemptError ? err.costUsd : null;
       await db
         .update(evalSamples)
         .set({
           status: 'failed',
+          ...(judgeCost != null ? { judgeCostUsd: String(judgeCost) } : {}),
+          ...(challengerCost != null ? { challengerCostUsd: String(challengerCost) } : {}),
           errorMessage: err instanceof Error ? err.message.slice(0, 500) : String(err),
         })
-        .where(eq(evalSamples.id, p.sampleId));
+        .where(sameVersion);
     }
   }
 
