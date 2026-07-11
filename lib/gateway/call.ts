@@ -34,7 +34,7 @@ import {
 } from '@/lib/usage/record';
 import { openAiError } from '@/lib/http/openai';
 import { upstreamErrorResponse } from '@/lib/gateway/upstream-error';
-import { generateStructured } from '@/lib/gateway/structured';
+import { generateStructured, StructuredAttemptError } from '@/lib/gateway/structured';
 import { scheduleChampionCapture } from '@/lib/eval/capture';
 
 const SYSTEM_PREAMBLE =
@@ -176,8 +176,10 @@ export async function handleNonStreaming(
       // unchanged; a model that fences/pads its JSON is recovered instead of
       // failing. Only genuinely unparseable output still 502s.
       const result = await generateStructured(commonCall(ctx, messages), ctx.schema);
+      // usage/costUsd are aggregated across attempts — the tolerant retry path
+      // bills two upstream calls and both must be charged.
       const usage = normalizeUsage(result.usage);
-      const costUsd = extractGatewayCost(result.providerMetadata);
+      const costUsd = result.costUsd;
       const gatewayRequestId = extractGatewayRequestId(result.providerMetadata);
       if (!result.valid) {
         await recordUsage({
@@ -205,7 +207,8 @@ export async function handleNonStreaming(
         gatewayRequestId,
       });
       await logIf(result.text, 'ok');
-      scheduleChampionCapture(ctx, messages, 'chat', result.text, result.providerMetadata, start, eventId);
+      // The capture must carry the same aggregated cost usage_events was charged.
+      scheduleChampionCapture(ctx, messages, 'chat', result.text, costUsd, start, eventId);
       return Response.json(
         toChatCompletion({
           id,
@@ -221,11 +224,12 @@ export async function handleNonStreaming(
 
     const result = await generateText(commonCall(ctx, messages));
     const usage = normalizeUsage(result.usage);
+    const costUsd = extractGatewayCost(result.providerMetadata);
     const toolCalls = ctx.tools ? toOutToolCalls(result.toolCalls) : undefined;
     await recordUsage({
       ...base,
       usage,
-      costUsd: extractGatewayCost(result.providerMetadata),
+      costUsd,
       latencyMs: Date.now() - start,
       status: 'ok',
       responseKind: 'text',
@@ -235,7 +239,7 @@ export async function handleNonStreaming(
     // Don't capture tool-call turns for eval — they're not a replayable final
     // answer (the client owns the tool loop).
     if (!ctx.tools) {
-      scheduleChampionCapture(ctx, messages, 'chat', result.text, result.providerMetadata, start, eventId);
+      scheduleChampionCapture(ctx, messages, 'chat', result.text, costUsd, start, eventId);
     }
     return Response.json(
       toChatCompletion({
@@ -250,9 +254,13 @@ export async function handleNonStreaming(
       { headers: { 'cache-control': 'no-store' } },
     );
   } catch (err) {
+    // A StructuredAttemptError means the strict attempt COMPLETED (billed)
+    // before the retry failed — charge its carried usage/cost, not zero.
+    const carried = err instanceof StructuredAttemptError ? err : null;
     await recordUsage({
       ...base,
-      usage: { ...ZERO_USAGE },
+      usage: carried ? normalizeUsage(carried.usage) : { ...ZERO_USAGE },
+      costUsd: carried?.costUsd,
       latencyMs: Date.now() - start,
       status: 'error',
       responseKind: ctx.structured ? 'structured' : 'text',
@@ -302,10 +310,11 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
         const obj = eo !== undefined ? eo : safeParseJson(event.text);
         if (!validateAgainstSchema(obj, ctx.schema).valid) status = 'validation_failed';
       }
+      const costUsd = extractGatewayCost(event.providerMetadata);
       await recordUsage({
         ...base,
         usage: normalizeUsage(event.totalUsage ?? event.usage),
-        costUsd: extractGatewayCost(event.providerMetadata),
+        costUsd,
         latencyMs: Date.now() - start,
         status,
         gatewayRequestId: extractGatewayRequestId(event.providerMetadata),
@@ -314,7 +323,7 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
       // Tool-call turns aren't captured for eval (client owns the tool loop); nor is
       // a structured turn that failed validation (not a usable final answer).
       if (!ctx.tools && status === 'ok') {
-        scheduleChampionCapture(ctx, messages, 'chat', championOut, event.providerMetadata, start, eventId);
+        scheduleChampionCapture(ctx, messages, 'chat', championOut, costUsd, start, eventId);
       }
     },
     onError: async ({ error }) => {

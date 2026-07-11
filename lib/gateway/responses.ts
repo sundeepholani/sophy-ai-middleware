@@ -19,7 +19,7 @@ import type { ModelMessage } from 'ai';
 import { waitUntil } from '@vercel/functions';
 import { randomUUID } from 'node:crypto';
 import { commonCall, type CallContext } from '@/lib/gateway/call';
-import { generateStructured } from '@/lib/gateway/structured';
+import { generateStructured, StructuredAttemptError } from '@/lib/gateway/structured';
 import { scheduleChampionCapture } from '@/lib/eval/capture';
 import { validateAgainstSchema } from '@/lib/gateway/openai-map';
 import {
@@ -109,8 +109,10 @@ export async function handleResponsesNonStreaming(
       // models unchanged; fence/pad-wrapping models are recovered; only genuinely
       // unparseable output still 502s.
       const result = await generateStructured(commonCall(ctx, messages), ctx.schema);
+      // usage/costUsd are aggregated across attempts — the tolerant retry path
+      // bills two upstream calls and both must be charged.
       const usage = normalizeUsage(result.usage);
-      const costUsd = extractGatewayCost(result.providerMetadata);
+      const costUsd = result.costUsd;
       const gatewayRequestId = extractGatewayRequestId(result.providerMetadata);
       if (!result.valid) {
         await recordUsage({
@@ -139,7 +141,8 @@ export async function handleResponsesNonStreaming(
         gatewayRequestId,
       });
       await logIf(text, 'ok');
-      scheduleChampionCapture(ctx, messages, 'responses', text, result.providerMetadata, start, eventId);
+      // The capture must carry the same aggregated cost usage_events was charged.
+      scheduleChampionCapture(ctx, messages, 'responses', text, costUsd, start, eventId);
       return Response.json(
         buildResponseObject({
           id,
@@ -159,11 +162,12 @@ export async function handleResponsesNonStreaming(
 
     const result = await generateText(commonCall(ctx, messages));
     const usage = normalizeUsage(result.usage);
+    const costUsd = extractGatewayCost(result.providerMetadata);
     const toolCalls = ctx.tools ? toResponsesToolCalls(result.toolCalls) : undefined;
     await recordUsage({
       ...base,
       usage,
-      costUsd: extractGatewayCost(result.providerMetadata),
+      costUsd,
       latencyMs: Date.now() - start,
       status: 'ok',
       responseKind: 'text',
@@ -172,7 +176,7 @@ export async function handleResponsesNonStreaming(
     await logIf(result.text || (toolCalls?.length ? JSON.stringify(toolCalls) : ''), 'ok');
     // Tool-call turns aren't captured for eval (client owns the tool loop).
     if (!ctx.tools) {
-      scheduleChampionCapture(ctx, messages, 'responses', result.text, result.providerMetadata, start, eventId);
+      scheduleChampionCapture(ctx, messages, 'responses', result.text, costUsd, start, eventId);
     }
     return Response.json(
       buildResponseObject({
@@ -192,9 +196,13 @@ export async function handleResponsesNonStreaming(
       { headers: { 'cache-control': 'no-store' } },
     );
   } catch (err) {
+    // A StructuredAttemptError means the strict attempt COMPLETED (billed)
+    // before the retry failed — charge its carried usage/cost, not zero.
+    const carried = err instanceof StructuredAttemptError ? err : null;
     await recordUsage({
       ...base,
-      usage: { ...ZERO_USAGE },
+      usage: carried ? normalizeUsage(carried.usage) : { ...ZERO_USAGE },
+      costUsd: carried?.costUsd,
       latencyMs: Date.now() - start,
       status: 'error',
       responseKind: ctx.structured ? 'structured' : 'text',
@@ -253,10 +261,11 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
         const obj = eo !== undefined ? eo : safeParseJson(event.text);
         if (!validateAgainstSchema(obj, ctx.schema).valid) status = 'validation_failed';
       }
+      const costUsd = extractGatewayCost(event.providerMetadata);
       await recordUsage({
         ...base,
         usage: normalizeUsage(event.totalUsage ?? event.usage),
-        costUsd: extractGatewayCost(event.providerMetadata),
+        costUsd,
         latencyMs: Date.now() - start,
         status,
         gatewayRequestId: extractGatewayRequestId(event.providerMetadata),
@@ -265,7 +274,7 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
       await logIf(event.text || toolCallsOut, status);
       const championOut = ctx.structured && eo !== undefined ? JSON.stringify(eo) : event.text;
       if (!ctx.tools && status === 'ok') {
-        scheduleChampionCapture(ctx, messages, 'responses', championOut, event.providerMetadata, start, eventId);
+        scheduleChampionCapture(ctx, messages, 'responses', championOut, costUsd, start, eventId);
       }
     },
     onError: async ({ error }) => {
