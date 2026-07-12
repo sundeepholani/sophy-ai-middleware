@@ -19,7 +19,7 @@
  * generating anything. Rather than surface a hard error, we drop native mode and
  * re-ask with the schema inline (the plain-text retry), validating ourselves.
  */
-import { generateText, Output, jsonSchema, NoObjectGeneratedError } from 'ai';
+import { generateText, Output, jsonSchema, NoObjectGeneratedError, NoOutputGeneratedError } from 'ai';
 import type { LanguageModelUsage, ProviderMetadata, FinishReason } from 'ai';
 import { validateAgainstSchema } from '@/lib/gateway/openai-map';
 import { extractGatewayCost } from '@/lib/usage/record';
@@ -186,6 +186,26 @@ export class StructuredAttemptError extends Error {
 
 type GenerateTextArgs = Parameters<typeof generateText>[0];
 
+/**
+ * Read a strict attempt's structured output. `result.experimental_output` is a
+ * GETTER that throws `NoOutputGeneratedError` ("No output generated.") whenever
+ * the SDK left the output null — which it does for any finish reason other than
+ * "stop" (truncation/`length`, content filter, an `unknown`/`other` gateway
+ * finish), since it only parses the object on a clean stop. The call itself
+ * still RESOLVED, so treat a thrown NoOutputGeneratedError as "no usable output"
+ * (returns undefined) and let the caller fall through to the tolerant retry with
+ * the resolved result's usage/cost intact — rather than propagating a hard error
+ * and discarding the billed attempt. Any other getter error is genuine and re-thrown.
+ */
+export function readStructuredOutput(result: { experimental_output: unknown }): unknown {
+  try {
+    return result.experimental_output;
+  } catch (e) {
+    if (NoOutputGeneratedError.isInstance(e)) return undefined;
+    throw e;
+  }
+}
+
 function ok(
   value: unknown,
   usage: StructuredResult['usage'],
@@ -258,7 +278,12 @@ export async function generateStructured(
         experimental_output: Output.object({ schema: jsonSchema(schema) }),
       }),
     );
-    const obj = r.experimental_output as unknown;
+    // Read the output defensively: a non-"stop" finish (truncation, content
+    // filter, an `unknown`/`other` gateway finish) leaves it null and the getter
+    // throws NoOutputGeneratedError, but `r` still carries the billed attempt's
+    // text/usage/cost. Treat "no output" like an invalid strict attempt and fall
+    // through to the tolerant retry instead of hard-failing "No output generated."
+    const obj = readStructuredOutput(r);
     const strict = validateAgainstSchema(obj, schema);
     const strictCost = extractGatewayCost(r.providerMetadata);
     if (strict.valid) return ok(obj, r.usage, r.providerMetadata, strictCost, r.finishReason, false);
