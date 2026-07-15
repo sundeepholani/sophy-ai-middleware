@@ -16,7 +16,12 @@ import {
 
 // Public (unauthenticated) console paths: the email-link request, and the verify
 // landing/confirm (which establishes the session itself).
-const PUBLIC_ADMIN_PATHS = ['/admin/login', '/api/admin/login', '/admin/auth/verify'];
+const PUBLIC_ADMIN_PATHS = [
+  '/admin/login',
+  '/api/admin/login',
+  '/admin/auth/verify',
+  '/admin/invitations/accept',
+];
 
 export default async function proxy(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;

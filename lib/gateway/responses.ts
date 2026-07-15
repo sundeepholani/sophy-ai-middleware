@@ -31,7 +31,11 @@ import {
   ZERO_USAGE,
 } from '@/lib/usage/record';
 import { openAiError } from '@/lib/http/openai';
-import { upstreamErrorResponse } from '@/lib/gateway/upstream-error';
+import { safeGatewayErrorMessage, upstreamErrorResponse } from '@/lib/gateway/upstream-error';
+import {
+  normalizeProjectGatewayError,
+  ProjectGatewayUnavailableError,
+} from '@/lib/gateway/project-provider';
 import {
   buildResponseObject,
   mapResponsesUsage,
@@ -87,11 +91,19 @@ export async function handleResponsesNonStreaming(
   const created = Math.floor(start / 1000);
   const provider = ctx.model.split('/')[0] ?? 'unknown';
   const eventId = randomUUID();
-  const base = { id: eventId, keyId: ctx.keyId, provider, model: ctx.model };
+  const base = {
+    id: eventId,
+    projectId: ctx.gateway.projectId,
+    gatewayCredentialId: ctx.gateway.gatewayCredentialId,
+    keyId: ctx.keyId,
+    provider,
+    model: ctx.model,
+  };
   const logIf = (response: string | null, status: 'ok' | 'validation_failed' | 'error') =>
     ctx.logContent
       ? recordRequestLog({
           id: eventId,
+          projectId: ctx.gateway.projectId,
           keyId: ctx.keyId,
           surface: 'responses',
           systemPrompt: ctx.systemPrompt,
@@ -199,6 +211,7 @@ export async function handleResponsesNonStreaming(
     // A StructuredAttemptError means the strict attempt COMPLETED (billed)
     // before the retry failed — charge its carried usage/cost, not zero.
     const carried = err instanceof StructuredAttemptError ? err : null;
+    const normalizedError = await normalizeProjectGatewayError(ctx.gateway, err);
     await recordUsage({
       ...base,
       usage: carried ? normalizeUsage(carried.usage) : { ...ZERO_USAGE },
@@ -206,10 +219,10 @@ export async function handleResponsesNonStreaming(
       latencyMs: Date.now() - start,
       status: 'error',
       responseKind: ctx.structured ? 'structured' : 'text',
-      errorMessage: err instanceof Error ? err.message : String(err),
+      errorMessage: safeGatewayErrorMessage(normalizedError),
     });
     await logIf(null, 'error');
-    return upstreamErrorResponse(err, 'Upstream model request failed.');
+    return upstreamErrorResponse(normalizedError, 'Upstream model request failed.');
   }
 }
 
@@ -225,6 +238,8 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
   const eventId = randomUUID();
   const base = {
     id: eventId,
+    projectId: ctx.gateway.projectId,
+    gatewayCredentialId: ctx.gateway.gatewayCredentialId,
     keyId: ctx.keyId,
     provider,
     model,
@@ -235,6 +250,7 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
     ctx.logContent
       ? recordRequestLog({
           id: eventId,
+          projectId: ctx.gateway.projectId,
           keyId: ctx.keyId,
           surface: 'responses',
           systemPrompt: ctx.systemPrompt,
@@ -278,13 +294,15 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
       }
     },
     onError: async ({ error }) => {
+      const normalizedError = await normalizeProjectGatewayError(ctx.gateway, error);
       await recordUsage({
         ...base,
         usage: { ...ZERO_USAGE },
         latencyMs: Date.now() - start,
         status: 'error',
-        errorMessage: error instanceof Error ? error.message : String(error),
+        errorMessage: safeGatewayErrorMessage(normalizedError),
       });
+      await logIf(null, 'error');
     },
   });
 
@@ -415,10 +433,24 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
           response: resp('completed', acc || null, mapResponsesUsage(usage), undefined, orderedOutput),
         });
         controller.close();
-      } catch {
-        // Upstream/stream error or client disconnect. Accounting handled by
-        // onFinish/onError via consumeStream(); just end the stream (no [DONE]).
+      } catch (error) {
+        // HTTP status is already committed, so surface a typed Responses event.
+        // Accounting is handled by onFinish/onError via consumeStream().
+        const normalizedError = await normalizeProjectGatewayError(ctx.gateway, error);
         try {
+          const projectUnavailable = ProjectGatewayUnavailableError.isInstance(normalizedError);
+          emit('response.failed', {
+            response: {
+              ...resp('in_progress', acc || null, null),
+              status: 'failed',
+              error: {
+                code: projectUnavailable ? normalizedError.code : 'upstream_error',
+                message: projectUnavailable
+                  ? 'This project is not ready to make AI requests. Ask a project admin to check its Vercel AI Gateway key.'
+                  : 'Upstream model request failed.',
+              },
+            },
+          });
           controller.close();
         } catch {
           /* already closed */

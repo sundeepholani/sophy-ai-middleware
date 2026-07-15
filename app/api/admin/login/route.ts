@@ -1,21 +1,18 @@
 /**
  * Magic-link request endpoint (public).
  *
- * Takes an email, and IF it maps to an active user, emails a one-time sign-in
- * link. ALL account-specific work (lookup, token mint, send) runs AFTER the
- * response via after(), so the response is constant-time regardless of whether
- * the email exists — no enumeration via timing or error status. The link origin
- * is server-controlled (never request headers) to prevent link poisoning.
+ * Takes an email and sends either an existing-identity login token or a verified
+ * signup intent. All account-specific work runs after the generic response, so
+ * callers cannot distinguish the two paths. Unknown emails are not persisted as
+ * identities until the recipient explicitly verifies the link.
  */
 import { after } from 'next/server';
 import { checkLoginRateLimit } from '@/lib/counters';
 import {
   normalizeEmail,
-  findActiveUserByEmail,
-  createLoginToken,
+  createAuthenticationToken,
   buildVerifyUrl,
 } from '@/lib/auth/magic-link';
-import { maybeBootstrapAdminForLogin } from '@/db/seed-admin';
 import { sendEmail } from '@/lib/email/send';
 import { env } from '@/lib/env';
 
@@ -41,9 +38,10 @@ function clientIp(req: Request): string {
 function signInEmailHtml(url: string): string {
   return `
   <div style="font-family:system-ui,sans-serif;max-width:480px;color:#111">
-    <h2 style="margin:0 0 8px">Sign in to Sophy</h2>
-    <p style="font-size:14px;margin:0 0 16px">Click the button below to sign in. This link works once and expires in 15 minutes.</p>
-    <p><a href="${url}" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:10px 16px;border-radius:8px;font-size:14px">Sign in</a></p>
+    <h2 style="margin:0 0 8px">Continue to Sophy</h2>
+    <p style="font-size:14px;margin:0 0 8px">Click the button below to sign in or create your account. This link works once and expires in 15 minutes.</p>
+    <p style="font-size:13px;margin:0 0 16px;color:#555">If you are new to Sophy, verification creates a renameable My Project and makes you its Project Admin.</p>
+    <p><a href="${url}" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:10px 16px;border-radius:8px;font-size:14px">Continue to Sophy</a></p>
     <p style="font-size:12px;color:#888;margin-top:16px">If you didn't request this, you can ignore this email.</p>
   </div>`;
 }
@@ -80,13 +78,11 @@ export async function POST(req: Request): Promise<Response> {
   after(async () => {
     try {
       if (!emailAllowed || !origin) return;
-      const user = (await findActiveUserByEmail(email)) ?? (await maybeBootstrapAdminForLogin(email));
-      if (!user) return;
-      const raw = await createLoginToken(user.id, user.email);
+      const { raw } = await createAuthenticationToken(email);
       const url = buildVerifyUrl(origin, raw, next);
-      const sent = await sendEmail(user.email, 'Sign in to Sophy', signInEmailHtml(url));
+      const sent = await sendEmail(email, 'Continue to Sophy', signInEmailHtml(url));
       if (!sent && !env.isProd()) {
-        console.info(`[auth] DEV magic link for ${user.email}: ${url}`);
+        console.info(`[auth] DEV magic link for ${email}: ${url}`);
       }
     } catch (err) {
       console.error('[auth] magic-link send failed', err);

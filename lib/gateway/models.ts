@@ -7,7 +7,6 @@
  * we need for the Models screen and the capability filter. Never hardcode model
  * slugs; versions use dots (e.g. "anthropic/claude-sonnet-4.6").
  */
-import { env } from '@/lib/env';
 import type { AvailableModel } from '@/lib/gateway/capabilities';
 
 export type { AvailableModel } from '@/lib/gateway/capabilities';
@@ -33,14 +32,7 @@ function perMillion(rate: string | undefined): number | null {
 }
 
 async function fetchFresh(): Promise<AvailableModel[]> {
-  const headers: Record<string, string> = {};
-  // The list is public, but sending the gateway key when present avoids any
-  // unauthenticated rate limiting. OIDC (request path) also works unauthenticated.
-  const apiKey = env.aiGatewayApiKey();
-  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
-
   const res = await fetch(GATEWAY_MODELS_URL, {
-    headers,
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`gateway models request failed: ${res.status}`);

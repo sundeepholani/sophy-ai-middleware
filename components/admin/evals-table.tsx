@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { TableSearchBox, useTableFilter } from '@/components/admin/table-search';
 import { pct, usd, REC_LABEL, RUN_STATUS_META } from '@/components/admin/eval-visuals';
+import { projectPath } from '@/components/admin/project-path';
 import {
   Table,
   TableBody,
@@ -21,7 +22,15 @@ import {
  *  The status filter (All/Running/…) is applied server-side on the page; this
  *  narrows within the rows it returns. `emptyMessage` distinguishes "no runs at
  *  all" (onboarding copy) from "the status filter has no matches". */
-export function EvalsTable({ runs, emptyMessage }: { runs: EvalRunListRow[]; emptyMessage: string }) {
+export function EvalsTable({
+  projectId,
+  runs,
+  emptyMessage,
+}: {
+  projectId: string;
+  runs: EvalRunListRow[];
+  emptyMessage: string;
+}) {
   const { query, setQuery, filtered } = useTableFilter(runs, (r) =>
     [
       r.keyName ?? r.apiKeyId,
@@ -38,7 +47,7 @@ export function EvalsTable({ runs, emptyMessage }: { runs: EvalRunListRow[]; emp
     <div className="space-y-4">
       <TableSearchBox value={query} onChange={setQuery} placeholder="Search evals…" label="Search evals" />
 
-      <div className="overflow-hidden rounded-lg border bg-card">
+      <div className="overflow-x-auto rounded-lg border bg-card">
         <Table>
           <TableHeader className="bg-muted/50">
             <TableRow>
@@ -115,7 +124,7 @@ export function EvalsTable({ runs, emptyMessage }: { runs: EvalRunListRow[]; emp
                   <TableCell className="text-right tabular-nums">{usd(r.evalCostUsd)}</TableCell>
                   <TableCell className="text-right">
                     <Button
-                      render={<Link href={`/admin/evals/${r.id}`} />}
+                      render={<Link href={projectPath(projectId, `evals/${r.id}`)} />}
                       nativeButton={false}
                       size="sm"
                       variant="ghost"

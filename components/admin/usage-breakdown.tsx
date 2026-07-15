@@ -41,7 +41,7 @@ export function UsageBreakdownCard({
             className="max-w-none"
           />
         )}
-        <div className="overflow-hidden rounded-lg border">
+        <div className="overflow-x-auto rounded-lg border">
           <Table>
             <TableHeader className="bg-muted/50">
               <TableRow>

@@ -18,7 +18,7 @@ import {
 
 /** Cancel button for a running eval on the run-detail page. Cancelling is
  *  destructive (captured samples are purged), so it always confirms first. */
-export function EvalRunCancel({ runId }: { runId: string }) {
+export function EvalRunCancel({ projectId, runId }: { projectId: string; runId: string }) {
   const [open, setOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
   const router = useRouter();
@@ -45,7 +45,7 @@ export function EvalRunCancel({ runId }: { runId: string }) {
                 e.preventDefault();
                 startTransition(async () => {
                   try {
-                    await cancelEvalRun(runId);
+                    await cancelEvalRun({ projectId, runId });
                     toast.success('Eval cancelled');
                     setOpen(false);
                     router.refresh();

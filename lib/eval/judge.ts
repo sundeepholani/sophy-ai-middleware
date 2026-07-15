@@ -11,6 +11,7 @@ import { generateStructured, StructuredAttemptError } from '@/lib/gateway/struct
 import { normalizeUsage, type NormalizedUsage } from '@/lib/usage/record';
 import { evalModel } from '@/lib/eval/model';
 import type { EvalWinner } from '@/db/schema';
+import type { ProjectGatewaySnapshot } from '@/lib/gateway/project-provider';
 
 const JUDGE_TIMEOUT_MS = 60_000;
 
@@ -32,6 +33,7 @@ export class JudgeError extends Error {
     message: string,
     readonly costUsd: number | null,
     readonly usage?: LanguageModelUsage,
+    readonly cause?: unknown,
   ) {
     super(message);
     this.name = 'JudgeError';
@@ -137,6 +139,7 @@ export function buildJudgePrompt(args: {
 }
 
 export async function judge(args: {
+  gateway: ProjectGatewaySnapshot;
   judgeModel: string;
   systemPrompt: string | null;
   messages: ModelMessage[];
@@ -163,7 +166,7 @@ export async function judge(args: {
   try {
     result = await generateStructured(
       {
-        model: evalModel(args.judgeModel),
+        model: evalModel(args.gateway, args.judgeModel),
         system: JUDGE_SYSTEM,
         prompt,
       },
@@ -176,7 +179,12 @@ export async function judge(args: {
     // The retry failed after a completed (billed) strict attempt — surface the
     // known judge spend to the caller instead of losing it with the sample.
     if (e instanceof StructuredAttemptError) {
-      throw new JudgeError(`judge call failed after a billed attempt: ${e.message}`, e.costUsd, e.usage);
+      throw new JudgeError(
+        `judge call failed after a billed attempt: ${e.message}`,
+        e.costUsd,
+        e.usage,
+        e,
+      );
     }
     throw e;
   }

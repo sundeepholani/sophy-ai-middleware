@@ -5,7 +5,7 @@ import { CodeTabs, CodeBlock } from '@/components/marketing/code-tabs';
 export const metadata: Metadata = {
   title: 'Docs — Sophy',
   description:
-    'Sophy documentation for Chat Completions, Responses, embeddings, image generation, tools, files, models, key policy, knowledgebases, evaluations, errors, and limits.',
+    'Sophy documentation for its multi-project console, project-owned Vercel Gateway credentials, Chat Completions, Responses, embeddings, images, tools, files, key policy, knowledgebases, evaluations, errors, and limits.',
 };
 
 const BASE_URL = 'https://sophy.in/v1';
@@ -247,19 +247,13 @@ const ERROR_ROWS: { status: string; type: string; code: string; when: string }[]
     status: '401',
     type: 'authentication_error',
     code: 'invalid_api_key',
-    when: 'The key is malformed, unknown, revoked, or expired.',
+    when: 'The key is malformed, unknown, revoked, expired, or belongs to an inactive project.',
   },
   {
     status: '402',
     type: 'insufficient_quota',
     code: 'quota_exceeded',
     when: 'The key reached its monthly proxy-traffic cost cap.',
-  },
-  {
-    status: '402',
-    type: 'insufficient_quota',
-    code: 'insufficient_quota',
-    when: 'The upstream AI provider account has insufficient quota or credit.',
   },
   {
     status: '403',
@@ -295,7 +289,13 @@ const ERROR_ROWS: { status: string; type: string; code: string; when: string }[]
     status: '502',
     type: 'api_error',
     code: 'upstream_error',
-    when: 'An upstream auth, permission, not-found, unknown, or server failure occurred.',
+    when: 'A transient upstream network or server failure occurred.',
+  },
+  {
+    status: '503',
+    type: 'api_error',
+    code: 'project_gateway_unavailable',
+    when: 'The key is valid, but its project has no usable Vercel AI Gateway credential.',
   },
 ];
 
@@ -410,7 +410,8 @@ export default function DocsPage() {
             <P>
               Sophy is an OpenAI-compatible gateway and operator console. Applications send input in
               familiar wire formats; Sophy authenticates the key, resolves its centrally managed
-              configuration, calls the bound model, and records usage.
+              configuration, calls the bound model through that key’s project-owned Vercel AI
+              Gateway credential, and records project-attributed usage.
             </P>
             <P>
               Compatibility is intentionally scoped. Chat Completions and Responses cover text,
@@ -473,19 +474,28 @@ export default function DocsPage() {
           <Section id="authentication" title="Authentication">
             <P>
               Send the Sophy key as a Bearer token. Keys look like <Code>mw_live_…</Code> and are
-              issued by an operator in the{' '}
+              issued inside a project in the{' '}
               <Link href="/admin/login" className="text-primary underline-offset-4 hover:underline">
                 Sophy console
               </Link>
-              ; there is no public self-serve signup.
+              . Sign in with any verified email to create a renameable <Code>My Project</Code>, or
+              join an existing project through an Admin invitation.
             </P>
             <CodeBlock label="header" code="Authorization: Bearer mw_live_…" />
             <P>
               Missing Bearer authentication returns <Code>401 missing_api_key</Code>. A malformed,
-              unknown, revoked, or expired key returns <Code>401 invalid_api_key</Code>.
+              unknown, revoked, expired, or inactive-project key returns{' '}
+              <Code>401 invalid_api_key</Code>.
               Keys are checked against the database on every request, so edits and revocation apply
               immediately.
             </P>
+            <Note title="Two credentials, separate jobs">
+              <p>
+                A Sophy API key authenticates your application to Sophy. A Project Admin separately
+                connects a Vercel AI Gateway key that pays for and routes every AI operation in that
+                project. Sophy never returns the stored Gateway secret.
+              </p>
+            </Note>
           </Section>
 
           <Section id="quickstart" title="Quickstart">
@@ -729,7 +739,7 @@ print(resp.output_text)`,
               samples={[
                 {
                   label: 'chat',
-                  code: `uploaded_url = "https://…/uploads/<key>/invoice-….pdf"
+                  code: `uploaded_url = "https://…/uploads/<project>/<key>/invoice-….pdf"
 uploaded_filename = "invoice.pdf"
 
 resp = client.chat.completions.create(
@@ -751,7 +761,7 @@ resp = client.chat.completions.create(
                 },
                 {
                   label: 'responses',
-                  code: `uploaded_url = "https://…/uploads/<key>/photo-….png"
+                  code: `uploaded_url = "https://…/uploads/<project>/<key>/photo-….png"
 
 resp = client.responses.create(
     model="sophy",
@@ -1073,9 +1083,9 @@ with open("out.png", "wb") as f:
             <CodeBlock
               label="201 json"
               code={`{
-  "id": "https://…/uploads/<key>/invoice-….pdf",
-  "url": "https://…/uploads/<key>/invoice-….pdf",
-  "pathname": "uploads/<key>/invoice-….pdf",
+  "id": "https://…/uploads/<project>/<key>/invoice-….pdf",
+  "url": "https://…/uploads/<project>/<key>/invoice-….pdf",
+  "pathname": "uploads/<project>/<key>/invoice-….pdf",
   "filename": "invoice.pdf",
   "bytes": 48213,
   "contentType": "application/pdf"
@@ -1211,15 +1221,18 @@ with open("out.png", "wb") as f:
 
           <Section id="knowledgebases" title="Knowledgebases">
             <P>
-              Operators can create shared knowledgebases from PDF, DOCX, Markdown, plain text, CSV,
-              and JSON documents up to 4 MiB each. Sophy extracts, chunks, and embeds sources in the
-              background, then lets multiple keys attach to the same collection.
+              Project Admins can create project-scoped knowledgebases from PDF, DOCX, Markdown,
+              plain text, CSV, and JSON documents up to 4 MiB each. Sophy extracts, chunks, and
+              embeds sources in the background, then lets keys in that project attach to the same
+              collection.
             </P>
             <P>
               On Chat or Responses requests with usable user text, Sophy embeds the latest user
               text (capped at its first 8,000 characters), retrieves the six closest chunks, and
               adds them to the effective prompt. Image- or file-only turns have no retrieval query.
-              If retrieval times out or fails, the model call continues without grounding.
+              A transient retrieval timeout can continue without grounding. Missing, invalid, or
+              billing-blocked project Gateway credentials fail closed before the model call; they
+              never fall back to Sophy’s deployment credentials or another project.
             </P>
             <P>
               Knowledgebase ingestion and query-embedding spend is tracked separately from client
@@ -1229,8 +1242,9 @@ with open("out.png", "wb") as f:
 
           <Section id="operator-console" title="Operator console">
             <P>
-              The console manages more than API keys. Passwordless admin/editor access and
-              ownership rules keep operators in scope, while changes are written to an audit log.
+              One passwordless identity can belong to multiple projects with an independent Admin
+              or Editor role in each. The project in the URL is the tenant boundary, and every read,
+              mutation, key, knowledgebase, log, evaluation, and audit event stays inside it.
             </P>
             <div className="grid gap-4 sm:grid-cols-2">
               {[
@@ -1239,8 +1253,12 @@ with open("out.png", "wb") as f:
                   body: 'Search and compare the catalog by provider, type, capabilities, context window, and estimated pricing.',
                 },
                 {
-                  title: 'Keys and knowledge',
-                  body: 'Create, edit, rotate, revoke, bulk-update, assign ownership, and attach shared knowledgebases.',
+                  title: 'Projects and Gateway access',
+                  body: 'Switch projects, choose a personal default, invite members, rename the project, and connect or rotate its encrypted Vercel Gateway credential.',
+                },
+                {
+                  title: 'Sophy keys and knowledge',
+                  body: 'Create, edit, rotate, revoke, bulk-update, assign project-member ownership, and attach project knowledgebases.',
                 },
                 {
                   title: 'Usage and logs',
@@ -1324,11 +1342,12 @@ with open("out.png", "wb") as f:
             </div>
             <P>
               Upstream client-input rejections (400/413/422) become{' '}
-              <Code>400 upstream_invalid_request</Code> with a capped actionable message. Upstream
+              <Code>400 upstream_invalid_request</Code> with a safe, capped message. Upstream
               rate limits preserve <Code>429</Code> and forward <Code>Retry-After</Code> when
-              present; insufficient upstream credit becomes <Code>402</Code>. Auth, permission,
-              not-found, unknown, and server failures are intentionally hidden behind{' '}
-              <Code>502 upstream_error</Code>.
+              present. A valid Sophy key whose project credential is missing, disconnected,
+              invalid, billing-blocked, or undecryptable receives{' '}
+              <Code>503 project_gateway_unavailable</Code>; Sophy makes no fallback upstream call.
+              Transient network and server failures are hidden behind <Code>502 upstream_error</Code>.
             </P>
             <Note title="Errors after streaming starts">
               <p>

@@ -1,10 +1,9 @@
 /**
  * Read-side queries for the admin console (server components only).
  *
- * Every query takes a Viewer and is scoped via scopeToOwner(): admins see all
- * data, editors see only their own keys' data. The scope is a correlated
- * subquery (empty-set-correct), and `and()`/`.where()` ignore the undefined an
- * admin produces — so admins pass through unfiltered with no branching.
+ * Every query takes a project Viewer. The project predicate is mandatory;
+ * scopeToOwner() then narrows editors to their own keys while admins see all
+ * data inside that one project. An admin is never an unfiltered tenant query.
  */
 import { and, desc, eq, gte, inArray, isNotNull, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
@@ -15,14 +14,15 @@ import {
   evalRuns,
   evalSamples,
   users,
+  projectMemberships,
   knowledgebases,
   kbDocuments,
   type KeyParams,
   type EvalRunStatus,
   type EvalSampleStatus,
   type EvalWinner,
-  type UserRole,
-  type UserStatus,
+  type ProjectRole,
+  type MembershipStatus,
   type KbDocStatus,
   type UsageStatus,
   type ResponseKind,
@@ -46,7 +46,13 @@ export async function getOverview(viewer: Viewer) {
       shadowCost: sql<string>`coalesce(sum(${usageEvents.costUsd}) filter (where ${usageEvents.source} <> 'proxy'),0)`,
     })
     .from(usageEvents)
-    .where(and(gte(usageEvents.createdAt, since), scopeToOwner(viewer, usageEvents.apiKeyId)));
+    .where(
+      and(
+        eq(usageEvents.projectId, viewer.projectId),
+        gte(usageEvents.createdAt, since),
+        scopeToOwner(viewer, usageEvents.apiKeyId),
+      ),
+    );
   return {
     requests: Number(agg?.requests ?? 0),
     inputTokens: Number(agg?.inputTokens ?? 0),
@@ -97,7 +103,12 @@ export async function listKeys(viewer: Viewer): Promise<KeyRow[]> {
     })
     .from(apiKeys)
     .leftJoin(users, eq(apiKeys.ownerUserId, users.id))
-    .where(viewer.role === 'admin' ? undefined : eq(apiKeys.ownerUserId, viewer.userId))
+    .where(
+      and(
+        eq(apiKeys.projectId, viewer.projectId),
+        viewer.role === 'admin' ? undefined : eq(apiKeys.ownerUserId, viewer.userId),
+      ),
+    )
     .orderBy(desc(apiKeys.createdAt));
   return rows.map((r) => ({ ...r, outputSchema: r.outputSchema ?? null, ownerEmail: r.ownerEmail ?? null }));
 }
@@ -111,7 +122,10 @@ export interface UsageFilters {
 
 function usageWhere(viewer: Viewer, f: UsageFilters) {
   const since = new Date(Date.now() - f.sinceDays * 24 * 60 * 60 * 1000);
-  const conds = [gte(usageEvents.createdAt, since)];
+  const conds = [
+    eq(usageEvents.projectId, viewer.projectId),
+    gte(usageEvents.createdAt, since),
+  ];
   if (f.keyId) conds.push(eq(usageEvents.apiKeyId, f.keyId));
   if (f.model) conds.push(eq(usageEvents.model, f.model));
   // Owner scope ANDs with any keyId filter, so a crafted ?key=<other> stays empty.
@@ -201,7 +215,13 @@ export async function getUsageStacked(
             ...agg,
           })
           .from(usageEvents)
-          .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
+          .leftJoin(
+            apiKeys,
+            and(
+              eq(usageEvents.projectId, apiKeys.projectId),
+              eq(usageEvents.apiKeyId, apiKeys.id),
+            ),
+          )
           .where(usageWhere(viewer, f))
           .groupBy(dayTrunc, usageEvents.apiKeyId, apiKeys.name)
           .orderBy(dayTrunc);
@@ -252,7 +272,13 @@ export async function getUsageByKey(viewer: Viewer, f: UsageFilters): Promise<Us
       cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
     })
     .from(usageEvents)
-    .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
+    .leftJoin(
+      apiKeys,
+      and(
+        eq(usageEvents.projectId, apiKeys.projectId),
+        eq(usageEvents.apiKeyId, apiKeys.id),
+      ),
+    )
     .where(usageWhere(viewer, f))
     .groupBy(usageEvents.apiKeyId, apiKeys.name)
     // Cost-first since cost carries eval/kb spend; tokens break ties.
@@ -341,11 +367,23 @@ export async function listUsedModels(viewer: Viewer): Promise<string[]> {
     getDb()
       .selectDistinct({ model: usageEvents.model })
       .from(usageEvents)
-      .where(and(gte(usageEvents.createdAt, since), scopeToOwner(viewer, usageEvents.apiKeyId))),
+      .where(
+        and(
+          eq(usageEvents.projectId, viewer.projectId),
+          gte(usageEvents.createdAt, since),
+          scopeToOwner(viewer, usageEvents.apiKeyId),
+        ),
+      ),
     getDb()
       .selectDistinct({ challenger: evalRuns.challengerModel, judge: evalRuns.judgeModel })
       .from(evalRuns)
-      .where(and(gte(evalRuns.createdAt, since), scopeToOwner(viewer, evalRuns.apiKeyId))),
+      .where(
+        and(
+          eq(evalRuns.projectId, viewer.projectId),
+          gte(evalRuns.createdAt, since),
+          scopeToOwner(viewer, evalRuns.apiKeyId),
+        ),
+      ),
   ]);
   const models = new Set<string>();
   for (const r of proxyRows) if (r.model) models.add(r.model);
@@ -410,8 +448,20 @@ export async function getLogDetail(
       errorMessage: usageEvents.errorMessage,
     })
     .from(usageEvents)
-    .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
-    .where(and(eq(usageEvents.id, id), scopeToOwner(viewer, usageEvents.apiKeyId)))
+    .leftJoin(
+      apiKeys,
+      and(
+        eq(usageEvents.projectId, apiKeys.projectId),
+        eq(usageEvents.apiKeyId, apiKeys.id),
+      ),
+    )
+    .where(
+      and(
+        eq(usageEvents.projectId, viewer.projectId),
+        eq(usageEvents.id, id),
+        scopeToOwner(viewer, usageEvents.apiKeyId),
+      ),
+    )
     .limit(1);
   if (event) {
     const [content] = await db
@@ -422,7 +472,12 @@ export async function getLogDetail(
         response: requestLogs.response,
       })
       .from(requestLogs)
-      .where(eq(requestLogs.id, id))
+      .where(
+        and(
+          eq(requestLogs.projectId, viewer.projectId),
+          eq(requestLogs.id, id),
+        ),
+      )
       .limit(1);
     return {
       event: { ...event, source: logSourceOf(event.rowSource), championModel: null, evalRunId: null },
@@ -454,12 +509,25 @@ export async function getLogDetail(
       structured: evalSamples.structured,
     })
     .from(evalSamples)
-    .innerJoin(evalRuns, eq(evalSamples.runId, evalRuns.id))
-    .leftJoin(apiKeys, eq(evalRuns.apiKeyId, apiKeys.id))
+    .innerJoin(
+      evalRuns,
+      and(
+        eq(evalSamples.projectId, evalRuns.projectId),
+        eq(evalSamples.runId, evalRuns.id),
+      ),
+    )
+    .leftJoin(
+      apiKeys,
+      and(
+        eq(evalRuns.projectId, apiKeys.projectId),
+        eq(evalRuns.apiKeyId, apiKeys.id),
+      ),
+    )
     // Same gate as the list: only surface samples whose challenger was attempted
     // ('pending' = not yet run → 404 rather than a misleading 'error' detail).
     .where(
       and(
+        eq(evalSamples.projectId, viewer.projectId),
         eq(evalSamples.id, id),
         inArray(evalSamples.status, ['judged', 'failed']),
         scopeToOwner(viewer, evalRuns.apiKeyId),
@@ -577,8 +645,20 @@ export async function getRecentLogs(
         responseKind: usageEvents.responseKind,
       })
       .from(usageEvents)
-      .leftJoin(apiKeys, eq(usageEvents.apiKeyId, apiKeys.id))
-      .where(and(sourceCond, scopeToOwner(viewer, usageEvents.apiKeyId)))
+      .leftJoin(
+        apiKeys,
+        and(
+          eq(usageEvents.projectId, apiKeys.projectId),
+          eq(usageEvents.apiKeyId, apiKeys.id),
+        ),
+      )
+      .where(
+        and(
+          eq(usageEvents.projectId, viewer.projectId),
+          sourceCond,
+          scopeToOwner(viewer, usageEvents.apiKeyId),
+        ),
+      )
       .orderBy(desc(usageEvents.createdAt))
       .limit(limit);
     for (const r of fromUsage) rows.push({ ...r, source: logSourceOf(r.rowSource) });
@@ -599,11 +679,27 @@ export async function getRecentLogs(
         structured: evalSamples.structured,
       })
       .from(evalSamples)
-      .innerJoin(evalRuns, eq(evalSamples.runId, evalRuns.id))
-      .leftJoin(apiKeys, eq(evalRuns.apiKeyId, apiKeys.id))
+      .innerJoin(
+        evalRuns,
+        and(
+          eq(evalSamples.projectId, evalRuns.projectId),
+          eq(evalSamples.runId, evalRuns.id),
+        ),
+      )
+      .leftJoin(
+        apiKeys,
+        and(
+          eq(evalRuns.projectId, apiKeys.projectId),
+          eq(evalRuns.apiKeyId, apiKeys.id),
+        ),
+      )
       // 'judged'/'failed' = the challenger was attempted (pending = not yet run).
       .where(
-        and(inArray(evalSamples.status, ['judged', 'failed']), scopeToOwner(viewer, evalRuns.apiKeyId)),
+        and(
+          eq(evalSamples.projectId, viewer.projectId),
+          inArray(evalSamples.status, ['judged', 'failed']),
+          scopeToOwner(viewer, evalRuns.apiKeyId),
+        ),
       )
       .orderBy(desc(CHALLENGER_TS))
       .limit(limit);
@@ -633,25 +729,34 @@ export async function getRecentLogs(
 export interface AdminUserRow {
   id: string;
   email: string;
-  role: UserRole;
-  status: UserStatus;
+  role: ProjectRole;
+  status: MembershipStatus;
   createdAt: Date;
   keyCount: number;
 }
 
-export async function listUsers(): Promise<AdminUserRow[]> {
+export async function listUsers(viewer: Viewer): Promise<AdminUserRow[]> {
+  if (viewer.role !== 'admin') throw new Error('forbidden');
   const rows = await getDb()
     .select({
       id: users.id,
       email: users.email,
-      role: users.role,
-      status: users.status,
+      role: projectMemberships.role,
+      status: projectMemberships.status,
       createdAt: users.createdAt,
       keyCount: sql<string>`count(${apiKeys.id})`,
     })
-    .from(users)
-    .leftJoin(apiKeys, eq(apiKeys.ownerUserId, users.id))
-    .groupBy(users.id)
+    .from(projectMemberships)
+    .innerJoin(users, eq(projectMemberships.userId, users.id))
+    .leftJoin(
+      apiKeys,
+      and(
+        eq(apiKeys.projectId, projectMemberships.projectId),
+        eq(apiKeys.ownerUserId, projectMemberships.userId),
+      ),
+    )
+    .where(eq(projectMemberships.projectId, viewer.projectId))
+    .groupBy(users.id, projectMemberships.role, projectMemberships.status)
     .orderBy(users.createdAt);
   return rows.map((r) => ({ ...r, keyCount: Number(r.keyCount) }));
 }
@@ -694,7 +799,12 @@ export async function getEvalStatuses(viewer: Viewer): Promise<Record<string, Ev
   const rows = await getDb()
     .select({ apiKeyId: evalRuns.apiKeyId, status: evalRuns.status })
     .from(evalRuns)
-    .where(scopeToOwner(viewer, evalRuns.apiKeyId))
+    .where(
+      and(
+        eq(evalRuns.projectId, viewer.projectId),
+        scopeToOwner(viewer, evalRuns.apiKeyId),
+      ),
+    )
     .orderBy(desc(evalRuns.createdAt));
   const out: Record<string, EvalRunStatus> = {};
   for (const r of rows) if (!(r.apiKeyId in out)) out[r.apiKeyId] = r.status; // first row = latest run
@@ -713,6 +823,7 @@ export async function getKeyEvals(viewer: Viewer, onlyKeyId?: string): Promise<R
     .from(evalRuns)
     .where(
       and(
+        eq(evalRuns.projectId, viewer.projectId),
         scopeToOwner(viewer, evalRuns.apiKeyId),
         onlyKeyId ? eq(evalRuns.apiKeyId, onlyKeyId) : undefined,
       ),
@@ -732,7 +843,13 @@ export async function getKeyEvals(viewer: Viewer, onlyKeyId?: string): Promise<R
           orderSwapped: evalSamples.orderSwapped,
         })
         .from(evalSamples)
-        .where(and(inArray(evalSamples.runId, ids), eq(evalSamples.status, 'judged')))
+        .where(
+          and(
+            eq(evalSamples.projectId, viewer.projectId),
+            inArray(evalSamples.runId, ids),
+            eq(evalSamples.status, 'judged'),
+          ),
+        )
         .orderBy(desc(evalSamples.judgedAt))
     : [];
   const judgmentsByRun = new Map<string, EvalJudgment[]>();
@@ -760,7 +877,13 @@ export async function getKeyEvals(viewer: Viewer, onlyKeyId?: string): Promise<R
         // Restrict to judged samples so both averages share one denominator:
         // champion cost is written at capture (pending), challenger cost only at
         // judge time — averaging over all samples would compare different populations.
-        .where(and(inArray(evalSamples.runId, ids), eq(evalSamples.status, 'judged')))
+        .where(
+          and(
+            eq(evalSamples.projectId, viewer.projectId),
+            inArray(evalSamples.runId, ids),
+            eq(evalSamples.status, 'judged'),
+          ),
+        )
         .groupBy(evalSamples.runId)
     : [];
   const costByRun = new Map<string, { champ: number | null; chall: number | null }>();
@@ -845,8 +968,19 @@ export async function listEvalRuns(viewer: Viewer): Promise<EvalRunListRow[]> {
       completedAt: evalRuns.completedAt,
     })
     .from(evalRuns)
-    .leftJoin(apiKeys, eq(evalRuns.apiKeyId, apiKeys.id))
-    .where(scopeToOwner(viewer, evalRuns.apiKeyId))
+    .leftJoin(
+      apiKeys,
+      and(
+        eq(evalRuns.projectId, apiKeys.projectId),
+        eq(evalRuns.apiKeyId, apiKeys.id),
+      ),
+    )
+    .where(
+      and(
+        eq(evalRuns.projectId, viewer.projectId),
+        scopeToOwner(viewer, evalRuns.apiKeyId),
+      ),
+    )
     .orderBy(desc(evalRuns.createdAt));
 
   const ids = runs.map((r) => r.id);
@@ -859,7 +993,12 @@ export async function listEvalRuns(viewer: Viewer): Promise<EvalRunListRow[]> {
           spend: evalSpendExpr(),
         })
         .from(evalSamples)
-        .where(inArray(evalSamples.runId, ids))
+        .where(
+          and(
+            eq(evalSamples.projectId, viewer.projectId),
+            inArray(evalSamples.runId, ids),
+          ),
+        )
         .groupBy(evalSamples.runId)
     : [];
   const tallyByRun = new Map(tallies.map((t) => [t.runId, t]));
@@ -973,8 +1112,20 @@ export async function getEvalRunDetail(viewer: Viewer, id: string): Promise<Eval
       emailedAt: evalRuns.emailedAt,
     })
     .from(evalRuns)
-    .leftJoin(apiKeys, eq(evalRuns.apiKeyId, apiKeys.id))
-    .where(and(eq(evalRuns.id, id), scopeToOwner(viewer, evalRuns.apiKeyId)))
+    .leftJoin(
+      apiKeys,
+      and(
+        eq(evalRuns.projectId, apiKeys.projectId),
+        eq(evalRuns.apiKeyId, apiKeys.id),
+      ),
+    )
+    .where(
+      and(
+        eq(evalRuns.projectId, viewer.projectId),
+        eq(evalRuns.id, id),
+        scopeToOwner(viewer, evalRuns.apiKeyId),
+      ),
+    )
     .limit(1);
   if (!run) return null;
 
@@ -996,7 +1147,12 @@ export async function getEvalRunDetail(viewer: Viewer, id: string): Promise<Eval
       judgedAt: evalSamples.judgedAt,
     })
     .from(evalSamples)
-    .where(eq(evalSamples.runId, id))
+    .where(
+      and(
+        eq(evalSamples.projectId, viewer.projectId),
+        eq(evalSamples.runId, id),
+      ),
+    )
     .orderBy(desc(CHALLENGER_TS));
 
   const samples: EvalSampleListRow[] = sampleRows.map((s) => ({
@@ -1058,7 +1214,8 @@ export interface KnowledgebaseRow {
  * scoping. Counts come from separate grouped queries (not joins) to avoid the
  * cartesian inflation two left-joins on the same id would cause.
  */
-export async function listKnowledgebases(): Promise<KnowledgebaseRow[]> {
+export async function listKnowledgebases(viewer: Viewer): Promise<KnowledgebaseRow[]> {
+  if (viewer.role !== 'admin') throw new Error('forbidden');
   const db = getDb();
   const kbs = await db
     .select({
@@ -1069,17 +1226,24 @@ export async function listKnowledgebases(): Promise<KnowledgebaseRow[]> {
       createdAt: knowledgebases.createdAt,
     })
     .from(knowledgebases)
+    .where(eq(knowledgebases.projectId, viewer.projectId))
     .orderBy(desc(knowledgebases.createdAt));
   if (kbs.length === 0) return [];
 
   const docCounts = await db
     .select({ kbId: kbDocuments.kbId, n: sql<string>`count(*)` })
     .from(kbDocuments)
+    .where(eq(kbDocuments.projectId, viewer.projectId))
     .groupBy(kbDocuments.kbId);
   const keyCounts = await db
     .select({ kbId: apiKeys.knowledgebaseId, n: sql<string>`count(*)` })
     .from(apiKeys)
-    .where(isNotNull(apiKeys.knowledgebaseId))
+    .where(
+      and(
+        eq(apiKeys.projectId, viewer.projectId),
+        isNotNull(apiKeys.knowledgebaseId),
+      ),
+    )
     .groupBy(apiKeys.knowledgebaseId);
 
   const docMap = new Map(docCounts.map((r) => [r.kbId, Number(r.n)]));
@@ -1092,10 +1256,13 @@ export async function listKnowledgebases(): Promise<KnowledgebaseRow[]> {
 }
 
 /** Lightweight {id,name} list for the key-form knowledgebase picker. */
-export async function listKnowledgebaseOptions(): Promise<{ id: string; name: string }[]> {
+export async function listKnowledgebaseOptions(
+  viewer: Viewer,
+): Promise<{ id: string; name: string }[]> {
   return getDb()
     .select({ id: knowledgebases.id, name: knowledgebases.name })
     .from(knowledgebases)
+    .where(eq(knowledgebases.projectId, viewer.projectId))
     .orderBy(knowledgebases.name);
 }
 
@@ -1112,7 +1279,11 @@ export interface KbDocumentRow {
 }
 
 /** Documents in a knowledgebase, newest first. */
-export async function listKbDocuments(kbId: string): Promise<KbDocumentRow[]> {
+export async function listKbDocuments(
+  viewer: Viewer,
+  kbId: string,
+): Promise<KbDocumentRow[]> {
+  if (viewer.role !== 'admin') throw new Error('forbidden');
   return getDb()
     .select({
       id: kbDocuments.id,
@@ -1126,6 +1297,11 @@ export async function listKbDocuments(kbId: string): Promise<KbDocumentRow[]> {
       ingestedAt: kbDocuments.ingestedAt,
     })
     .from(kbDocuments)
-    .where(eq(kbDocuments.kbId, kbId))
+    .where(
+      and(
+        eq(kbDocuments.projectId, viewer.projectId),
+        eq(kbDocuments.kbId, kbId),
+      ),
+    )
     .orderBy(desc(kbDocuments.createdAt));
 }

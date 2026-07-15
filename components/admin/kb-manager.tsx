@@ -67,7 +67,13 @@ function fmtBytes(n: number | null): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function KbManager({ knowledgebases }: { knowledgebases: KnowledgebaseRow[] }) {
+export function KbManager({
+  projectId,
+  knowledgebases,
+}: {
+  projectId: string;
+  knowledgebases: KnowledgebaseRow[];
+}) {
   const [createOpen, setCreateOpen] = useState(false);
   const [managing, setManaging] = useState<KnowledgebaseRow | null>(null);
   const { query, setQuery, filtered } = useTableFilter(knowledgebases, (kb) =>
@@ -96,7 +102,7 @@ export function KbManager({ knowledgebases }: { knowledgebases: KnowledgebaseRow
                 in the background.
               </DialogDescription>
             </DialogHeader>
-            <CreateForm onDone={() => setCreateOpen(false)} />
+            <CreateForm projectId={projectId} onDone={() => setCreateOpen(false)} />
           </DialogContent>
         </Dialog>
       </div>
@@ -108,7 +114,7 @@ export function KbManager({ knowledgebases }: { knowledgebases: KnowledgebaseRow
         label="Search knowledgebases"
       />
 
-      <div className="overflow-hidden rounded-lg border bg-card">
+      <div className="overflow-x-auto rounded-lg border bg-card">
         <Table>
           <TableHeader className="bg-muted/50">
             <TableRow>
@@ -135,20 +141,30 @@ export function KbManager({ knowledgebases }: { knowledgebases: KnowledgebaseRow
               </TableRow>
             )}
             {filtered.map((kb) => (
-              <KbRowItem key={kb.id} kb={kb} onManage={() => setManaging(kb)} />
+              <KbRowItem
+                key={kb.id}
+                projectId={projectId}
+                kb={kb}
+                onManage={() => setManaging(kb)}
+              />
             ))}
           </TableBody>
         </Table>
       </div>
 
       {managing && (
-        <DocumentsDialog key={managing.id} kb={managing} onClose={() => setManaging(null)} />
+        <DocumentsDialog
+          key={managing.id}
+          projectId={projectId}
+          kb={managing}
+          onClose={() => setManaging(null)}
+        />
       )}
     </div>
   );
 }
 
-function CreateForm({ onDone }: { onDone: () => void }) {
+function CreateForm({ projectId, onDone }: { projectId: string; onDone: () => void }) {
   const [isPending, startTransition] = useTransition();
   const [name, setName] = useState('');
 
@@ -156,7 +172,7 @@ function CreateForm({ onDone }: { onDone: () => void }) {
     if (!name.trim()) return toast.error('Name is required');
     startTransition(async () => {
       try {
-        await createKnowledgebase({ name: name.trim() });
+        await createKnowledgebase({ projectId, name: name.trim() });
         toast.success('Knowledgebase created');
         onDone();
       } catch (e) {
@@ -188,14 +204,22 @@ function CreateForm({ onDone }: { onDone: () => void }) {
   );
 }
 
-function KbRowItem({ kb, onManage }: { kb: KnowledgebaseRow; onManage: () => void }) {
+function KbRowItem({
+  projectId,
+  kb,
+  onManage,
+}: {
+  projectId: string;
+  kb: KnowledgebaseRow;
+  onManage: () => void;
+}) {
   const [isPending, startTransition] = useTransition();
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   function remove() {
     startTransition(async () => {
       try {
-        await deleteKnowledgebase({ id: kb.id });
+        await deleteKnowledgebase({ projectId, id: kb.id });
         toast.success('Knowledgebase deleted');
         setConfirmOpen(false);
       } catch (e) {
@@ -259,7 +283,15 @@ function KbRowItem({ kb, onManage }: { kb: KnowledgebaseRow; onManage: () => voi
   );
 }
 
-function DocumentsDialog({ kb, onClose }: { kb: KnowledgebaseRow; onClose: () => void }) {
+function DocumentsDialog({
+  projectId,
+  kb,
+  onClose,
+}: {
+  projectId: string;
+  kb: KnowledgebaseRow;
+  onClose: () => void;
+}) {
   const [docs, setDocs] = useState<KbDocumentRow[] | null>(null);
   const [refreshing, startRefresh] = useTransition();
   const [uploading, setUploading] = useState(false);
@@ -271,7 +303,7 @@ function DocumentsDialog({ kb, onClose }: { kb: KnowledgebaseRow; onClose: () =>
   function load() {
     startRefresh(async () => {
       try {
-        setDocs(await listKbDocumentsAction(kb.id));
+        setDocs(await listKbDocumentsAction({ projectId, kbId: kb.id }));
       } catch (e) {
         toast.error(errMsg(e));
       }
@@ -289,6 +321,7 @@ function DocumentsDialog({ kb, onClose }: { kb: KnowledgebaseRow; onClose: () =>
     if (!file) return toast.error('Choose a file first');
     setUploading(true);
     const fd = new FormData();
+    fd.set('projectId', projectId);
     fd.set('kbId', kb.id);
     fd.set('file', file);
     (async () => {
@@ -362,7 +395,7 @@ function DocumentsDialog({ kb, onClose }: { kb: KnowledgebaseRow; onClose: () =>
           />
         )}
 
-        <div className="overflow-hidden rounded-lg border">
+        <div className="overflow-x-auto rounded-lg border">
           <Table>
             <TableHeader className="bg-muted/50">
               <TableRow>
@@ -389,7 +422,7 @@ function DocumentsDialog({ kb, onClose }: { kb: KnowledgebaseRow; onClose: () =>
                 </TableRow>
               )}
               {filtered.map((d) => (
-                <DocRowItem key={d.id} doc={d} onChanged={load} />
+                <DocRowItem key={d.id} projectId={projectId} doc={d} onChanged={load} />
               ))}
             </TableBody>
           </Table>
@@ -399,7 +432,15 @@ function DocumentsDialog({ kb, onClose }: { kb: KnowledgebaseRow; onClose: () =>
   );
 }
 
-function DocRowItem({ doc, onChanged }: { doc: KbDocumentRow; onChanged: () => void }) {
+function DocRowItem({
+  projectId,
+  doc,
+  onChanged,
+}: {
+  projectId: string;
+  doc: KbDocumentRow;
+  onChanged: () => void;
+}) {
   const [isPending, startTransition] = useTransition();
 
   function run(fn: () => Promise<void>, ok: string) {
@@ -437,7 +478,12 @@ function DocRowItem({ doc, onChanged }: { doc: KbDocumentRow; onChanged: () => v
             size="sm"
             variant="ghost"
             disabled={isPending}
-            onClick={() => run(() => retryKbDocument({ id: doc.id }), 'Re-queued for ingestion')}
+            onClick={() =>
+              run(
+                () => retryKbDocument({ projectId, id: doc.id }),
+                'Re-queued for ingestion',
+              )
+            }
           >
             <RefreshCw className="h-3.5 w-3.5" />
             Retry
@@ -450,7 +496,9 @@ function DocRowItem({ doc, onChanged }: { doc: KbDocumentRow; onChanged: () => v
           title="Delete"
           disabled={isPending}
           className="text-destructive hover:text-destructive"
-          onClick={() => run(() => deleteKbDocument({ id: doc.id }), 'Document deleted')}
+          onClick={() =>
+            run(() => deleteKbDocument({ projectId, id: doc.id }), 'Document deleted')
+          }
         >
           <Trash2 className="h-3.5 w-3.5" />
         </Button>

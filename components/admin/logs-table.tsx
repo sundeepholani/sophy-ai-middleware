@@ -6,6 +6,7 @@ import { LocalTime } from '@/components/admin/local-time';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { TableSearchBox, useTableFilter } from '@/components/admin/table-search';
+import { projectPath } from '@/components/admin/project-path';
 import {
   Table,
   TableBody,
@@ -18,7 +19,7 @@ import {
 /** Request-logs table with a free-text search over the loaded rows. The source
  *  filter (All/Proxy/Challenger) is applied server-side on the page; this narrows
  *  within the rows it returns. */
-export function LogsTable({ logs }: { logs: LogListRow[] }) {
+export function LogsTable({ projectId, logs }: { projectId: string; logs: LogListRow[] }) {
   const { query, setQuery, filtered } = useTableFilter(logs, (l) =>
     [
       l.keyName ?? l.apiKeyId,
@@ -37,7 +38,7 @@ export function LogsTable({ logs }: { logs: LogListRow[] }) {
     <div className="space-y-4">
       <TableSearchBox value={query} onChange={setQuery} placeholder="Search logs…" label="Search logs" />
 
-      <div className="overflow-hidden rounded-lg border bg-card">
+      <div className="overflow-x-auto rounded-lg border bg-card">
         <Table>
           <TableHeader className="bg-muted/50">
             <TableRow>
@@ -99,7 +100,7 @@ export function LogsTable({ logs }: { logs: LogListRow[] }) {
                 </TableCell>
                 <TableCell className="text-right">
                   <Button
-                    render={<Link href={`/admin/logs/${l.id}`} />}
+                    render={<Link href={projectPath(projectId, `logs/${l.id}`)} />}
                     nativeButton={false}
                     size="sm"
                     variant="ghost"

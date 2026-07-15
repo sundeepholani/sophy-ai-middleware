@@ -11,7 +11,8 @@ import { and, eq } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import {
   apiKeys,
-  appSettings,
+  projectMemberships,
+  projectSettings,
   auditLog,
   evalRuns,
   evalSamples,
@@ -20,11 +21,10 @@ import {
   type KeyParams,
 } from '@/db/schema';
 import {
-  assertAdmin,
-  assertUser,
+  assertProjectAdmin,
+  requireProjectViewer,
   assertCanManageKey,
   assertCanManageRun,
-  requireViewer,
 } from '@/lib/auth/viewer';
 import { issueKey, generateKey } from '@/lib/auth/api-key';
 import { recordedEvalSpendUsd } from '@/lib/eval/spend';
@@ -32,19 +32,27 @@ import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
 import { schemaCompileError } from '@/lib/gateway/openai-map';
 import { getSettings } from '@/lib/admin/settings';
 import { getKeyEvals, type KeyEval } from '@/lib/admin/queries';
+import { getProjectGatewaySummary } from '@/lib/projects/repository';
 
 /** The drizzle client, or a transaction executor — both expose the same query API. */
 type Db = ReturnType<typeof getDb>;
 type DbTx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 async function audit(
+  projectId: string,
   actor: string,
   action: string,
   target: string,
   after: unknown,
   db: Db | DbTx = getDb(),
 ): Promise<void> {
-  await db.insert(auditLog).values({ actor, action, target, after: after as object });
+  await db.insert(auditLog).values({
+    projectId,
+    actor,
+    action,
+    target,
+    after: after as object,
+  });
 }
 
 /**
@@ -70,9 +78,24 @@ function paramsDiff(
 }
 
 /** Validate an admin-chosen owner: '' / null → unassigned; otherwise must be a real user. */
-async function resolveOwner(ownerUserId: string | null | undefined): Promise<string | null> {
+async function resolveOwner(
+  projectId: string,
+  ownerUserId: string | null | undefined,
+): Promise<string | null> {
   if (!ownerUserId) return null;
-  const [u] = await getDb().select({ id: users.id }).from(users).where(eq(users.id, ownerUserId)).limit(1);
+  const [u] = await getDb()
+    .select({ id: users.id })
+    .from(users)
+    .innerJoin(
+      projectMemberships,
+      and(
+        eq(projectMemberships.userId, users.id),
+        eq(projectMemberships.projectId, projectId),
+        eq(projectMemberships.status, 'active'),
+      ),
+    )
+    .where(and(eq(users.id, ownerUserId), eq(users.status, 'active')))
+    .limit(1);
   if (!u) throw new Error('Owner user not found');
   return u.id;
 }
@@ -84,12 +107,15 @@ async function resolveOwner(ownerUserId: string | null | undefined): Promise<str
  * per-owner KB scoping (the schema carries ownerUserId for a future tightening).
  * If KBs ever become team/tenant-private, gate this to admin or scope by owner.
  */
-async function resolveKnowledgebase(id: string | null | undefined): Promise<string | null> {
+async function resolveKnowledgebase(
+  projectId: string,
+  id: string | null | undefined,
+): Promise<string | null> {
   if (!id) return null;
   const [kb] = await getDb()
     .select({ id: knowledgebases.id })
     .from(knowledgebases)
-    .where(eq(knowledgebases.id, id))
+    .where(and(eq(knowledgebases.projectId, projectId), eq(knowledgebases.id, id)))
     .limit(1);
   if (!kb) throw new Error('Knowledgebase not found');
   return kb.id;
@@ -98,12 +124,13 @@ async function resolveKnowledgebase(id: string | null | undefined): Promise<stri
 // ---- Global settings (admin-only) -------------------------------------------
 
 export interface SettingsInput {
+  projectId: string;
   judgeModel: string;
   notifyEmail: string | null;
 }
 
 export async function updateSettings(input: SettingsInput): Promise<void> {
-  const viewer = await assertAdmin();
+  const viewer = await assertProjectAdmin(input.projectId);
   const judgeModel = input.judgeModel.trim();
   if (!judgeModel) throw new Error('Judge model is required');
   const notifyEmail = input.notifyEmail?.trim() || null;
@@ -111,14 +138,20 @@ export async function updateSettings(input: SettingsInput): Promise<void> {
     throw new Error('Notification email is not a valid address');
   }
   await getDb()
-    .insert(appSettings)
-    .values({ id: 'global', judgeModel, notifyEmail, updatedAt: new Date() })
+    .insert(projectSettings)
+    .values({ projectId: input.projectId, judgeModel, notifyEmail, updatedAt: new Date() })
     .onConflictDoUpdate({
-      target: appSettings.id,
+      target: projectSettings.projectId,
       set: { judgeModel, notifyEmail, updatedAt: new Date() },
     });
-  await audit(viewer.email, 'settings.update', 'global', { judgeModel, notifyEmail });
-  revalidatePath('/admin/settings');
+  await audit(
+    input.projectId,
+    viewer.email,
+    'settings.update',
+    input.projectId,
+    { judgeModel, notifyEmail },
+  );
+  revalidatePath(`/admin/p/${input.projectId}/settings`);
 }
 
 export interface KeyFormInput {
@@ -199,12 +232,18 @@ function normalizedSchemaOrThrow(
   return normalized;
 }
 
-export async function createKey(input: KeyFormInput): Promise<{ fullKey: string }> {
-  const viewer = await assertUser();
+export async function createKey(
+  input: KeyFormInput & { projectId: string },
+): Promise<{ fullKey: string }> {
+  const viewer = await requireProjectViewer(input.projectId);
+  const gateway = await getProjectGatewaySummary(input.projectId);
+  if (!gateway.isReady) throw new Error('gateway_not_ready');
   validateKeyInput(input);
   // Editors always own what they create; admins choose (defaults to unassigned).
   const ownerUserId =
-    viewer.role === 'editor' ? viewer.userId : await resolveOwner(input.ownerUserId ?? null);
+    viewer.role === 'editor'
+      ? viewer.userId
+      : await resolveOwner(input.projectId, input.ownerUserId ?? null);
   // Budget is admin-controlled; editors always get the default. New keys default to $100
   // when no budget is supplied, but an admin who explicitly sends null means "unlimited"
   // (matching updateKey) — so distinguish "absent" (undefined) from "explicitly null".
@@ -212,26 +251,37 @@ export async function createKey(input: KeyFormInput): Promise<{ fullKey: string 
     viewer.role === 'editor' || input.monthlyCostCapUsd === undefined
       ? DEFAULT_COST_CAP_USD
       : input.monthlyCostCapUsd;
-  const knowledgebaseId = await resolveKnowledgebase(input.knowledgebaseId ?? null);
+  const knowledgebaseId = await resolveKnowledgebase(
+    input.projectId,
+    input.knowledgebaseId ?? null,
+  );
   const outputSchema = normalizedSchemaOrThrow(input.outputSchema);
-  const { fullKey, id } = await issueKey({
-    ...input,
-    outputSchema,
-    ownerUserId,
-    monthlyCostCapUsd,
-    knowledgebaseId,
+  const issued = await getDb().transaction(async (tx) => {
+    const result = await issueKey({
+      ...input,
+      outputSchema,
+      ownerUserId,
+      monthlyCostCapUsd,
+      knowledgebaseId,
+    }, tx);
+    await audit(
+      input.projectId,
+      viewer.email,
+      'key.create',
+      result.id,
+      {
+        name: input.name,
+        model: input.model,
+        ownerUserId,
+        monthlyCostCapUsd,
+        ...(input.params.allowClientPrompt ? { allowClientPrompt: true } : {}),
+      },
+      tx,
+    );
+    return result;
   });
-  await audit(viewer.email, 'key.create', id, {
-    name: input.name,
-    model: input.model,
-    ownerUserId,
-    monthlyCostCapUsd,
-    // Security-relevant, so its enablement is traceable from creation (updates
-    // record it via the params diff); omitted when off to keep entries compact.
-    ...(input.params.allowClientPrompt ? { allowClientPrompt: true } : {}),
-  });
-  revalidatePath('/admin/keys');
-  return { fullKey };
+  revalidatePath(`/admin/p/${input.projectId}/keys`);
+  return { fullKey: issued.fullKey };
 }
 
 export interface UpdateKeyResult {
@@ -247,21 +297,24 @@ export interface UpdateKeyResult {
 }
 
 export async function updateKey(
-  input: KeyFormInput & { id: string; stopRunningEval?: boolean },
+  input: KeyFormInput & { projectId: string; id: string; stopRunningEval?: boolean },
 ): Promise<UpdateKeyResult> {
-  const { viewer, ownerUserId: currentOwner, model: currentModel } = await assertCanManageKey(input.id);
+  const { viewer, ownerUserId: currentOwner, model: currentModel } =
+    await assertCanManageKey(input.projectId, input.id);
   validateKeyInput(input);
 
   // Only admins may reassign ownership; editors' owner is left untouched.
   let newOwner = currentOwner;
   if (viewer.role === 'admin' && input.ownerUserId !== undefined) {
-    newOwner = await resolveOwner(input.ownerUserId);
+    newOwner = await resolveOwner(input.projectId, input.ownerUserId);
   }
 
   // Knowledgebase: anyone who can manage the key may attach/detach one. Only
   // change it when the field is present (undefined = leave as-is).
   const kbId =
-    input.knowledgebaseId !== undefined ? await resolveKnowledgebase(input.knowledgebaseId) : undefined;
+    input.knowledgebaseId !== undefined
+      ? await resolveKnowledgebase(input.projectId, input.knowledgebaseId)
+      : undefined;
 
   const outputSchema = normalizedSchemaOrThrow(input.outputSchema);
 
@@ -271,7 +324,7 @@ export async function updateKey(
   const [prior] = await getDb()
     .select({ kb: apiKeys.knowledgebaseId, params: apiKeys.params })
     .from(apiKeys)
-    .where(eq(apiKeys.id, input.id))
+    .where(and(eq(apiKeys.projectId, input.projectId), eq(apiKeys.id, input.id)))
     .limit(1);
   const priorKb = prior?.kb ?? null;
 
@@ -286,7 +339,13 @@ export async function updateKey(
     const [running] = await getDb()
       .select({ id: evalRuns.id })
       .from(evalRuns)
-      .where(and(eq(evalRuns.apiKeyId, input.id), eq(evalRuns.status, 'running')))
+      .where(
+        and(
+          eq(evalRuns.projectId, input.projectId),
+          eq(evalRuns.apiKeyId, input.id),
+          eq(evalRuns.status, 'running'),
+        ),
+      )
       .limit(1);
     if (running) return { requiresEvalStop: true, stoppedEval: false };
   }
@@ -313,39 +372,58 @@ export async function updateKey(
     // truthful.
     await getDb().transaction(async (tx) => {
       stoppedEval =
-        (await cancelRunningEvalsForKey(tx, input.id, viewer.email, 'model change')) > 0;
-      await tx.update(apiKeys).set(updateSet).where(eq(apiKeys.id, input.id));
+        (await cancelRunningEvalsForKey(
+          tx,
+          input.projectId,
+          input.id,
+          viewer.email,
+          'model change',
+        )) > 0;
+      await tx
+        .update(apiKeys)
+        .set(updateSet)
+        .where(and(eq(apiKeys.projectId, input.projectId), eq(apiKeys.id, input.id)));
     });
   } else {
-    await getDb().update(apiKeys).set(updateSet).where(eq(apiKeys.id, input.id));
+    await getDb()
+      .update(apiKeys)
+      .set(updateSet)
+      .where(and(eq(apiKeys.projectId, input.projectId), eq(apiKeys.id, input.id)));
   }
   const diff = paramsDiff(prior?.params ?? {}, input.params);
-  await audit(viewer.email, 'key.update', input.id, {
+  await audit(input.projectId, viewer.email, 'key.update', input.id, {
     name: input.name,
     model: input.model,
     ...(diff ? { params: diff } : {}),
   });
   if (newOwner !== currentOwner) {
-    await audit(viewer.email, 'key.reassign', input.id, { from: currentOwner, to: newOwner });
+    await audit(input.projectId, viewer.email, 'key.reassign', input.id, {
+      from: currentOwner,
+      to: newOwner,
+    });
   }
   if (kbId !== undefined && kbId !== priorKb) {
-    await audit(viewer.email, 'key.kb', input.id, { from: priorKb, to: kbId });
+    await audit(input.projectId, viewer.email, 'key.kb', input.id, {
+      from: priorKb,
+      to: kbId,
+    });
   }
-  revalidatePath('/admin/keys');
+  revalidatePath(`/admin/p/${input.projectId}/keys`);
   // A model change may have cancelled a running eval (stoppedEval above).
-  revalidatePath('/admin/evals');
+  revalidatePath(`/admin/p/${input.projectId}/evals`);
   return { requiresEvalStop: false, stoppedEval };
 }
 
-export async function revokeKey(id: string): Promise<void> {
-  const { viewer } = await assertCanManageKey(id);
-  await getDb()
-    .update(apiKeys)
-    .set({ status: 'revoked', revokedAt: new Date() })
-    .where(eq(apiKeys.id, id));
-  // Revocation is instant: verifyKey() reads `status` fresh on every request.
-  await audit(viewer.email, 'key.revoke', id, null);
-  revalidatePath('/admin/keys');
+export async function revokeKey(input: { projectId: string; id: string }): Promise<void> {
+  const { viewer } = await assertCanManageKey(input.projectId, input.id);
+  await getDb().transaction(async (tx) => {
+    await tx
+      .update(apiKeys)
+      .set({ status: 'revoked', revokedAt: new Date() })
+      .where(and(eq(apiKeys.projectId, input.projectId), eq(apiKeys.id, input.id)));
+    await audit(input.projectId, viewer.email, 'key.revoke', input.id, null, tx);
+  });
+  revalidatePath(`/admin/p/${input.projectId}/keys`);
 }
 
 /**
@@ -356,8 +434,11 @@ export async function revokeKey(id: string): Promise<void> {
  * grace window). The new full key is returned once, like issuance. Only active
  * keys can be rotated (rotating a revoked key would silently un-revoke it).
  */
-export async function rotateKey(id: string): Promise<{ fullKey: string }> {
-  const { viewer, status } = await assertCanManageKey(id);
+export async function rotateKey(input: {
+  projectId: string;
+  id: string;
+}): Promise<{ fullKey: string }> {
+  const { viewer, status } = await assertCanManageKey(input.projectId, input.id);
   if (status !== 'active') throw new Error('Only an active key can be rotated');
 
   // Retry on the (astronomically rare) key_prefix unique-constraint collision so
@@ -366,12 +447,30 @@ export async function rotateKey(id: string): Promise<{ fullKey: string }> {
   for (let attempt = 0; attempt < 3 && !issued; attempt++) {
     const gen = generateKey();
     try {
-      const res = await getDb()
-        .update(apiKeys)
-        .set({ keyPrefix: gen.prefix, keyHash: gen.hash, keyLast4: gen.last4 })
-        .where(and(eq(apiKeys.id, id), eq(apiKeys.status, 'active')))
-        .returning({ id: apiKeys.id });
-      if (res.length === 0) break; // revoked/deleted out from under us — don't retry
+      const res = await getDb().transaction(async (tx) => {
+        const updated = await tx
+          .update(apiKeys)
+          .set({ keyPrefix: gen.prefix, keyHash: gen.hash, keyLast4: gen.last4 })
+          .where(
+            and(
+              eq(apiKeys.projectId, input.projectId),
+              eq(apiKeys.id, input.id),
+              eq(apiKeys.status, 'active'),
+            ),
+          )
+          .returning({ id: apiKeys.id });
+        if (!updated.length) return [];
+        await audit(
+          input.projectId,
+          viewer.email,
+          'key.rotate',
+          input.id,
+          { keyPrefix: gen.prefix, keyLast4: gen.last4 },
+          tx,
+        );
+        return updated;
+      });
+      if (res.length === 0) break;
       issued = gen;
     } catch (e) {
       // Fresh prefix collided with another key — try again with new randomness.
@@ -383,14 +482,14 @@ export async function rotateKey(id: string): Promise<{ fullKey: string }> {
   }
   if (!issued) throw new Error('Key not found or not active');
 
-  await audit(viewer.email, 'key.rotate', id, { keyPrefix: issued.prefix, keyLast4: issued.last4 });
-  revalidatePath('/admin/keys');
+  revalidatePath(`/admin/p/${input.projectId}/keys`);
   return { fullKey: issued.fullKey };
 }
 
 // ---- Model eval runs --------------------------------------------------------
 
 export interface StartEvalInput {
+  projectId: string;
   apiKeyId: string;
   challengerModel: string;
   targetN: number;
@@ -413,6 +512,7 @@ function clampTargetN(n: number): number {
  */
 async function cancelRunningEvalsForKey(
   db: Db | DbTx,
+  projectId: string,
   keyId: string,
   actorEmail: string,
   cause: string,
@@ -420,7 +520,13 @@ async function cancelRunningEvalsForKey(
   const cancelled = await db
     .update(evalRuns)
     .set({ status: 'cancelled', completedAt: new Date() })
-    .where(and(eq(evalRuns.apiKeyId, keyId), eq(evalRuns.status, 'running')))
+    .where(
+      and(
+        eq(evalRuns.projectId, projectId),
+        eq(evalRuns.apiKeyId, keyId),
+        eq(evalRuns.status, 'running'),
+      ),
+    )
     .returning({ id: evalRuns.id });
   for (const run of cancelled) {
     // Freeze the run's spend BEFORE purging the sample rows it's summed from —
@@ -429,9 +535,11 @@ async function cancelRunningEvalsForKey(
     await db
       .update(evalRuns)
       .set({ evalCostUsd: await recordedEvalSpendUsd(db, run.id) })
-      .where(eq(evalRuns.id, run.id));
-    await db.delete(evalSamples).where(eq(evalSamples.runId, run.id));
-    await audit(actorEmail, 'eval.cancel', run.id, { cause }, db);
+      .where(and(eq(evalRuns.projectId, projectId), eq(evalRuns.id, run.id)));
+    await db
+      .delete(evalSamples)
+      .where(and(eq(evalSamples.projectId, projectId), eq(evalSamples.runId, run.id)));
+    await audit(projectId, actorEmail, 'eval.cancel', run.id, { cause }, db);
   }
   return cancelled.length;
 }
@@ -444,7 +552,7 @@ async function cancelRunningEvalsForKey(
  */
 async function insertEvalRun(
   db: Db | DbTx,
-  key: { id: string; model: string; status: string },
+  key: { projectId: string; id: string; model: string; status: string },
   challengerModel: string,
   judgeModel: string,
   targetN: number,
@@ -457,12 +565,19 @@ async function insertEvalRun(
   const [active] = await db
     .select({ id: evalRuns.id })
     .from(evalRuns)
-    .where(and(eq(evalRuns.apiKeyId, key.id), eq(evalRuns.status, 'running')))
+    .where(
+      and(
+        eq(evalRuns.projectId, key.projectId),
+        eq(evalRuns.apiKeyId, key.id),
+        eq(evalRuns.status, 'running'),
+      ),
+    )
     .limit(1);
   if (active) throw new Error('An eval is already running for this key');
 
   try {
     await db.insert(evalRuns).values({
+      projectId: key.projectId,
       apiKeyId: key.id,
       championModel: key.model,
       challengerModel,
@@ -480,27 +595,30 @@ async function insertEvalRun(
 }
 
 export async function startEvalRun(input: StartEvalInput): Promise<void> {
-  const { viewer, model, status } = await assertCanManageKey(input.apiKeyId);
+  const { viewer, model, status } = await assertCanManageKey(
+    input.projectId,
+    input.apiKeyId,
+  );
   const challengerModel = input.challengerModel.trim();
   if (!challengerModel) throw new Error('Challenger model is required');
   const targetN = clampTargetN(input.targetN);
 
-  const settings = await getSettings();
+  const settings = await getSettings(viewer);
   await insertEvalRun(
     getDb(),
-    { id: input.apiKeyId, model, status },
+    { projectId: input.projectId, id: input.apiKeyId, model, status },
     challengerModel,
     settings.judgeModel,
     targetN,
   );
-  await audit(viewer.email, 'eval.start', input.apiKeyId, {
+  await audit(input.projectId, viewer.email, 'eval.start', input.apiKeyId, {
     championModel: model,
     challengerModel,
     judgeModel: settings.judgeModel,
     targetN,
   });
-  revalidatePath('/admin/keys');
-  revalidatePath('/admin/evals');
+  revalidatePath(`/admin/p/${input.projectId}/keys`);
+  revalidatePath(`/admin/p/${input.projectId}/evals`);
 }
 
 // ---- Bulk key operations -----------------------------------------------------
@@ -551,6 +669,7 @@ function skipReason(e: unknown): string {
  * or owner), matching the single-key edit; each change is audited individually.
  */
 export async function bulkUpdateKeyModel(input: {
+  projectId: string;
   ids: string[];
   model: string;
   /**
@@ -574,7 +693,7 @@ export async function bulkUpdateKeyModel(input: {
     // then fails — reporting a committed change as "skipped" would be a lie.
     let mutated = false;
     try {
-      const key = await assertCanManageKey(id);
+      const key = await assertCanManageKey(input.projectId, id);
       name = key.name;
       if (key.status !== 'active') {
         skipped.push({ name, reason: 'key is not active' });
@@ -591,25 +710,46 @@ export async function bulkUpdateKeyModel(input: {
       if (confirmedStops.has(id)) {
         let stoppedHere = 0;
         await getDb().transaction(async (tx) => {
-          stoppedHere = await cancelRunningEvalsForKey(tx, id, key.viewer.email, 'model change');
-          await tx.update(apiKeys).set({ model }).where(eq(apiKeys.id, id));
+          stoppedHere = await cancelRunningEvalsForKey(
+            tx,
+            input.projectId,
+            id,
+            key.viewer.email,
+            'model change',
+          );
+          await tx
+            .update(apiKeys)
+            .set({ model })
+            .where(and(eq(apiKeys.projectId, input.projectId), eq(apiKeys.id, id)));
         });
         stoppedEvals += stoppedHere;
       } else {
         const [running] = await getDb()
           .select({ id: evalRuns.id })
           .from(evalRuns)
-          .where(and(eq(evalRuns.apiKeyId, id), eq(evalRuns.status, 'running')))
+          .where(
+            and(
+              eq(evalRuns.projectId, input.projectId),
+              eq(evalRuns.apiKeyId, id),
+              eq(evalRuns.status, 'running'),
+            ),
+          )
           .limit(1);
         if (running) {
           skipped.push({ name, reason: 'an eval is running — confirm stopping it and retry' });
           continue;
         }
-        await getDb().update(apiKeys).set({ model }).where(eq(apiKeys.id, id));
+        await getDb()
+          .update(apiKeys)
+          .set({ model })
+          .where(and(eq(apiKeys.projectId, input.projectId), eq(apiKeys.id, id)));
       }
       mutated = true;
       done++;
-      await audit(key.viewer.email, 'key.model', id, { from: key.model, to: model });
+      await audit(input.projectId, key.viewer.email, 'key.model', id, {
+        from: key.model,
+        to: model,
+      });
     } catch (e) {
       if (e instanceof Error && e.message === 'unauthorized') throw e;
       if (!mutated) skipped.push({ name, reason: skipReason(e) });
@@ -619,8 +759,8 @@ export async function bulkUpdateKeyModel(input: {
   // Revalidate even on an all-skips batch: a skip usually means the client's
   // snapshot has diverged from the DB (revoked elsewhere, eval started…), so
   // this is exactly when the table needs a resync.
-  revalidatePath('/admin/keys');
-  revalidatePath('/admin/evals');
+  revalidatePath(`/admin/p/${input.projectId}/keys`);
+  revalidatePath(`/admin/p/${input.projectId}/evals`);
   return { done, skipped, stoppedEvals };
 }
 
@@ -630,6 +770,7 @@ export async function bulkUpdateKeyModel(input: {
  * invariants (active, challenger differs, no running eval) skip that key only.
  */
 export async function bulkStartEvalRuns(input: {
+  projectId: string;
   ids: string[];
   challengerModel: string;
   targetN: number;
@@ -646,7 +787,8 @@ export async function bulkStartEvalRuns(input: {
   const targetN = clampTargetN(input.targetN);
   const ids = normalizeBulkIds(input.ids);
   const confirmedStops = new Set(input.stopEvalIds ?? []);
-  const settings = await getSettings();
+  const settingsViewer = await requireProjectViewer(input.projectId);
+  const settings = await getSettings(settingsViewer);
 
   let done = 0;
   let stoppedEvals = 0;
@@ -657,9 +799,14 @@ export async function bulkStartEvalRuns(input: {
     // must not report it as skipped.
     let started = false;
     try {
-      const key = await assertCanManageKey(id);
+      const key = await assertCanManageKey(input.projectId, id);
       name = key.name;
-      const keyArg = { id, model: key.model, status: key.status };
+      const keyArg = {
+        projectId: input.projectId,
+        id,
+        model: key.model,
+        status: key.status,
+      };
       // With per-key confirmation, replace the current running eval — cancel +
       // insert atomically, so losing the one-running-run race (23505) rolls the
       // cancel back and reports a skip instead of destroying the eval. The
@@ -670,6 +817,7 @@ export async function bulkStartEvalRuns(input: {
         await getDb().transaction(async (tx) => {
           stoppedHere = await cancelRunningEvalsForKey(
             tx,
+            input.projectId,
             id,
             key.viewer.email,
             'superseded by a new eval',
@@ -682,7 +830,7 @@ export async function bulkStartEvalRuns(input: {
       }
       started = true;
       done++;
-      await audit(key.viewer.email, 'eval.start', id, {
+      await audit(input.projectId, key.viewer.email, 'eval.start', id, {
         championModel: key.model,
         challengerModel,
         judgeModel: settings.judgeModel,
@@ -696,34 +844,55 @@ export async function bulkStartEvalRuns(input: {
   }
   // Unconditional for the same reason as bulkUpdateKeyModel: skips signal a
   // stale client snapshot, so resync the table either way.
-  revalidatePath('/admin/keys');
-  revalidatePath('/admin/evals');
+  revalidatePath(`/admin/p/${input.projectId}/keys`);
+  revalidatePath(`/admin/p/${input.projectId}/evals`);
   return { done, skipped, stoppedEvals };
 }
 
-export async function cancelEvalRun(runId: string): Promise<void> {
-  const { viewer } = await assertCanManageRun(runId);
+export async function cancelEvalRun(input: {
+  projectId: string;
+  runId: string;
+}): Promise<void> {
+  const { viewer } = await assertCanManageRun(input.projectId, input.runId);
   // One transaction: the frozen spend and the sample purge stand or fall
   // together — never a purge without the spend snapshot it depends on.
   await getDb().transaction(async (tx) => {
     const cancelled = await tx
       .update(evalRuns)
       .set({ status: 'cancelled', completedAt: new Date() })
-      .where(and(eq(evalRuns.id, runId), eq(evalRuns.status, 'running')))
+      .where(
+        and(
+          eq(evalRuns.projectId, input.projectId),
+          eq(evalRuns.id, input.runId),
+          eq(evalRuns.status, 'running'),
+        ),
+      )
       .returning({ id: evalRuns.id });
     if (cancelled.length > 0) {
       // Freeze the run's spend BEFORE the purge deletes the rows it's summed from.
       await tx
         .update(evalRuns)
-        .set({ evalCostUsd: await recordedEvalSpendUsd(tx, runId) })
-        .where(eq(evalRuns.id, runId));
+        .set({ evalCostUsd: await recordedEvalSpendUsd(tx, input.runId) })
+        .where(
+          and(
+            eq(evalRuns.projectId, input.projectId),
+            eq(evalRuns.id, input.runId),
+          ),
+        );
       // Privacy option A: purge captured content for the abandoned run.
-      await tx.delete(evalSamples).where(eq(evalSamples.runId, runId));
+      await tx
+        .delete(evalSamples)
+        .where(
+          and(
+            eq(evalSamples.projectId, input.projectId),
+            eq(evalSamples.runId, input.runId),
+          ),
+        );
     }
+    await audit(input.projectId, viewer.email, 'eval.cancel', input.runId, null, tx);
   });
-  await audit(viewer.email, 'eval.cancel', runId, null);
-  revalidatePath('/admin/keys');
-  revalidatePath('/admin/evals');
+  revalidatePath(`/admin/p/${input.projectId}/keys`);
+  revalidatePath(`/admin/p/${input.projectId}/evals`);
 }
 
 /**
@@ -732,8 +901,11 @@ export async function cancelEvalRun(runId: string): Promise<void> {
  * judgments the background cron produced since. Owner-scoped via getKeyEvals — a
  * viewer who can't see the key gets null.
  */
-export async function refreshKeyEval(apiKeyId: string): Promise<KeyEval | null> {
-  const viewer = await requireViewer();
-  const all = await getKeyEvals(viewer, apiKeyId);
-  return all[apiKeyId] ?? null;
+export async function refreshKeyEval(input: {
+  projectId: string;
+  apiKeyId: string;
+}): Promise<KeyEval | null> {
+  const viewer = await requireProjectViewer(input.projectId);
+  const all = await getKeyEvals(viewer, input.apiKeyId);
+  return all[input.apiKeyId] ?? null;
 }

@@ -10,10 +10,12 @@ import { Label } from '@/components/ui/label';
 import { ModelCombobox } from '@/components/admin/model-combobox';
 
 export function SettingsForm({
+  projectId,
   initial,
   models,
   modelsUnavailable = false,
 }: {
+  projectId: string;
   initial: { judgeModel: string; notifyEmail: string | null };
   models: AvailableModel[];
   modelsUnavailable?: boolean;
@@ -27,6 +29,7 @@ export function SettingsForm({
     startTransition(async () => {
       try {
         await updateSettings({
+          projectId,
           judgeModel: judgeModel.trim(),
           notifyEmail: notifyEmail.trim() || null,
         });

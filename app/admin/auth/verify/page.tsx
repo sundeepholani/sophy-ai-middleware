@@ -24,7 +24,7 @@ export default async function VerifyPage({
             <CardTitle className="text-lg">Sophy</CardTitle>
           </div>
           <CardDescription>
-            {invalid ? 'Sign-in link problem' : 'Confirm sign in'}
+            {invalid ? 'Secure-link problem' : 'Confirm and continue'}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -42,10 +42,11 @@ export default async function VerifyPage({
               <input type="hidden" name="token" value={sp.token} />
               {sp.next ? <input type="hidden" name="next" value={sp.next} /> : null}
               <p className="text-sm text-muted-foreground">
-                Click below to finish signing in to the Sophy console.
+                Click below to finish signing in. If this is your first visit, Sophy creates your
+                renameable My Project and makes you its Project Admin.
               </p>
               <Button type="submit" className="w-full">
-                Confirm sign in
+                Continue to Sophy
               </Button>
             </form>
           )}

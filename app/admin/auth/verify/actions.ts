@@ -19,10 +19,10 @@ export async function confirmSignIn(formData: FormData): Promise<void> {
 
   const session = await getSession();
   // The cookie is fully re-serialized on save(), so set the new identity and clear
-  // any legacy single-admin flag — no stale state carries over.
+  // every legacy authority claim. Project roles are always loaded from Postgres.
   session.userId = user.id;
-  session.role = user.role;
-  session.email = user.email;
+  session.role = undefined;
+  session.email = undefined;
   session.loginAt = Date.now();
   session.sealedAt = Date.now();
   session.isAdmin = undefined;

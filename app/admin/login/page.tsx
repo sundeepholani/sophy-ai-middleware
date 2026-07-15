@@ -50,14 +50,14 @@ export default function LoginPage() {
             </div>
             <CardTitle className="text-lg">Sophy</CardTitle>
           </div>
-          <CardDescription>Sign in with your email</CardDescription>
+          <CardDescription>Sign in or create an account with your email</CardDescription>
         </CardHeader>
         <CardContent>
           {sent ? (
-            <div className="space-y-3">
+            <div className="space-y-3" role="status" aria-live="polite">
               <p className="text-sm">
-                If <span className="font-medium">{email}</span> has an account, a sign-in link is on
-                its way. The link works once and expires in 15 minutes.
+                If <span className="font-medium">{email}</span> can receive mail, a secure link is on
+                its way. It works once and expires in 15 minutes.
               </p>
               <Button variant="outline" className="w-full" onClick={() => setSent(false)}>
                 Use a different email
@@ -77,10 +77,18 @@ export default function LoginPage() {
                   required
                 />
               </div>
-              {error && <p className="text-sm text-destructive">{error}</p>}
+              {error && (
+                <p className="text-sm text-destructive" role="alert" aria-live="assertive">
+                  {error}
+                </p>
+              )}
               <Button type="submit" className="w-full" disabled={loading || !email}>
                 {loading ? 'Sending…' : 'Email me a sign-in link'}
               </Button>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                New to Sophy? Verifying the link creates a renameable My Project and makes you its
+                Project Admin.
+              </p>
             </form>
           )}
         </CardContent>

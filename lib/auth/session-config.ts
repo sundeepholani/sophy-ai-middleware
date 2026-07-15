@@ -20,14 +20,17 @@ export interface AdminSession {
   isAdmin?: boolean;
 }
 
-/** True if the session belongs to any signed-in user. Pure — safe to call from the proxy. */
+/**
+ * True when the cookie identifies a user. Project roles are deliberately not
+ * trusted here; every project request re-loads its membership from Postgres.
+ */
 export function isAuthenticated(session: AdminSession): boolean {
-  return (!!session.userId && !!session.role) || session.isAdmin === true;
+  return !!session.userId;
 }
 
-/** True if the session is an admin (new role flag, or a legacy admin cookie). */
+/** Legacy UI helper only. Never use this for project authorization. */
 export function isAdminSession(session: AdminSession): boolean {
-  return session.role === 'admin' || session.isAdmin === true;
+  return !!session.userId && session.role === 'admin';
 }
 
 /**

@@ -22,6 +22,10 @@
  */
 import { APICallError } from 'ai';
 import { openAiError, type OpenAIErrorType } from '@/lib/http/openai';
+import {
+  projectGatewayUnavailableResponse,
+  ProjectGatewayUnavailableError,
+} from '@/lib/gateway/project-provider';
 
 export interface MappedUpstreamError {
   status: number;
@@ -116,6 +120,9 @@ function retryAfterHeader(headers: Record<string, string> | undefined): string |
  * used for the 502 default (e.g. "The embeddings request failed.").
  */
 export function upstreamErrorResponse(err: unknown, fallbackMessage: string): Response {
+  const unavailable = projectGatewayUnavailableResponse(err);
+  if (unavailable) return unavailable;
+
   const isApi = APICallError.isInstance(err);
   const statusCode = isApi ? err.statusCode : undefined;
   const upstreamMessage = err instanceof Error ? err.message : undefined;
@@ -130,4 +137,28 @@ export function upstreamErrorResponse(err: unknown, fallbackMessage: string): Re
     code: mapped.code,
     headers,
   });
+}
+
+/**
+ * A bounded, non-secret value for durable usage/error records. Raw gateway
+ * messages can contain credential ids, balances, spend limits, and account URLs
+ * and must never be persisted or echoed by Sophy.
+ */
+export function safeGatewayErrorMessage(err: unknown): string {
+  if (ProjectGatewayUnavailableError.isInstance(err)) return err.code;
+  if (APICallError.isInstance(err) && typeof err.statusCode === 'number') {
+    return `upstream_http_${err.statusCode}`;
+  }
+  if (
+    typeof DOMException !== 'undefined' &&
+    err instanceof DOMException &&
+    err.name === 'TimeoutError'
+  ) {
+    return 'upstream_timeout';
+  }
+  if (err instanceof Error) {
+    if (/timeout|timed out/i.test(err.name)) return 'upstream_timeout';
+    return `upstream_${err.name.replace(/[^a-z0-9]+/gi, '_').toLowerCase().slice(0, 64) || 'error'}`;
+  }
+  return 'upstream_error';
 }

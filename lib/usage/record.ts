@@ -59,6 +59,10 @@ export function extractGatewayRequestId(pm: ProviderMetadata | undefined): strin
 export interface RecordUsageInput {
   /** Optional explicit id; pass it to correlate with a request_logs row. */
   id?: string;
+  /** Hard tenant boundary copied from the resolved Sophy key/project. */
+  projectId: string;
+  /** Immutable credential snapshot that actually paid for this call. */
+  gatewayCredentialId: string;
   /** Null only for spend with no owning key (kb_ingest from the cron). */
   keyId: string | null;
   /** Defaults to 'proxy' (a client request). Non-proxy rows are Sophy's own
@@ -83,6 +87,8 @@ export async function recordUsage(input: RecordUsageInput): Promise<void> {
       .insert(usageEvents)
       .values({
         ...(input.id ? { id: input.id } : {}),
+        projectId: input.projectId,
+        gatewayCredentialId: input.gatewayCredentialId,
         apiKeyId: input.keyId,
         source: input.source ?? 'proxy',
         provider: input.provider ?? null,
@@ -118,6 +124,7 @@ function cap(s: string): string {
 export interface RecordRequestLogInput {
   /** Shared with the usage_events row id. */
   id: string;
+  projectId: string;
   keyId: string;
   surface: 'chat' | 'responses';
   /** The operator system prompt that was applied (if any). */
@@ -145,6 +152,7 @@ export async function recordRequestLog(input: RecordRequestLogInput): Promise<vo
       .insert(requestLogs)
       .values({
         id: input.id,
+        projectId: input.projectId,
         apiKeyId: input.keyId,
         surface: input.surface,
         systemPrompt: input.systemPrompt ? cap(input.systemPrompt) : null,
@@ -162,6 +170,7 @@ export async function recordRequestLog(input: RecordRequestLogInput): Promise<vo
 export interface RecordEmbeddingLogInput {
   /** Shared with the usage_events row id. */
   id: string;
+  projectId: string;
   keyId: string;
   /** The exact strings that were embedded (already normalized to an array). */
   inputs: string[];
@@ -198,6 +207,7 @@ export async function recordEmbeddingLog(input: RecordEmbeddingLogInput): Promis
       .insert(requestLogs)
       .values({
         id: input.id,
+        projectId: input.projectId,
         apiKeyId: input.keyId,
         surface: 'embedding',
         systemPrompt: null,

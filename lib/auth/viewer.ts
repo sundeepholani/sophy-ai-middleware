@@ -1,74 +1,151 @@
 /**
- * Authorization layer for the admin console (server-only).
+ * Identity and project authorization for the operator console.
  *
- * A Viewer is the signed-in operator. Admins may act on everything; editors may
- * act only on keys they own. The guards here are the single source of truth used
- * by every server action, and scopeToOwner() is the single source of truth used
- * by every read query — so a new surface can't accidentally leak across owners.
+ * The cookie identifies only a user. Every guard reloads the active identity,
+ * membership, project, and project-local role from Postgres. Project IDs always
+ * come from the route/action input and are included in resource predicates.
  */
 import { cache } from 'react';
-import { eq, inArray, type SQL } from 'drizzle-orm';
+import { and, eq, inArray, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { getDb } from '@/db/client';
-import { apiKeys, evalRuns, users } from '@/db/schema';
-import { currentUser, type CurrentUser } from '@/lib/auth/admin-session';
+import {
+  apiKeys,
+  evalRuns,
+  projectMemberships,
+  projects,
+  users,
+  type ProjectRole,
+  type ProjectStatus,
+} from '@/db/schema';
+import { currentUser } from '@/lib/auth/admin-session';
 
-export type Viewer = CurrentUser; // { userId, role, email }
+export interface IdentityViewer {
+  userId: string;
+  email: string;
+  defaultProjectId: string | null;
+}
 
-/**
- * The signed-in operator, or null. Identity comes from the signed cookie, but the
- * role and active status are authoritative in Postgres and re-checked on EVERY
- * request — so deactivation and role changes take effect immediately (like key
- * revocation), not only when the sliding 5-day cookie expires. (Legacy single-admin cookies
- * have no userId → null → must re-login via magic link.)
- *
- * cache() dedupes this within a single server request, so the layout and the page
- * (and every guard) share ONE user read per render instead of each hitting the DB.
- * It memoizes per-request only — a new request still re-reads, so role/status
- * changes remain immediate.
- */
-export const getViewer = cache(async (): Promise<Viewer | null> => {
-  const s = await currentUser();
-  if (!s) return null;
-  const [u] = await getDb()
-    .select({ role: users.role, status: users.status })
+export interface ProjectViewer {
+  userId: string;
+  email: string;
+  role: ProjectRole;
+  projectId: string;
+  projectName: string;
+  projectSlug: string;
+  projectStatus: ProjectStatus;
+  defaultProjectId: string | null;
+}
+
+/** Project viewer alias used by the admin query layer. */
+export type Viewer = ProjectViewer;
+
+export const getIdentityViewer = cache(async (): Promise<IdentityViewer | null> => {
+  const sessionIdentity = await currentUser();
+  if (!sessionIdentity) return null;
+
+  const [identity] = await getDb()
+    .select({
+      userId: users.id,
+      email: users.email,
+      status: users.status,
+      defaultProjectId: users.defaultProjectId,
+    })
     .from(users)
-    .where(eq(users.id, s.userId))
+    .where(eq(users.id, sessionIdentity.userId))
     .limit(1);
-  if (!u || u.status !== 'active') return null;
-  return { userId: s.userId, role: u.role, email: s.email };
+  if (!identity || identity.status !== 'active') return null;
+  return {
+    userId: identity.userId,
+    email: identity.email,
+    defaultProjectId: identity.defaultProjectId,
+  };
 });
 
-export async function requireViewer(): Promise<Viewer> {
-  const v = await getViewer();
-  if (!v) throw new Error('unauthorized');
-  return v;
+export async function requireIdentity(): Promise<IdentityViewer> {
+  const identity = await getIdentityViewer();
+  if (!identity) throw new Error('unauthorized');
+  return identity;
 }
 
-export function isAdmin(v: Viewer): boolean {
-  return v.role === 'admin';
+const getProjectViewerForUser = cache(
+  async (userId: string, projectId: string): Promise<ProjectViewer | null> => {
+    const [row] = await getDb()
+      .select({
+        userId: users.id,
+        email: users.email,
+        userStatus: users.status,
+        defaultProjectId: users.defaultProjectId,
+        role: projectMemberships.role,
+        membershipStatus: projectMemberships.status,
+        projectId: projects.id,
+        projectName: projects.name,
+        projectSlug: projects.slug,
+        projectStatus: projects.status,
+      })
+      .from(users)
+      .innerJoin(
+        projectMemberships,
+        and(
+          eq(projectMemberships.userId, users.id),
+          eq(projectMemberships.projectId, projectId),
+        ),
+      )
+      .innerJoin(projects, eq(projects.id, projectMemberships.projectId))
+      .where(eq(users.id, userId))
+      .limit(1);
+
+    if (
+      !row ||
+      row.userStatus !== 'active' ||
+      row.membershipStatus !== 'active' ||
+      row.projectStatus !== 'active'
+    ) {
+      return null;
+    }
+    return {
+      userId: row.userId,
+      email: row.email,
+      role: row.role,
+      projectId: row.projectId,
+      projectName: row.projectName,
+      projectSlug: row.projectSlug,
+      projectStatus: row.projectStatus,
+      defaultProjectId: row.defaultProjectId,
+    };
+  },
+);
+
+/** Resolve an active project membership for the signed-in identity. */
+export async function getProjectViewer(projectId: string): Promise<ProjectViewer | null> {
+  const identity = await getIdentityViewer();
+  if (!identity) return null;
+  return getProjectViewerForUser(identity.userId, projectId);
 }
 
-/** Admin-only. Returns the viewer (for audit attribution). */
-export async function assertAdmin(): Promise<Viewer> {
-  const v = await requireViewer();
-  if (v.role !== 'admin') throw new Error('forbidden');
-  return v;
+export async function requireProjectViewer(projectId: string): Promise<ProjectViewer> {
+  const viewer = await getProjectViewer(projectId);
+  if (!viewer) throw new Error('forbidden');
+  return viewer;
 }
 
-/** Any active signed-in operator (admin or editor). */
-export async function assertUser(): Promise<Viewer> {
-  return requireViewer();
+export async function assertProjectAdmin(projectId: string): Promise<ProjectViewer> {
+  const viewer = await requireProjectViewer(projectId);
+  if (viewer.role !== 'admin') throw new Error('forbidden');
+  return viewer;
 }
 
-/**
- * Allow if the viewer is an admin OR owns the key. Returns the viewer + the key's
- * current owner (so callers don't re-fetch). Throws 'not_found' / 'forbidden'.
- */
 export async function assertCanManageKey(
+  projectId: string,
   keyId: string,
-): Promise<{ viewer: Viewer; ownerUserId: string | null; model: string; status: string; name: string }> {
-  const v = await requireViewer();
+): Promise<{
+  viewer: ProjectViewer;
+  ownerUserId: string | null;
+  model: string;
+  status: string;
+  name: string;
+}> {
+  const viewer = await requireProjectViewer(projectId);
   const [key] = await getDb()
     .select({
       ownerUserId: apiKeys.ownerUserId,
@@ -77,53 +154,61 @@ export async function assertCanManageKey(
       name: apiKeys.name,
     })
     .from(apiKeys)
-    .where(eq(apiKeys.id, keyId))
+    .where(and(eq(apiKeys.projectId, projectId), eq(apiKeys.id, keyId)))
     .limit(1);
   if (!key) throw new Error('not_found');
-  if (v.role !== 'admin' && key.ownerUserId !== v.userId) throw new Error('forbidden');
-  return {
-    viewer: v,
-    ownerUserId: key.ownerUserId,
-    model: key.model,
-    status: key.status,
-    name: key.name,
-  };
+  if (viewer.role !== 'admin' && key.ownerUserId !== viewer.userId) {
+    throw new Error('forbidden');
+  }
+  return { viewer, ...key };
 }
 
-/** Allow if the viewer may manage the key that owns this eval run. */
 export async function assertCanManageRun(
+  projectId: string,
   runId: string,
-): Promise<{ viewer: Viewer; apiKeyId: string }> {
-  const v = await requireViewer();
+): Promise<{ viewer: ProjectViewer; apiKeyId: string }> {
+  const viewer = await requireProjectViewer(projectId);
   const [run] = await getDb()
     .select({ apiKeyId: evalRuns.apiKeyId })
     .from(evalRuns)
-    .where(eq(evalRuns.id, runId))
+    .where(and(eq(evalRuns.projectId, projectId), eq(evalRuns.id, runId)))
     .limit(1);
   if (!run) throw new Error('not_found');
-  if (v.role !== 'admin') {
+  if (viewer.role !== 'admin') {
     const [key] = await getDb()
       .select({ ownerUserId: apiKeys.ownerUserId })
       .from(apiKeys)
-      .where(eq(apiKeys.id, run.apiKeyId))
+      .where(
+        and(
+          eq(apiKeys.projectId, projectId),
+          eq(apiKeys.id, run.apiKeyId),
+        ),
+      )
       .limit(1);
-    if (!key || key.ownerUserId !== v.userId) throw new Error('forbidden');
+    if (!key || key.ownerUserId !== viewer.userId) throw new Error('forbidden');
   }
-  return { viewer: v, apiKeyId: run.apiKeyId };
+  return { viewer, apiKeyId: run.apiKeyId };
 }
 
 /**
- * A condition restricting a query to the viewer's owned keys, applied to a column
- * holding an api_key id. Returns undefined for admins (no restriction) — and since
- * drizzle's and()/where() ignore undefined, admins pass through unfiltered.
- *
- * Editors get a correlated subquery (IN (SELECT id FROM api_keys WHERE owner=…)),
- * which is empty-set-correct: an editor with zero keys sees zero rows.
+ * Owner filtering is always combined with the caller's project predicate.
+ * Admin means all resources in this project, never all projects.
  */
-export function scopeToOwner(viewer: Viewer, apiKeyIdColumn: AnyPgColumn): SQL | undefined {
+export function scopeToOwner(
+  viewer: ProjectViewer,
+  apiKeyIdColumn: AnyPgColumn,
+): SQL | undefined {
   if (viewer.role === 'admin') return undefined;
   return inArray(
     apiKeyIdColumn,
-    getDb().select({ id: apiKeys.id }).from(apiKeys).where(eq(apiKeys.ownerUserId, viewer.userId)),
+    getDb()
+      .select({ id: apiKeys.id })
+      .from(apiKeys)
+      .where(
+        and(
+          eq(apiKeys.projectId, viewer.projectId),
+          eq(apiKeys.ownerUserId, viewer.userId),
+        ),
+      ),
   );
 }

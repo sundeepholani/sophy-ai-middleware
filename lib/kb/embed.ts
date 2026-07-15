@@ -1,30 +1,18 @@
 /**
- * Embedding model handle + batch helper for the knowledgebase pipeline.
- *
- * Mirrors lib/eval/model.ts: live request handlers reach the AI Gateway via the
- * request-scoped Vercel OIDC token, but the cron's build-time OIDC token can be
- * expired — so when AI_GATEWAY_API_KEY is set we use an explicit gateway
- * credential, otherwise we fall back to the default provider (OIDC), which works
- * locally where a fresh token is present.
+ * Project-scoped embedding helpers for the knowledgebase pipeline.
  *
  * The vector column dimension is locked to the embedding model (see db/schema):
  * `openai/text-embedding-3-small` → 1536. Ingestion asserts this before insert.
  */
-import { createGateway } from '@ai-sdk/gateway';
 import { embed, embedMany } from 'ai';
 import type { ProviderMetadata } from 'ai';
-import { env } from '@/lib/env';
 import { extractGatewayCost } from '@/lib/usage/record';
+import type { ProjectGatewaySnapshot } from '@/lib/gateway/project-provider';
 
 export const EMBEDDING_DIM = 1536;
 
-let cached: ReturnType<typeof createGateway> | undefined;
-
-export function embeddingModel(modelId: string) {
-  const apiKey = env.aiGatewayApiKey();
-  if (!apiKey) return modelId; // default provider (request-scoped OIDC)
-  if (!cached) cached = createGateway({ apiKey });
-  return cached.textEmbeddingModel(modelId);
+export function embeddingModel(gateway: ProjectGatewaySnapshot, modelId: string) {
+  return gateway.gateway.embeddingModel(modelId);
 }
 
 /**
@@ -34,12 +22,13 @@ export function embeddingModel(modelId: string) {
  * per-document failure instead. (Mirrors the eval path's AbortSignal.timeout.)
  */
 export async function embedTexts(
+  gateway: ProjectGatewaySnapshot,
   modelId: string,
   values: string[],
   opts?: { abortSignal?: AbortSignal; maxRetries?: number },
 ): Promise<{ embeddings: number[][]; tokens: number | null; costUsd: number | null }> {
   const result = await embedMany({
-    model: embeddingModel(modelId),
+    model: embeddingModel(gateway, modelId),
     values,
     abortSignal: opts?.abortSignal,
     maxRetries: opts?.maxRetries,
@@ -59,12 +48,13 @@ export async function embedTexts(
  * to "no context" fast instead of stalling the user-visible response.
  */
 export async function embedQuery(
+  gateway: ProjectGatewaySnapshot,
   modelId: string,
   value: string,
   opts?: { abortSignal?: AbortSignal; maxRetries?: number },
 ): Promise<{ embedding: number[]; tokens: number | null; costUsd: number | null }> {
   const result = await embed({
-    model: embeddingModel(modelId),
+    model: embeddingModel(gateway, modelId),
     value,
     abortSignal: opts?.abortSignal,
     maxRetries: opts?.maxRetries,

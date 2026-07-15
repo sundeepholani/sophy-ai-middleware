@@ -5,9 +5,9 @@
  * block to fold into the system prompt. Model-agnostic: the result is plain
  * text any chat model can use.
  *
- * Retrieval must NEVER break a request: any failure (no query text, missing KB,
- * embedding error, query error) degrades to "no context" and the call proceeds
- * ungrounded.
+ * Transient retrieval/query failures degrade to "no context". Project gateway
+ * authentication and billing failures deliberately propagate as typed 503s so
+ * a disconnected tenant can never continue via another credential.
  */
 import { and, eq, sql } from 'drizzle-orm';
 import type { ModelMessage } from 'ai';
@@ -16,6 +16,11 @@ import { getDb } from '@/db/client';
 import { kbChunks, kbDocuments, knowledgebases } from '@/db/schema';
 import { embedQuery } from '@/lib/kb/embed';
 import { recordUsage } from '@/lib/usage/record';
+import {
+  normalizeProjectGatewayError,
+  ProjectGatewayUnavailableError,
+  type ProjectGatewaySnapshot,
+} from '@/lib/gateway/project-provider';
 
 const TOP_K = 6;
 const MAX_QUERY_CHARS = 8000; // bound the query embedding input
@@ -64,7 +69,7 @@ function formatContextBlock(snippets: string[]): string {
 export async function retrieveContext(
   knowledgebaseId: string,
   queryText: string,
-  opts?: { topK?: number; keyId?: string },
+  opts: { gateway: ProjectGatewaySnapshot; topK?: number; keyId?: string },
 ): Promise<string> {
   const q = queryText.trim().slice(0, MAX_QUERY_CHARS);
   if (!q) return '';
@@ -75,12 +80,17 @@ export async function retrieveContext(
     const [kb] = await db
       .select({ embeddingModel: knowledgebases.embeddingModel })
       .from(knowledgebases)
-      .where(eq(knowledgebases.id, knowledgebaseId))
+      .where(
+        and(
+          eq(knowledgebases.id, knowledgebaseId),
+          eq(knowledgebases.projectId, opts.gateway.projectId),
+        ),
+      )
       .limit(1);
     if (!kb) return ''; // KB deleted out from under the key — degrade gracefully
 
     const embedStart = Date.now();
-    const { embedding, tokens, costUsd } = await embedQuery(kb.embeddingModel, q, {
+    const { embedding, tokens, costUsd } = await embedQuery(opts.gateway, kb.embeddingModel, q, {
       abortSignal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
       maxRetries: 0,
     });
@@ -90,6 +100,8 @@ export async function retrieveContext(
     // quota (quota counts source='proxy' only).
     waitUntil(
       recordUsage({
+        projectId: opts.gateway.projectId,
+        gatewayCredentialId: opts.gateway.gatewayCredentialId,
         keyId: opts?.keyId ?? null,
         source: 'kb_query',
         provider: kb.embeddingModel.split('/')[0] ?? 'unknown',
@@ -118,13 +130,25 @@ export async function retrieveContext(
       .select({ content: kbChunks.content })
       .from(kbChunks)
       .innerJoin(kbDocuments, eq(kbChunks.documentId, kbDocuments.id))
-      .where(and(eq(kbChunks.kbId, knowledgebaseId), eq(kbDocuments.status, 'ingested'))) // strict per-KB scope
+      .where(
+        and(
+          eq(kbChunks.projectId, opts.gateway.projectId),
+          eq(kbChunks.kbId, knowledgebaseId),
+          eq(kbDocuments.projectId, opts.gateway.projectId),
+          eq(kbDocuments.status, 'ingested'),
+        ),
+      ) // strict per-project + per-KB scope
       .orderBy(sql`${kbChunks.embedding} <=> ${vec}::vector`) // cosine distance
       .limit(topK);
 
     return formatContextBlock(rows.map((r) => r.content));
   } catch (err) {
-    console.error('[kb] retrieval failed; proceeding ungrounded', err);
+    const normalizedError = await normalizeProjectGatewayError(opts.gateway, err);
+    if (ProjectGatewayUnavailableError.isInstance(normalizedError)) throw normalizedError;
+    console.error('[kb] retrieval failed; proceeding ungrounded', {
+      projectId: opts.gateway.projectId,
+      knowledgebaseId,
+    });
     return '';
   }
 }
@@ -138,11 +162,14 @@ export async function systemPromptWithKb(
   basePrompt: string | null,
   knowledgebaseId: string | null,
   messages: ModelMessage[],
-  /** The serving key, so the query-embedding spend is attributed to it. */
-  keyId?: string,
+  opts: {
+    /** The serving key, so the query-embedding spend is attributed to it. */
+    keyId?: string;
+    gateway: ProjectGatewaySnapshot;
+  },
 ): Promise<string | null> {
   if (!knowledgebaseId) return basePrompt;
-  const block = await retrieveContext(knowledgebaseId, latestUserText(messages), { keyId });
+  const block = await retrieveContext(knowledgebaseId, latestUserText(messages), opts);
   if (!block) return basePrompt;
   return basePrompt ? `${basePrompt}\n\n${block}` : block;
 }

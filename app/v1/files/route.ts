@@ -56,6 +56,7 @@ export async function POST(req: Request): Promise<Response> {
   try {
     const data = await file.arrayBuffer();
     const uploaded = await uploadClientFile({
+      projectId: key.projectId,
       keyId: key.id,
       filename: file.name || 'upload',
       contentType,
