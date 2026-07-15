@@ -8,12 +8,15 @@ import {
   ChartNoAxesCombined,
   FlaskConical,
   Gauge,
+  House,
   KeyRound,
   Library,
   Paperclip,
   Plug,
   RotateCw,
   ShieldCheck,
+  Star,
+  UserRoundPlus,
   UsersRound,
   Wrench,
 } from 'lucide-react';
@@ -25,7 +28,7 @@ import { cn } from '@/lib/utils';
 export const metadata: Metadata = {
   title: 'Sophy — one governed API for your AI stack',
   description:
-    'Sophy is an OpenAI-compatible AI gateway for language, image, and embedding models, with centrally governed keys, knowledgebases, evaluations, usage analytics, and cost controls.',
+    'Sophy is a multi-project, OpenAI-compatible AI gateway for language, image, and embedding models, with project-owned Gateway credentials, governed keys, knowledgebases, evaluations, analytics, and cost controls.',
 };
 
 const HERO_SAMPLES = [
@@ -142,8 +145,8 @@ const OPERATIONS: { icon: typeof FlaskConical; title: string; body: string }[] =
   },
   {
     icon: UsersRound,
-    title: 'Team ownership and access',
-    body: 'Give admins and editors passwordless console access, assign key ownership, and manage shared knowledgebases from the same control plane.',
+    title: 'Project-isolated teams and spend',
+    body: 'Give one identity an Admin or Editor role per project. Each project keeps its own members, Sophy keys, knowledgebases, telemetry, and Vercel Gateway credential.',
   },
   {
     icon: RotateCw,
@@ -152,21 +155,44 @@ const OPERATIONS: { icon: typeof FlaskConical; title: string; body: string }[] =
   },
 ];
 
+const PROJECT_FEATURES: { icon: typeof House; title: string; body: string }[] = [
+  {
+    icon: House,
+    title: 'Start in My Project',
+    body: 'Sign up directly and Sophy creates a renameable project where you are the Admin.',
+  },
+  {
+    icon: UserRoundPlus,
+    title: 'Join through an invitation',
+    body: 'Your invited project becomes the default when it is your first Sophy project, with the role its Admin assigned.',
+  },
+  {
+    icon: Star,
+    title: 'Choose your default',
+    body: 'Use one identity across projects, switch without signing out, and choose which project opens first.',
+  },
+  {
+    icon: KeyRound,
+    title: 'Bring a Gateway per project',
+    body: 'Every project connects its own Vercel AI Gateway credential before its Sophy keys can make paid model calls.',
+  },
+];
+
 const STEPS: { n: string; title: string; body: string }[] = [
   {
     n: '1',
-    title: 'Configure a governed key',
-    body: 'Choose one supported model and set its prompt policy, parameters, limits, logging, schema, and optional knowledgebase.',
+    title: 'Connect your project',
+    body: 'A Project Admin adds the project’s Vercel AI Gateway key. Sophy validates it without making a generation call and stores it encrypted.',
   },
   {
     n: '2',
-    title: 'Use the OpenAI SDK',
-    body: 'Point a supported OpenAI client method at https://sophy.in/v1 and authenticate with the key Sophy issued.',
+    title: 'Configure a Sophy API key',
+    body: 'Choose one supported model and set its prompt policy, parameters, limits, logging, schema, and optional project knowledgebase.',
   },
   {
     n: '3',
-    title: 'Measure, compare, improve',
-    body: 'Trace usage and cost, evaluate challenger models against production traffic, then update the key without redeploying clients.',
+    title: 'Integrate and improve',
+    body: 'Use the OpenAI SDK with the Sophy key, then trace project usage, evaluate challengers, and update policy without redeploying clients.',
   },
 ];
 
@@ -215,15 +241,15 @@ export default function HomePage() {
         <div className="mx-auto grid w-full max-w-7xl items-center gap-12 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:gap-10 lg:px-8 lg:py-28">
           <div className="space-y-6">
             <Badge variant="secondary" className="rounded-full px-3 py-1 text-xs">
-              OpenAI-compatible · Language, image, and embeddings
+              Multi-project · OpenAI-compatible · Language, image, and embeddings
             </Badge>
             <h1 className="font-heading text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-6xl">
               One governed API for your AI stack.
             </h1>
             <p className="max-w-xl text-lg text-muted-foreground text-pretty">
-              Sophy puts supported models behind centrally managed keys. Own the prompt, model,
-              schema, knowledge, logging, and limits in one console—then call the right workload
-              through the OpenAI SDK surface you already use.
+              Sophy puts supported models behind project-scoped keys. Each project brings its own
+              Vercel AI Gateway credential while its team governs prompts, models, schemas,
+              knowledge, logging, and limits from one console.
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <Link href="/docs" className={cn(buttonVariants({ size: 'lg' }), 'h-11 px-6 text-base')}>
@@ -237,7 +263,7 @@ export default function HomePage() {
                   'h-11 px-6 text-base',
                 )}
               >
-                Sign in
+                Sign in or create an account
               </Link>
             </div>
             <p className="text-xs text-muted-foreground">
@@ -276,6 +302,38 @@ export default function HomePage() {
                 <p className="mt-2 text-sm text-muted-foreground">{surface.label}</p>
               </div>
             ))}
+          </div>
+        </div>
+      </section>
+
+      <section id="projects" aria-labelledby="projects-title" className="scroll-mt-20 border-b">
+        <div className="mx-auto w-full max-w-7xl px-4 py-20 sm:px-6 lg:px-8">
+          <div className="max-w-2xl space-y-3">
+            <p className="text-sm font-medium text-primary">One identity, isolated projects</p>
+            <h2
+              id="projects-title"
+              className="font-heading text-3xl font-semibold tracking-tight sm:text-4xl"
+            >
+              Your work starts with the right project
+            </h2>
+            <p className="text-lg text-muted-foreground text-pretty">
+              Sophy keeps membership, policy, data, usage, and provider spend inside each project,
+              while giving you one account and a personal default.
+            </p>
+          </div>
+          <div className="mt-12 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+            {PROJECT_FEATURES.map((feature) => {
+              const Icon = feature.icon;
+              return (
+                <div key={feature.title} className="rounded-xl bg-card p-6 ring-1 ring-border">
+                  <div className="grid size-10 place-items-center rounded-lg bg-primary/10 text-primary">
+                    <Icon className="size-5" />
+                  </div>
+                  <h3 className="font-heading mt-4 text-base font-medium">{feature.title}</h3>
+                  <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{feature.body}</p>
+                </div>
+              );
+            })}
           </div>
         </div>
       </section>
@@ -448,7 +506,7 @@ export default function HomePage() {
                 'h-11 border border-primary-foreground/30 bg-primary-foreground/10 px-6 text-base text-primary-foreground hover:bg-primary-foreground/20',
               )}
             >
-              Sign in
+              Sign in or create an account
             </Link>
           </div>
         </div>

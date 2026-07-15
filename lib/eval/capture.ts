@@ -135,6 +135,7 @@ export function continuesConversation(
 }
 
 interface CaptureInput {
+  projectId: string;
   keyId: string;
   surface: 'chat' | 'responses';
   systemPrompt: string | null;
@@ -155,7 +156,13 @@ async function captureEvalSample(input: CaptureInput): Promise<void> {
     const [run] = await db
       .select({ id: evalRuns.id })
       .from(evalRuns)
-      .where(and(eq(evalRuns.apiKeyId, input.keyId), eq(evalRuns.status, 'running')))
+      .where(
+        and(
+          eq(evalRuns.projectId, input.projectId),
+          eq(evalRuns.apiKeyId, input.keyId),
+          eq(evalRuns.status, 'running'),
+        ),
+      )
       .limit(1);
     if (!run) return;
 
@@ -172,6 +179,7 @@ async function captureEvalSample(input: CaptureInput): Promise<void> {
       .where(
         and(
           eq(evalSamples.runId, run.id),
+          eq(evalSamples.projectId, input.projectId),
           sql`${evalSamples.request} is not null`,
           sql`jsonb_array_length(${evalSamples.request}) < ${input.messages.length}`,
         ),
@@ -213,7 +221,12 @@ async function captureEvalSample(input: CaptureInput): Promise<void> {
           // conversation continued >1h after it started gets abandoned.
           createdAt: new Date(),
         })
-        .where(eq(evalSamples.id, target.id));
+        .where(
+          and(
+            eq(evalSamples.projectId, input.projectId),
+            eq(evalSamples.id, target.id),
+          ),
+        );
       return;
     }
 
@@ -228,6 +241,7 @@ async function captureEvalSample(input: CaptureInput): Promise<void> {
         .where(
           and(
             eq(evalRuns.id, run.id),
+            eq(evalRuns.projectId, input.projectId),
             eq(evalRuns.status, 'running'),
             sql`${evalRuns.capturedN} < ${evalRuns.targetN}`,
           ),
@@ -236,6 +250,7 @@ async function captureEvalSample(input: CaptureInput): Promise<void> {
       if (claimed.length === 0) return; // run full or no longer running
 
       await tx.insert(evalSamples).values({
+        projectId: input.projectId,
         runId: run.id,
         usageEventId: input.usageEventId ?? null,
         surface: input.surface,
@@ -301,6 +316,7 @@ export function scheduleChampionCapture(
   if (hasNonTextParts(messages)) return;
   waitUntil(
     captureEvalSample({
+      projectId: ctx.gateway.projectId,
       keyId: ctx.keyId,
       surface,
       systemPrompt: ctx.systemPrompt,

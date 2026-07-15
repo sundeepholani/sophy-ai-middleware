@@ -71,6 +71,13 @@
       "when": 1783763485868,
       "tag": "0009_melted_nightshade",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1784086100763,
+      "tag": "0010_yielding_fabian_cortez",
+      "breakpoints": true
     }
   ]
 }

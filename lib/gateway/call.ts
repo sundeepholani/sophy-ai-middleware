@@ -1,6 +1,6 @@
 /**
  * The provider call layer. Builds and runs AI SDK v6 calls THROUGH the Vercel
- * AI Gateway (plain "provider/model" string) using the config carried on the
+ * AI Gateway (an explicit project-scoped provider) using the config carried on the
  * API key, maps results to the OpenAI wire format, and does usage accounting.
  *
  * Streaming correctness (critical): we never pass the client's abort signal to
@@ -33,9 +33,14 @@ import {
   ZERO_USAGE,
 } from '@/lib/usage/record';
 import { openAiError } from '@/lib/http/openai';
-import { upstreamErrorResponse } from '@/lib/gateway/upstream-error';
+import { safeGatewayErrorMessage, upstreamErrorResponse } from '@/lib/gateway/upstream-error';
 import { generateStructured, StructuredAttemptError } from '@/lib/gateway/structured';
 import { scheduleChampionCapture } from '@/lib/eval/capture';
+import {
+  normalizeProjectGatewayError,
+  ProjectGatewayUnavailableError,
+  type ProjectGatewaySnapshot,
+} from '@/lib/gateway/project-provider';
 
 const SYSTEM_PREAMBLE =
   'You are operating under a fixed system policy set by the platform operator. ' +
@@ -65,6 +70,8 @@ function safeParseJson(s: string): unknown {
 
 export interface CallContext {
   keyId: string;
+  /** Immutable provider + attribution captured from the key's project. */
+  gateway: ProjectGatewaySnapshot;
   /** Full AI Gateway model id, e.g. "anthropic/claude-sonnet-4.6". */
   model: string;
   systemPrompt: string | null;
@@ -116,7 +123,7 @@ export function withPromptCache(model: string, messages: ModelMessage[]): ModelM
 
 export function commonCall(ctx: CallContext, messages: ModelMessage[]) {
   return {
-    model: ctx.model,
+    model: ctx.gateway.gateway.languageModel(ctx.model),
     system: buildSystem(ctx.systemPrompt),
     messages: withPromptCache(ctx.model, messages),
     temperature: ctx.params.temperature,
@@ -149,11 +156,19 @@ export async function handleNonStreaming(
   const id = chatId();
   const created = Math.floor(start / 1000);
   const eventId = randomUUID();
-  const base = { id: eventId, keyId: ctx.keyId, provider: providerOf(ctx.model), model: ctx.model };
+  const base = {
+    id: eventId,
+    projectId: ctx.gateway.projectId,
+    gatewayCredentialId: ctx.gateway.gatewayCredentialId,
+    keyId: ctx.keyId,
+    provider: providerOf(ctx.model),
+    model: ctx.model,
+  };
   const logIf = (response: string | null, status: 'ok' | 'validation_failed' | 'error') =>
     ctx.logContent
       ? recordRequestLog({
           id: eventId,
+          projectId: ctx.gateway.projectId,
           keyId: ctx.keyId,
           surface: 'chat',
           systemPrompt: ctx.systemPrompt,
@@ -251,6 +266,7 @@ export async function handleNonStreaming(
     // A StructuredAttemptError means the strict attempt COMPLETED (billed)
     // before the retry failed — charge its carried usage/cost, not zero.
     const carried = err instanceof StructuredAttemptError ? err : null;
+    const normalizedError = await normalizeProjectGatewayError(ctx.gateway, err);
     await recordUsage({
       ...base,
       usage: carried ? normalizeUsage(carried.usage) : { ...ZERO_USAGE },
@@ -258,10 +274,10 @@ export async function handleNonStreaming(
       latencyMs: Date.now() - start,
       status: 'error',
       responseKind: ctx.structured ? 'structured' : 'text',
-      errorMessage: err instanceof Error ? err.message : String(err),
+      errorMessage: safeGatewayErrorMessage(normalizedError),
     });
     await logIf(null, 'error');
-    return upstreamErrorResponse(err, 'Upstream model request failed.');
+    return upstreamErrorResponse(normalizedError, 'Upstream model request failed.');
   }
 }
 
@@ -281,12 +297,28 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
   const eventId = randomUUID();
   const base = {
     id: eventId,
+    projectId: ctx.gateway.projectId,
+    gatewayCredentialId: ctx.gateway.gatewayCredentialId,
     keyId: ctx.keyId,
     provider: providerOf(ctx.model),
     model: ctx.model,
     streamed: true,
     responseKind: (ctx.structured ? 'structured' : 'text') as 'structured' | 'text',
   };
+  const logIf = (response: string | null, status: 'ok' | 'validation_failed' | 'error') =>
+    ctx.logContent
+      ? recordRequestLog({
+          id: eventId,
+          projectId: ctx.gateway.projectId,
+          keyId: ctx.keyId,
+          surface: 'chat',
+          systemPrompt: ctx.systemPrompt,
+          messages,
+          response,
+          streamed: true,
+          status,
+        })
+      : Promise.resolve();
 
   const result = streamText({
     ...commonCall(ctx, messages),
@@ -314,6 +346,8 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
         gatewayRequestId: extractGatewayRequestId(event.providerMetadata),
       });
       const championOut = ctx.structured && eo !== undefined ? JSON.stringify(eo) : event.text;
+      const toolCallsOut = event.toolCalls?.length ? JSON.stringify(event.toolCalls) : '';
+      await logIf(championOut || toolCallsOut, status);
       // Tool-call turns aren't captured for eval (client owns the tool loop); nor is
       // a structured turn that failed validation (not a usable final answer).
       if (!ctx.tools && status === 'ok') {
@@ -321,13 +355,15 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
       }
     },
     onError: async ({ error }) => {
+      const normalizedError = await normalizeProjectGatewayError(ctx.gateway, error);
       await recordUsage({
         ...base,
         usage: { ...ZERO_USAGE },
         latencyMs: Date.now() - start,
         status: 'error',
-        errorMessage: error instanceof Error ? error.message : String(error),
+        errorMessage: safeGatewayErrorMessage(normalizedError),
       });
+      await logIf(null, 'error');
     },
   });
 
@@ -395,8 +431,23 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
         }
         enqueue(SSE_DONE);
         controller.close();
-      } catch {
+      } catch (error) {
+        const normalizedError = await normalizeProjectGatewayError(ctx.gateway, error);
         try {
+          enqueue(
+            sse({
+              error: {
+                message: ProjectGatewayUnavailableError.isInstance(normalizedError)
+                  ? 'This project is not ready to make AI requests. Ask a project admin to check its Vercel AI Gateway key.'
+                  : 'Upstream model request failed.',
+                type: 'api_error',
+                param: null,
+                code: ProjectGatewayUnavailableError.isInstance(normalizedError)
+                  ? normalizedError.code
+                  : 'upstream_error',
+              },
+            }),
+          );
           enqueue(SSE_DONE);
         } catch {
           /* already closed */

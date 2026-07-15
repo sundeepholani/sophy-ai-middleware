@@ -11,6 +11,10 @@ import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
 import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
 import { openAiError, type ImageGenerationRequest } from '@/lib/http/openai';
 import { imageCapability, parseImageRequest, handleImageGeneration } from '@/lib/gateway/images';
+import {
+  projectGatewayUnavailableResponse,
+  resolveProjectGateway,
+} from '@/lib/gateway/project-provider';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -27,6 +31,17 @@ export async function POST(req: Request): Promise<Response> {
   const key = await verifyKey(token);
   if (!key) {
     return openAiError(401, 'authentication_error', 'Invalid API key.', { code: 'invalid_api_key' });
+  }
+  let gateway;
+  try {
+    gateway = await resolveProjectGateway(key.projectId);
+  } catch (error) {
+    const unavailable = projectGatewayUnavailableResponse(error);
+    if (unavailable) return unavailable;
+    console.error('[gateway] project provider resolution failed', { projectId: key.projectId });
+    return openAiError(503, 'api_error', 'This project is temporarily unable to make AI requests.', {
+      code: 'project_gateway_unavailable',
+    });
   }
 
   // 2) Parse the body.
@@ -78,5 +93,5 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   // 6) Generate + record usage + respond.
-  return handleImageGeneration({ keyId: key.id, model: key.model }, parsed.value);
+  return handleImageGeneration({ keyId: key.id, gateway, model: key.model }, parsed.value);
 }

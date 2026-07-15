@@ -19,6 +19,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { ModelCombobox } from '@/components/admin/model-combobox';
+import { projectPath } from '@/components/admin/project-path';
 import {
   Dialog,
   DialogContent,
@@ -30,6 +31,7 @@ import {
 type Summary = NonNullable<KeyEval['summary']>;
 
 export function EvalDialog({
+  projectId,
   keyRow,
   models,
   initialStatus,
@@ -37,6 +39,7 @@ export function EvalDialog({
   open,
   onOpenChange,
 }: {
+  projectId: string;
   keyRow: { id: string; name: string; model: string };
   models: AvailableModel[];
   /** Latest run status from the keys page (cheap hint); the full body loads on open. */
@@ -60,7 +63,7 @@ export function EvalDialog({
     let active = true;
     const tick = async () => {
       try {
-        const fresh = await refreshKeyEval(keyRow.id);
+        const fresh = await refreshKeyEval({ projectId, apiKeyId: keyRow.id });
         if (active) {
           setFetched(fresh);
           setLoaded(true);
@@ -76,7 +79,7 @@ export function EvalDialog({
       active = false;
       clearInterval(id);
     };
-  }, [open, keyRow.id, running]);
+  }, [open, projectId, keyRow.id, running]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -92,11 +95,12 @@ export function EvalDialog({
         {!loaded ? (
           <p className="py-10 text-center text-sm text-muted-foreground">Loading eval…</p>
         ) : fetched?.status === 'running' ? (
-          <RunningView current={fetched} onDone={() => onOpenChange(false)} />
+          <RunningView projectId={projectId} current={fetched} onDone={() => onOpenChange(false)} />
         ) : (
           <>
-            {completed && <CompletedView current={fetched!} />}
+            {completed && <CompletedView projectId={projectId} current={fetched!} />}
             <StartForm
+              projectId={projectId}
               keyRow={keyRow}
               models={models}
               judgeModel={judgeModel}
@@ -110,7 +114,15 @@ export function EvalDialog({
   );
 }
 
-function RunningView({ current, onDone }: { current: KeyEval; onDone: () => void }) {
+function RunningView({
+  projectId,
+  current,
+  onDone,
+}: {
+  projectId: string;
+  current: KeyEval;
+  onDone: () => void;
+}) {
   const [isPending, startTransition] = useTransition();
   return (
     <div className="space-y-3">
@@ -135,7 +147,7 @@ function RunningView({ current, onDone }: { current: KeyEval; onDone: () => void
         <p className="mt-2 text-xs text-muted-foreground">
           Captures the next {current.targetN} successful requests on this key; the challenger + judge
           run in the background. You’ll be emailed when it completes.{' '}
-          <Link href={`/admin/evals/${current.runId}`} className="text-primary hover:underline">
+          <Link href={projectPath(projectId, `evals/${current.runId}`)} className="text-primary hover:underline">
             Full details
           </Link>
         </p>
@@ -164,7 +176,7 @@ function RunningView({ current, onDone }: { current: KeyEval; onDone: () => void
           onClick={() =>
             startTransition(async () => {
               try {
-                await cancelEvalRun(current.runId);
+                await cancelEvalRun({ projectId, runId: current.runId });
                 toast.success('Eval cancelled');
                 onDone();
               } catch {
@@ -183,7 +195,7 @@ function RunningView({ current, onDone }: { current: KeyEval; onDone: () => void
   );
 }
 
-function CompletedView({ current }: { current: KeyEval }) {
+function CompletedView({ projectId, current }: { projectId: string; current: KeyEval }) {
   const s = current.summary as Summary;
   const rec = REC_LABEL[s.recommendation] ?? REC_LABEL.inconclusive;
   const delta = s.projectedMonthlyCostDeltaUsd;
@@ -194,7 +206,7 @@ function CompletedView({ current }: { current: KeyEval }) {
           <span className="text-sm font-medium">
             Last result{' '}
             <Link
-              href={`/admin/evals/${current.runId}`}
+              href={projectPath(projectId, `evals/${current.runId}`)}
               className="font-normal text-primary hover:underline"
             >
               · details
@@ -244,12 +256,14 @@ function CompletedView({ current }: { current: KeyEval }) {
 }
 
 function StartForm({
+  projectId,
   keyRow,
   models,
   judgeModel,
   hasPrevious,
   onDone,
 }: {
+  projectId: string;
   keyRow: { id: string; name: string; model: string };
   models: AvailableModel[];
   judgeModel: string;
@@ -269,7 +283,12 @@ function StartForm({
     if (!Number.isInteger(n) || n <= 0) return toast.error('Sample size must be a positive whole number');
     startTransition(async () => {
       try {
-        await startEvalRun({ apiKeyId: keyRow.id, challengerModel: challenger.trim(), targetN: n });
+        await startEvalRun({
+          projectId,
+          apiKeyId: keyRow.id,
+          challengerModel: challenger.trim(),
+          targetN: n,
+        });
         toast.success('Eval started');
         onDone();
       } catch (e) {

@@ -28,6 +28,10 @@ import {
 } from '@/lib/http/responses';
 import { assertOwnedBlobs } from '@/lib/files/blob';
 import { openAiError } from '@/lib/http/openai';
+import {
+  projectGatewayUnavailableResponse,
+  resolveProjectGateway,
+} from '@/lib/gateway/project-provider';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -43,6 +47,17 @@ export async function POST(req: Request): Promise<Response> {
   const key = await verifyKey(token);
   if (!key) {
     return openAiError(401, 'authentication_error', 'Invalid API key.', { code: 'invalid_api_key' });
+  }
+  let gateway;
+  try {
+    gateway = await resolveProjectGateway(key.projectId);
+  } catch (error) {
+    const unavailable = projectGatewayUnavailableResponse(error);
+    if (unavailable) return unavailable;
+    console.error('[gateway] project provider resolution failed', { projectId: key.projectId });
+    return openAiError(503, 'api_error', 'This project is temporarily unable to make AI requests.', {
+      code: 'project_gateway_unavailable',
+    });
   }
 
   // 2) Parse the body.
@@ -116,7 +131,7 @@ export async function POST(req: Request): Promise<Response> {
   // Cross-key blob protection: a key may not reference another key's upload.
   const referencedUrls = responsesReferencedUrls(body.input);
   if (referencedUrls.length > 0) {
-    const ok = await assertOwnedBlobs(key.id, referencedUrls);
+    const ok = await assertOwnedBlobs(key.projectId, key.id, referencedUrls);
     if (!ok) {
       return openAiError(403, 'invalid_request_error', 'Referenced file is not accessible to this key.', {
         code: 'file_access_denied',
@@ -136,10 +151,24 @@ export async function POST(req: Request): Promise<Response> {
     : null;
   const basePrompt = composeSystemPrompt(key.systemPrompt, clientPrompt);
   const structured = key.outputSchema != null;
+  let systemPrompt: string | null;
+  try {
+    systemPrompt = await systemPromptWithKb(basePrompt, key.knowledgebaseId, messages, {
+      keyId: key.id,
+      gateway,
+    });
+  } catch (error) {
+    const unavailable = projectGatewayUnavailableResponse(error);
+    if (unavailable) return unavailable;
+    return openAiError(502, 'api_error', 'Knowledgebase retrieval failed.', {
+      code: 'upstream_error',
+    });
+  }
   const ctx: CallContext = {
     keyId: key.id,
+    gateway,
     model: key.model,
-    systemPrompt: await systemPromptWithKb(basePrompt, key.knowledgebaseId, messages, key.id),
+    systemPrompt,
     params: resolveParams(key.params),
     structured,
     schema: structured ? normalizeOutputSchema(key.outputSchema) : key.outputSchema,

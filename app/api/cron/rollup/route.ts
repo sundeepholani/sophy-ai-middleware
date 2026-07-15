@@ -25,6 +25,7 @@ async function rollupRecentDays(): Promise<number> {
   const since = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
   const rows = await getDb()
     .select({
+      projectId: usageEvents.projectId,
       apiKeyId: usageEvents.apiKeyId,
       periodStart: sql<string>`to_char(date_trunc('day', ${usageEvents.createdAt}), 'YYYY-MM-DD')`,
       requests: sql<string>`count(*)`,
@@ -37,13 +38,18 @@ async function rollupRecentDays(): Promise<number> {
     // Client traffic only: rollups are per-key request/error/cost history, and
     // eval/kb rows (key-attributed or keyless) would skew those semantics.
     .where(and(gte(usageEvents.createdAt, since), eq(usageEvents.source, 'proxy')))
-    .groupBy(usageEvents.apiKeyId, sql`date_trunc('day', ${usageEvents.createdAt})`);
+    .groupBy(
+      usageEvents.projectId,
+      usageEvents.apiKeyId,
+      sql`date_trunc('day', ${usageEvents.createdAt})`,
+    );
 
   for (const r of rows) {
     if (!r.apiKeyId) continue; // proxy rows always carry a key; guard for the type
     await getDb()
       .insert(usageRollups)
       .values({
+        projectId: r.projectId,
         apiKeyId: r.apiKeyId,
         periodStart: r.periodStart,
         requests: Number(r.requests),
@@ -53,7 +59,7 @@ async function rollupRecentDays(): Promise<number> {
         errors: Number(r.errors),
       })
       .onConflictDoUpdate({
-        target: [usageRollups.apiKeyId, usageRollups.periodStart],
+        target: [usageRollups.projectId, usageRollups.apiKeyId, usageRollups.periodStart],
         set: {
           requests: Number(r.requests),
           inputTokens: Number(r.inputTokens),

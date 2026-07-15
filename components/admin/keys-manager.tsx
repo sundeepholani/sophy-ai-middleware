@@ -1,8 +1,9 @@
 'use client';
 
 import { useId, useState, useTransition } from 'react';
+import Link from 'next/link';
 import { toast } from 'sonner';
-import { Plus, Pencil, FlaskConical, Ban, RotateCw, Replace } from 'lucide-react';
+import { Plus, Pencil, FlaskConical, Ban, RotateCw, Replace, Cable } from 'lucide-react';
 import {
   createKey,
   updateKey,
@@ -15,7 +16,8 @@ import {
 } from '@/app/admin/actions';
 import type { KeyRow } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
-import type { SessionRole } from '@/lib/auth/session-config';
+import type { ProjectRole } from '@/components/admin/project-types';
+import { projectPath } from '@/components/admin/project-path';
 import type { EvalRunStatus } from '@/db/schema';
 import { EvalDialog } from '@/components/admin/eval-dialog';
 import { ModelCombobox } from '@/components/admin/model-combobox';
@@ -71,7 +73,7 @@ function posIntOrNull(s: string): number | null | 'invalid' {
   const n = Number(t);
   return Number.isInteger(n) && n > 0 ? n : 'invalid';
 }
-function quotaLabel(k: KeyRow, role: SessionRole): string {
+function quotaLabel(k: KeyRow, role: ProjectRole): string {
   const rpm = k.rpmLimit != null ? `${k.rpmLimit}/min` : '∞';
   // The monthly spend budget is admin-controlled and hidden from editors.
   if (role !== 'admin') return rpm;
@@ -98,6 +100,9 @@ function reportBulk(result: BulkActionResult, verb: string) {
 }
 
 export function KeysManager({
+  projectId,
+  projectName,
+  gatewayReady,
   keys,
   models,
   modelsUnavailable = false,
@@ -107,12 +112,15 @@ export function KeysManager({
   users,
   knowledgebases = [],
 }: {
+  projectId: string;
+  projectName: string;
+  gatewayReady: boolean;
   keys: KeyRow[];
   models: AvailableModel[];
   modelsUnavailable?: boolean;
   evalStatuses?: Record<string, EvalRunStatus>;
   judgeModel: string;
-  role: SessionRole;
+  role: ProjectRole;
   users: { id: string; email: string }[];
   knowledgebases?: { id: string; name: string }[];
 }) {
@@ -190,25 +198,45 @@ export function KeysManager({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      {!gatewayReady && (
+        <div className="flex flex-col gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 sm:flex-row sm:items-center">
+          <Cable className="size-5 shrink-0 text-amber-600" />
+          <div className="min-w-0 flex-1">
+            <p className="font-medium">Gateway setup required</p>
+            <p className="text-sm text-muted-foreground">
+              {role === 'admin'
+                ? `Connect ${projectName} to Vercel AI Gateway before creating a Sophy API key.`
+                : `A Project Admin must connect ${projectName} before Sophy API keys can be created or used.`}
+            </p>
+          </div>
+          {role === 'admin' && (
+            <Button variant="outline" render={<Link href={projectPath(projectId, 'settings')} />}>
+              Connect Gateway
+            </Button>
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h2 className="text-sm font-medium text-muted-foreground">
           {query.trim()
             ? `${filtered.length} of ${statusKeys.length} ${tab} keys`
             : `${statusKeys.length} ${tab} key${statusKeys.length === 1 ? '' : 's'}`}
         </h2>
-        <Button size="sm" onClick={() => setCreateOpen(true)}>
+        <Button size="sm" disabled={!gatewayReady} onClick={() => setCreateOpen(true)}>
           <Plus className="h-4 w-4" />
-          New API key
+          New Sophy API key
         </Button>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogContent className="max-h-[85vh] w-full overflow-y-auto sm:max-w-2xl">
             <DialogHeader>
-              <DialogTitle>New API key</DialogTitle>
+              <DialogTitle>New Sophy API key</DialogTitle>
               <DialogDescription>
                 Pick a model and write the system prompt. The key is shown once.
               </DialogDescription>
             </DialogHeader>
             <KeyForm
+              projectId={projectId}
               mode="create"
               models={models}
               modelsUnavailable={modelsUnavailable}
@@ -260,7 +288,7 @@ export function KeysManager({
         </div>
       )}
 
-      <div className="overflow-hidden rounded-lg border bg-card">
+      <div className="overflow-x-auto rounded-lg border bg-card">
         <Table>
           <TableHeader className="bg-muted/50">
             <TableRow>
@@ -295,7 +323,9 @@ export function KeysManager({
                   {tab === 'revoked'
                     ? 'No revoked keys.'
                     : keys.length === 0
-                      ? 'No keys yet — create one with “New API key”.'
+                      ? gatewayReady
+                        ? 'No keys yet — create one with “New Sophy API key”.'
+                        : 'No Sophy API keys yet — Gateway setup is required first.'
                       : 'No active keys.'}
                 </TableCell>
               </TableRow>
@@ -367,6 +397,7 @@ export function KeysManager({
                   )}
                   {k.status === 'active' && (
                     <RotateButton
+                      projectId={projectId}
                       id={k.id}
                       name={k.name}
                       onRotated={(key) => {
@@ -375,7 +406,9 @@ export function KeysManager({
                       }}
                     />
                   )}
-                  {k.status === 'active' && <RevokeButton id={k.id} name={k.name} />}
+                  {k.status === 'active' && (
+                    <RevokeButton projectId={projectId} id={k.id} name={k.name} />
+                  )}
                 </TableCell>
               </TableRow>
             ))}
@@ -392,6 +425,7 @@ export function KeysManager({
           </DialogHeader>
           {editing && (
             <KeyForm
+              projectId={projectId}
               key={editing.id}
               mode="edit"
               keyId={editing.id}
@@ -413,6 +447,7 @@ export function KeysManager({
           the dialog's polling/state) when a different key is opened. */}
       {evalShown && (
         <EvalDialog
+          projectId={projectId}
           key={evalShown.id}
           keyRow={{ id: evalShown.id, name: evalShown.name, model: evalShown.model }}
           models={models}
@@ -426,6 +461,7 @@ export function KeysManager({
       {/* Bulk dialogs — mounted permanently (like the edit modal) so open/close
           animates; they read the live selection each render. */}
       <BulkModelDialog
+        projectId={projectId}
         open={bulkModelOpen}
         onOpenChange={setBulkModelOpen}
         keys={selectedKeys}
@@ -435,6 +471,7 @@ export function KeysManager({
         onDone={() => setSelected(new Set())}
       />
       <BulkEvalDialog
+        projectId={projectId}
         open={bulkEvalOpen}
         onOpenChange={setBulkEvalOpen}
         keys={selectedKeys}
@@ -455,7 +492,7 @@ export function KeysManager({
       >
         <DialogContent showCloseButton={false} className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>{rotated ? 'API key rotated' : 'API key created'}</DialogTitle>
+            <DialogTitle>{rotated ? 'Sophy API key rotated' : 'Sophy API key created'}</DialogTitle>
             <DialogDescription>
               {rotated
                 ? 'The previous key has stopped working. Copy the new key now — it is shown only once and cannot be retrieved later.'
@@ -498,6 +535,7 @@ function SelectedKeysList({ keys }: { keys: KeyRow[] }) {
 }
 
 function BulkModelDialog({
+  projectId,
   open,
   onOpenChange,
   keys,
@@ -506,6 +544,7 @@ function BulkModelDialog({
   evalStatuses,
   onDone,
 }: {
+  projectId: string;
   open: boolean;
   onOpenChange: (o: boolean) => void;
   keys: KeyRow[];
@@ -540,6 +579,7 @@ function BulkModelDialog({
     startTransition(async () => {
       try {
         const res = await bulkUpdateKeyModel({
+          projectId,
           ids: keys.map((k) => k.id),
           model: model.trim(),
           stopEvalIds,
@@ -643,6 +683,7 @@ function BulkModelDialog({
 }
 
 function BulkEvalDialog({
+  projectId,
   open,
   onOpenChange,
   keys,
@@ -651,6 +692,7 @@ function BulkEvalDialog({
   evalStatuses,
   onDone,
 }: {
+  projectId: string;
   open: boolean;
   onOpenChange: (o: boolean) => void;
   keys: KeyRow[];
@@ -697,6 +739,7 @@ function BulkEvalDialog({
     startTransition(async () => {
       try {
         const res = await bulkStartEvalRuns({
+          projectId,
           ids: startableKeys.map((k) => k.id),
           challengerModel: challenger.trim(),
           targetN: Number(targetN),
@@ -813,7 +856,7 @@ function BulkEvalDialog({
   );
 }
 
-function RevokeButton({ id, name }: { id: string; name: string }) {
+function RevokeButton({ projectId, id, name }: { projectId: string; id: string; name: string }) {
   const [open, setOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
   return (
@@ -845,7 +888,7 @@ function RevokeButton({ id, name }: { id: string; name: string }) {
                 e.preventDefault();
                 startTransition(async () => {
                   try {
-                    await revokeKey(id);
+                    await revokeKey({ projectId, id });
                     toast.success('Key revoked');
                     setOpen(false);
                   } catch {
@@ -864,10 +907,12 @@ function RevokeButton({ id, name }: { id: string; name: string }) {
 }
 
 function RotateButton({
+  projectId,
   id,
   name,
   onRotated,
 }: {
+  projectId: string;
   id: string;
   name: string;
   onRotated: (fullKey: string) => void;
@@ -903,7 +948,7 @@ function RotateButton({
                 e.preventDefault();
                 startTransition(async () => {
                   try {
-                    const { fullKey } = await rotateKey(id);
+                    const { fullKey } = await rotateKey({ projectId, id });
                     setOpen(false);
                     onRotated(fullKey);
                     toast.success('Key rotated');
@@ -925,6 +970,7 @@ function RotateButton({
 }
 
 function KeyForm({
+  projectId,
   mode,
   keyId,
   initial,
@@ -937,12 +983,13 @@ function KeyForm({
   onIssued,
   onDone,
 }: {
+  projectId: string;
   mode: 'create' | 'edit';
   keyId?: string;
   initial?: KeyRow;
   models: AvailableModel[];
   modelsUnavailable?: boolean;
-  role: SessionRole;
+  role: ProjectRole;
   users: { id: string; email: string }[];
   knowledgebases: { id: string; name: string }[];
   /** Page-load hint that this key has an eval in progress (edit mode only). */
@@ -1090,11 +1137,11 @@ function KeyForm({
     startTransition(async () => {
       try {
         if (mode === 'create') {
-          const { fullKey } = await createKey(input);
+          const { fullKey } = await createKey({ projectId, ...input });
           onIssued?.(fullKey);
           toast.success('Key created');
         } else {
-          const res = await updateKey({ id: keyId!, ...input, stopRunningEval: stopEval });
+          const res = await updateKey({ projectId, id: keyId!, ...input, stopRunningEval: stopEval });
           if (res.requiresEvalStop) {
             setConfirmStopEval(true);
             return;

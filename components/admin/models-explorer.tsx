@@ -114,7 +114,7 @@ export function ModelsExplorer({ models }: { models: AvailableModel[] }) {
         <CapabilityCheckboxes selected={caps} onToggle={toggleCap} idPrefix="models-filter" />
       </div>
 
-      <div className="overflow-hidden rounded-lg border bg-card">
+      <div className="overflow-x-auto rounded-lg border bg-card">
         <Table>
           <TableHeader className="bg-muted/50">
             <TableRow>

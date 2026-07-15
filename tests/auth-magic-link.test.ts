@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeEmail, hashToken } from '@/lib/auth/magic-link';
+import {
+  authIntentOnboardingDecision,
+  normalizeEmail,
+  hashToken,
+} from '@/lib/auth/magic-link';
 
 describe('normalizeEmail', () => {
   it('trims and lowercases', () => {
@@ -16,5 +20,19 @@ describe('hashToken', () => {
     expect(h).toBe(hashToken(raw)); // deterministic
     expect(h).not.toBe(raw);
     expect(hashToken('abc124')).not.toBe(h); // sensitive to input
+  });
+});
+
+describe('self-signup onboarding decision', () => {
+  it('creates My Project only when no identity exists', () => {
+    expect(authIntentOnboardingDecision(null)).toBe('create_my_project');
+  });
+
+  it('signs in an active invitation-created identity without another project', () => {
+    expect(authIntentOnboardingDecision('active')).toBe('sign_in');
+  });
+
+  it('does not reactivate an inactive identity', () => {
+    expect(authIntentOnboardingDecision('inactive')).toBe('reject');
   });
 });

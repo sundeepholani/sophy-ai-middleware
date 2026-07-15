@@ -7,11 +7,18 @@
  * Bounded per invocation (batch) and idempotent — the cron lock prevents
  * overlap, and the status guards prevent double-finalize/double-email.
  */
-import { and, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 import { generateText } from 'ai';
 import type { ModelMessage } from 'ai';
 import { getDb } from '@/db/client';
-import { evalRuns, evalSamples, usageEvents, type EvalWinner, type KeyParams } from '@/db/schema';
+import {
+  evalRuns,
+  evalSamples,
+  projectSettings,
+  usageEvents,
+  type EvalWinner,
+  type KeyParams,
+} from '@/db/schema';
 import { buildSystem, providerOf } from '@/lib/gateway/call';
 import { generateStructured, StructuredAttemptError } from '@/lib/gateway/structured';
 import {
@@ -25,14 +32,22 @@ import { judge, JudgeError, type JudgeVerdict } from '@/lib/eval/judge';
 import { evalModel } from '@/lib/eval/model';
 import { summarize, type JudgedSample } from '@/lib/eval/aggregate';
 import { recordedEvalSpendUsd } from '@/lib/eval/spend';
-import { getSettings } from '@/lib/admin/settings';
 import { formatEvalEmail, sendEvalEmail } from '@/lib/eval/email';
+import {
+  normalizeProjectGatewayError,
+  ProjectGatewayUnavailableError,
+  resolveProjectGateway,
+  type ProjectGatewaySnapshot,
+} from '@/lib/gateway/project-provider';
+import { safeGatewayErrorMessage } from '@/lib/gateway/upstream-error';
 
 const MAX_OUTPUT_CHARS = 100_000;
 const MODEL_TIMEOUT_MS = 60_000;
 const STALE_PENDING_MS = 60 * 60 * 1000;
+const GATEWAY_UNAVAILABLE_CODE = 'project_gateway_unavailable';
 
 async function replayChallenger(
+  gateway: ProjectGatewaySnapshot,
   model: string,
   systemPrompt: string | null,
   messages: ModelMessage[],
@@ -49,7 +64,7 @@ async function replayChallenger(
 }> {
   const start = Date.now();
   const callArgs = {
-    model: evalModel(model),
+    model: evalModel(gateway, model),
     system: buildSystem(systemPrompt),
     messages,
     temperature: params.temperature,
@@ -106,6 +121,10 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
       and(
         eq(evalSamples.status, 'pending'),
         lt(evalSamples.createdAt, new Date(Date.now() - STALE_PENDING_MS)),
+        // Credential-blocked samples are deliberately pending and recover as
+        // soon as an admin reconnects the project. They must not be converted
+        // into permanent failures by the generic poison-sample backstop.
+        sql`${evalSamples.errorMessage} is distinct from ${GATEWAY_UNAVAILABLE_CODE}`,
       ),
     );
 
@@ -135,22 +154,46 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
       structured: evalSamples.structured,
       outputSchema: evalSamples.outputSchema,
       championOutput: evalSamples.championOutput,
+      projectId: evalRuns.projectId,
       apiKeyId: evalRuns.apiKeyId,
       challengerModel: evalRuns.challengerModel,
       judgeModel: evalRuns.judgeModel,
     })
     .from(evalSamples)
-    .innerJoin(evalRuns, eq(evalSamples.runId, evalRuns.id))
+    .innerJoin(
+      evalRuns,
+      and(
+        eq(evalSamples.runId, evalRuns.id),
+        eq(evalSamples.projectId, evalRuns.projectId),
+      ),
+    )
     .where(and(eq(evalSamples.status, 'pending'), eq(evalRuns.status, 'running')))
+    .orderBy(
+      // Healthy projects always get the batch before credential-blocked work.
+      // A blocked retry refreshes createdAt below, rotating it to the back of
+      // this secondary queue instead of monopolizing every cron invocation.
+      sql`case when ${evalSamples.errorMessage} = ${GATEWAY_UNAVAILABLE_CODE} then 1 else 0 end`,
+      asc(evalSamples.createdAt),
+    )
     .limit(batch);
 
   let judged = 0;
+  const gateways = new Map<string, Promise<ProjectGatewaySnapshot>>();
+  const gatewayFor = (projectId: string) => {
+    let pendingGateway = gateways.get(projectId);
+    if (!pendingGateway) {
+      pendingGateway = resolveProjectGateway(projectId);
+      gateways.set(projectId, pendingGateway);
+    }
+    return pendingGateway;
+  };
   for (const p of pending) {
     // Cron-side writes only land on the exact sample version we selected: the
     // multi-turn continuation reset (capture.ts) re-stamps createdAt while
     // resetting the row to pending, so a stale write matches 0 rows and the
     // reset sample is re-processed whole next tick instead of half-overwritten.
     const sameVersion = and(
+      eq(evalSamples.projectId, p.projectId),
       eq(evalSamples.id, p.sampleId),
       eq(evalSamples.status, 'pending'),
       sql`${evalSamples.createdAt}::text = ${p.createdAtText}`,
@@ -162,10 +205,13 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
     // phantom error event.
     let stage: 'challenger' | 'judge' = 'challenger';
     let stageBooked = false;
+    let gateway: ProjectGatewaySnapshot | undefined;
     try {
+      gateway = await gatewayFor(p.projectId);
       const messages = (p.request ?? []) as ModelMessage[];
       const params = (p.params ?? {}) as KeyParams;
       const challenger = await replayChallenger(
+        gateway,
         p.challengerModel,
         p.systemPrompt,
         messages,
@@ -184,6 +230,8 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
         reasoningTokens: 0,
       };
       await recordUsage({
+        projectId: p.projectId,
+        gatewayCredentialId: gateway.gatewayCredentialId,
         keyId: p.apiKeyId,
         source: 'eval_challenger',
         provider: providerOf(p.challengerModel),
@@ -231,6 +279,7 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
         stageBooked = false;
         const judgeStart = Date.now();
         verdict = await judge({
+          gateway,
           judgeModel: p.judgeModel,
           systemPrompt: p.systemPrompt,
           messages,
@@ -240,6 +289,8 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
         });
         // Book the judge call the same way (only when one actually ran).
         await recordUsage({
+          projectId: p.projectId,
+          gatewayCredentialId: gateway.gatewayCredentialId,
           keyId: p.apiKeyId,
           source: 'eval_judge',
           provider: providerOf(p.judgeModel),
@@ -276,6 +327,10 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
         .returning({ id: evalSamples.id });
       if (finalized.length > 0) judged++;
     } catch (err) {
+      const normalizedError = gateway
+        ? await normalizeProjectGatewayError(gateway, err)
+        : err;
+      const credentialUnavailable = ProjectGatewayUnavailableError.isInstance(normalizedError);
       // Billed-but-failed calls still carry their cost: JudgeError = judge
       // attempt(s), StructuredAttemptError escaping replayChallenger = the
       // challenger's completed strict attempt. Persist whichever applies so a
@@ -283,14 +338,20 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
       // cron write — a sample reset by a newer turn is left for re-processing.
       const judgeCost = err instanceof JudgeError ? err.costUsd : null;
       const challengerCost = err instanceof StructuredAttemptError ? err.costUsd : null;
-      const errorMessage = err instanceof Error ? err.message.slice(0, 500) : String(err);
+      const errorMessage = credentialUnavailable
+        ? normalizedError.code
+        : stage === 'judge'
+          ? 'eval_judge_failed'
+          : 'eval_challenger_failed';
       // Book the failed stage's usage event too — the carried cost/usage is
       // exactly the billed-but-unrecorded spend class from the Jul-10 incident.
       // Skipped when the stage's call already got its 'ok' row (the throw came
       // from a later sample UPDATE, not from a gateway call).
       const carried = err instanceof JudgeError || err instanceof StructuredAttemptError ? err : null;
-      if (!stageBooked) {
+      if (!stageBooked && gateway) {
         await recordUsage({
+          projectId: p.projectId,
+          gatewayCredentialId: gateway.gatewayCredentialId,
           keyId: p.apiKeyId,
           source: stage === 'judge' ? 'eval_judge' : 'eval_challenger',
           provider: providerOf(stage === 'judge' ? p.judgeModel : p.challengerModel),
@@ -299,13 +360,18 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
           costUsd: carried?.costUsd,
           status: 'error',
           responseKind: stage === 'judge' || p.structured ? 'structured' : 'text',
-          errorMessage,
+          errorMessage: safeGatewayErrorMessage(normalizedError),
         });
       }
       await db
         .update(evalSamples)
         .set({
-          status: 'failed',
+          // A project credential outage is recoverable. Keep the sample pending
+          // and refresh its version timestamp so the stale-pending backstop does
+          // not turn an admin-fixable outage into a permanent sample failure.
+          ...(credentialUnavailable
+            ? { status: 'pending' as const, createdAt: new Date() }
+            : { status: 'failed' as const }),
           ...(judgeCost != null ? { judgeCostUsd: String(judgeCost) } : {}),
           ...(challengerCost != null ? { challengerCostUsd: String(challengerCost) } : {}),
           errorMessage,
@@ -328,7 +394,13 @@ async function finalizeRuns(): Promise<number> {
     const [{ pendingCount }] = await db
       .select({ pendingCount: sql<string>`count(*)` })
       .from(evalSamples)
-      .where(and(eq(evalSamples.runId, run.id), eq(evalSamples.status, 'pending')));
+      .where(
+        and(
+          eq(evalSamples.projectId, run.projectId),
+          eq(evalSamples.runId, run.id),
+          eq(evalSamples.status, 'pending'),
+        ),
+      );
     if (Number(pendingCount) > 0) continue; // still being judged
 
     const judgedRows = await db
@@ -343,7 +415,13 @@ async function finalizeRuns(): Promise<number> {
         challengerLatencyMs: evalSamples.challengerLatencyMs,
       })
       .from(evalSamples)
-      .where(and(eq(evalSamples.runId, run.id), eq(evalSamples.status, 'judged')));
+      .where(
+        and(
+          eq(evalSamples.projectId, run.projectId),
+          eq(evalSamples.runId, run.id),
+          eq(evalSamples.status, 'judged'),
+        ),
+      );
 
     const samples: JudgedSample[] = judgedRows.map((r) => ({
       winner: r.winner ?? 'tie',
@@ -365,6 +443,7 @@ async function finalizeRuns(): Promise<number> {
       .from(usageEvents)
       .where(
         and(
+          eq(usageEvents.projectId, run.projectId),
           eq(usageEvents.apiKeyId, run.apiKeyId),
           eq(usageEvents.source, 'proxy'),
           gte(usageEvents.createdAt, since),
@@ -392,14 +471,24 @@ async function finalizeRuns(): Promise<number> {
         evalCostUsd,
         completedAt: new Date(),
       })
-      .where(and(eq(evalRuns.id, run.id), eq(evalRuns.status, 'running')))
+      .where(
+        and(
+          eq(evalRuns.projectId, run.projectId),
+          eq(evalRuns.id, run.id),
+          eq(evalRuns.status, 'running'),
+        ),
+      )
       .returning({ id: evalRuns.id });
     if (done.length === 0) continue; // someone else finalized it
 
     // Email (best-effort) — gated by the claim above, so no double-send.
     try {
-      const settings = await getSettings();
-      if (settings.notifyEmail) {
+      const [settings] = await db
+        .select({ notifyEmail: projectSettings.notifyEmail })
+        .from(projectSettings)
+        .where(eq(projectSettings.projectId, run.projectId))
+        .limit(1);
+      if (settings?.notifyEmail) {
         const { subject, html } = formatEvalEmail({
           championModel: run.championModel,
           challengerModel: run.challengerModel,
@@ -408,7 +497,12 @@ async function finalizeRuns(): Promise<number> {
         });
         const sent = await sendEvalEmail(settings.notifyEmail, subject, html);
         if (sent) {
-          await db.update(evalRuns).set({ emailedAt: new Date() }).where(eq(evalRuns.id, run.id));
+          await db
+            .update(evalRuns)
+            .set({ emailedAt: new Date() })
+            .where(
+              and(eq(evalRuns.projectId, run.projectId), eq(evalRuns.id, run.id)),
+            );
         }
       }
     } catch (err) {
@@ -426,7 +520,9 @@ async function finalizeRuns(): Promise<number> {
         championOutput: null,
         challengerOutput: null,
       })
-      .where(eq(evalSamples.runId, run.id));
+      .where(
+        and(eq(evalSamples.projectId, run.projectId), eq(evalSamples.runId, run.id)),
+      );
     finalized++;
   }
 

@@ -1,7 +1,8 @@
 # Migrating to Sophy
 
-Sophy is your organization's AI gateway. Applications authenticate with a
-Sophy-issued `mw_live_...` key instead of a provider key. Each Sophy key is bound
+Sophy is a project-scoped AI gateway. Applications authenticate with a
+Sophy-issued `mw_live_...` key instead of a provider key. Each project connects
+its own Vercel AI Gateway credential, and each Sophy key is bound
 to one model and carries the operator-owned prompt, generation parameters,
 optional JSON schema, knowledgebase, rate limit, and monthly USD budget.
 
@@ -18,7 +19,7 @@ embeddings, image generation, model discovery, and temporary file uploads.
 | Anthropic/Claude SDK | Switch to the OpenAI SDK pointed at Sophy. The key can still select a Claude model. |
 
 - **Base URL:** `https://sophy.in/v1`
-- **API key:** a Sophy key issued in the admin console
+- **API key:** a Sophy key issued inside your project in the console
 - **Model:** the key's configured model always wins; send a placeholder such as
   `"sophy"` when the SDK requires a `model` argument
 - **Prompt and parameters:** key-owned by default; client values are ignored
@@ -297,12 +298,13 @@ Validation and buffered failures use the OpenAI body shape:
 | Status | Typical meaning |
 |---|---|
 | `400` | Invalid JSON/input, unsupported field or feature, a known non-embedding/image model on those modality endpoints, malformed media URL, or upstream input rejection. |
-| `401` | Missing, invalid, expired, or revoked Sophy key. |
-| `402` | The key's monthly USD budget is exhausted, or the upstream provider has insufficient credit. |
+| `401` | Missing, invalid, expired, or revoked Sophy key, or a key whose project is inactive. |
+| `402` | The Sophy key's monthly USD budget is exhausted. |
 | `403` | A Sophy-hosted file belongs to another key. |
 | `413` | `/v1/files` upload exceeds 4 MiB (4,194,304 bytes). |
 | `429` | Sophy RPM limit or upstream provider rate/quota limit; honor `Retry-After` when present. |
-| `502` | Upstream authentication/service failure or buffered structured-output failure. |
+| `502` | A transient upstream service failure or buffered structured-output failure. |
+| `503` | The Sophy key is valid, but its project has no usable Vercel AI Gateway credential (`project_gateway_unavailable`). |
 
 Usage and cost in the console are real-time gateway estimates, not a provider
 invoice. A monthly budget is checked before a request; the request that reaches

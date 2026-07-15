@@ -7,9 +7,8 @@
  * model, a client migrating from direct OpenAI keeps its stored vectors valid by
  * binding the key to the same model (e.g. `openai/text-embedding-3-small`).
  *
- * `embedMany` resolves the model through the same gateway handle as the KB
- * pipeline (lib/kb/embed.ts) — request-scoped OIDC by default, explicit
- * AI_GATEWAY_API_KEY when set — and batches provider-side as needed.
+ * `embedMany` receives the immutable, explicit provider snapshot captured from
+ * the serving key's project and batches provider-side as needed.
  */
 import { randomUUID } from 'node:crypto';
 import { embedMany } from 'ai';
@@ -23,11 +22,14 @@ import {
   type NormalizedUsage,
 } from '@/lib/usage/record';
 import type { EmbeddingsRequest, EmbeddingsResponse } from '@/lib/http/openai';
-import { upstreamErrorResponse } from '@/lib/gateway/upstream-error';
+import { safeGatewayErrorMessage, upstreamErrorResponse } from '@/lib/gateway/upstream-error';
 import { providerOf } from '@/lib/gateway/call';
-import { embeddingModel } from '@/lib/kb/embed';
 import { listAllModels } from '@/lib/gateway/models';
 import { type AvailableModel } from '@/lib/gateway/capabilities';
+import {
+  normalizeProjectGatewayError,
+  type ProjectGatewaySnapshot,
+} from '@/lib/gateway/project-provider';
 
 /**
  * OpenAI allows up to 2048 inputs per embeddings request. This also equals the
@@ -213,6 +215,7 @@ export function toEmbeddingsResponse(
 
 export interface EmbeddingsCallContext {
   keyId: string;
+  gateway: ProjectGatewaySnapshot;
   /** Full AI Gateway embedding-model id, e.g. "openai/text-embedding-3-small". */
   model: string;
   /** When true, capture the embedded inputs to request_logs (key's logContent). */
@@ -238,11 +241,17 @@ export async function handleEmbeddings(
   const eventId = randomUUID();
   const logInputs = (status: 'ok' | 'error') =>
     ctx.logContent
-      ? recordEmbeddingLog({ id: eventId, keyId: ctx.keyId, inputs: parsed.values, status })
+      ? recordEmbeddingLog({
+          id: eventId,
+          projectId: ctx.gateway.projectId,
+          keyId: ctx.keyId,
+          inputs: parsed.values,
+          status,
+        })
       : Promise.resolve();
   try {
     const result = await embedMany({
-      model: embeddingModel(ctx.model),
+      model: ctx.gateway.gateway.embeddingModel(ctx.model),
       values: parsed.values,
       providerOptions: parsed.providerOptions as never,
     });
@@ -264,6 +273,8 @@ export async function handleEmbeddings(
     const pm = result.providerMetadata as ProviderMetadata | undefined;
     await recordUsage({
       id: eventId,
+      projectId: ctx.gateway.projectId,
+      gatewayCredentialId: ctx.gateway.gatewayCredentialId,
       keyId: ctx.keyId,
       provider,
       model: ctx.model,
@@ -279,8 +290,11 @@ export async function handleEmbeddings(
     const payload = toEmbeddingsResponse(result.embeddings, ctx.model, parsed.encodingFormat, tokens);
     return Response.json(payload, { headers: { 'cache-control': 'no-store' } });
   } catch (err) {
+    const normalizedError = await normalizeProjectGatewayError(ctx.gateway, err);
     await recordUsage({
       id: eventId,
+      projectId: ctx.gateway.projectId,
+      gatewayCredentialId: ctx.gateway.gatewayCredentialId,
       keyId: ctx.keyId,
       provider,
       model: ctx.model,
@@ -288,9 +302,9 @@ export async function handleEmbeddings(
       latencyMs: Date.now() - startedAt,
       status: 'error',
       responseKind: 'embedding',
-      errorMessage: err instanceof Error ? err.message : String(err),
+      errorMessage: safeGatewayErrorMessage(normalizedError),
     });
     await logInputs('error');
-    return upstreamErrorResponse(err, 'The embeddings request failed.');
+    return upstreamErrorResponse(normalizedError, 'The embeddings request failed.');
   }
 }

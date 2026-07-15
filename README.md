@@ -1,7 +1,8 @@
 # Sophy
 
-Sophy is a central AI gateway for an organization. Client applications use
-Sophy-issued keys instead of holding provider credentials. Each key owns one
+Sophy is a multi-project AI control plane. Client applications use Sophy-issued
+keys instead of holding provider credentials. Each project connects its own
+Vercel AI Gateway key, and each Sophy key owns one
 configured model plus its prompt, generation parameters, optional output schema,
 knowledgebase, rate limit, and monthly USD budget. Operators can change that
 configuration without changing or redeploying the client.
@@ -19,6 +20,7 @@ usage accounting, evaluations, and the admin console.
 ```text
 client (OpenAI SDK, baseURL=<sophy>/v1, apiKey=mw_live_...)
   -> authenticate the Sophy key
+  -> resolve its active project and that project's encrypted Gateway credential
   -> enforce the key's rate limit and monthly budget
   -> apply the key's model, prompt, parameters, schema, and knowledgebase
   -> pass supported input/tools through Vercel AI Gateway
@@ -60,23 +62,31 @@ validated after completion, but already-streamed bytes cannot be retracted.
 
 Validation and buffered failures return OpenAI-shaped errors. Common statuses
 are `400` for an invalid or unsupported request, `401` for a
-missing/invalid/revoked key, `402` for an exhausted monthly budget or upstream
-credit, `403` for a cross-key file reference, `413` for an oversized upload,
-`429` for a rate limit, and `502` for an upstream or structured-output failure.
+missing/invalid/revoked key or inactive project, `402` for an exhausted Sophy-key
+monthly budget, `403` for a cross-key file reference, `413` for an oversized upload,
+`429` for a rate limit, `502` for a transient upstream or structured-output failure,
+and `503 project_gateway_unavailable` when the key is valid but its project has no
+usable Vercel Gateway credential.
 A `Retry-After` header is included when available for rate limits. An upstream
 failure after SSE streaming begins ends the stream; it cannot be replaced with a
 JSON error response.
 
 ## Operate Sophy
 
-The passwordless admin console is at `/admin`. The first administrator is
-bootstrapped from `BOOTSTRAP_ADMIN_EMAIL`; admins can invite more users by
-email. Admins see the whole organization, while editors see and manage only
-their owned keys and related usage, logs, and evaluations.
+The passwordless console is at `/admin`. Any verified email can create an account;
+independent signup creates a renameable `My Project` and makes that person its
+Admin. Invitation-first signup joins only the invited project and makes it the
+person's default. The same identity can be an Admin in one project and an Editor
+in another. Project Admins see the whole current project, while Editors see and
+manage only their owned keys and related usage, logs, and evaluations.
 
 - **Overview** — trailing-30-day requests, tokens, estimated cost, Sophy spend,
   and errors.
-- **API Keys** — create, edit, rotate, revoke, search, and bulk-change keys.
+- **Projects** — switch without changing your personal default, set any active
+  membership as default, create or rename projects, manage members/invitations,
+  and connect, validate, rotate, or disconnect the project-owned Vercel Gateway
+  credential. AI work and Sophy-key creation stay paused until it is healthy.
+- **Sophy API Keys** — create, edit, rotate, revoke, search, and bulk-change keys.
   Configure model, prompt, generation parameters, agent mode, JSON schema,
   knowledgebase, monthly USD budget, RPM limit, ownership, and optional content
   logging. Secrets are shown once; rotation preserves configuration and history.
@@ -101,8 +111,9 @@ their owned keys and related usage, logs, and evaluations.
 - **Knowledgebases** — upload text, Markdown, CSV, JSON, PDF, or DOCX documents.
   The cron extracts, chunks, and embeds them; attached keys retrieve relevant
   passages for Chat Completions and Responses requests.
-- **Users / Settings** — manage admin/editor roles and choose the evaluation judge
-  model and summary-email recipient.
+- **Members / Project settings** — manage per-project Admin/Editor roles, the
+  project name and Gateway connection, and project-specific evaluation judge and
+  summary-email settings.
 
 ## Stack
 
@@ -126,9 +137,13 @@ Next.js 16 (App Router), AI SDK v6, Vercel AI Gateway, Supabase Postgres
 2. Configure the environment variables documented in `.env.example`:
 
    - `KEY_HASH_PEPPER`, `SESSION_PASSWORD`, and `CRON_SECRET`
-   - `BOOTSTRAP_ADMIN_EMAIL` and the canonical production `APP_ORIGIN`
+   - The canonical production `APP_ORIGIN`
    - `BLOB_READ_WRITE_TOKEN`
-   - `AI_GATEWAY_API_KEY` for local calls and cron-driven evaluation/KB work
+   - `PROJECT_GATEWAY_ENCRYPTION_KEY`, `PROJECT_GATEWAY_ENCRYPTION_KEY_VERSION`,
+     and `PROJECT_GATEWAY_FINGERPRINT_KEY` for encrypted project credentials;
+     keep the fingerprint key immutable after first use unless every active
+     credential is re-fingerprinted in one coordinated rotation
+   - `AI_GATEWAY_API_KEY` only for the time-limited Channelplay migration bridge
    - ZeptoMail variables for production sign-in links and optional evaluation
      summaries
 
@@ -188,6 +203,9 @@ multimodal input, files, embeddings, image generation, limits, and error handlin
    Sophy URL through the API.
 10. Confirm admin cookies cannot authenticate `/v1/*` and API keys cannot access
     admin actions.
+11. Test two projects with distinct Vercel Gateway keys and verify live requests,
+    structured retries, KB embeddings, and eval work record only the correct
+    project and immutable Gateway-credential ID.
 
 ## Deploy
 
@@ -195,6 +213,8 @@ multimodal input, files, embeddings, image generation, limits, and error handlin
 vercel deploy --prod
 ```
 
-Proxy routes use the Node.js runtime. In production, request handlers use Vercel
-OIDC for gateway authentication; `AI_GATEWAY_API_KEY` remains the local and cron
-credential.
+Proxy routes use the Node.js runtime. Tenant AI work always uses the explicit,
+encrypted Gateway credential resolved from the Sophy key's project. It never
+falls back to deployment OIDC, a global key, or another project's credential.
+`AI_GATEWAY_API_KEY` exists only for the migration-only Channelplay bridge and
+should be removed after a Channelplay Admin connects the dedicated project key.

@@ -7,9 +7,8 @@
  * images: it returns them inline as base64 (`b64_json`), the only format
  * supported in v1.
  *
- * `generateImage` accepts a bare gateway model id (`type ImageModel = string |
- * ImageModelV3`), so we pass `key.model` straight through exactly as the chat
- * path passes `ctx.model` to `generateText` — same OIDC gateway, no extra wiring.
+ * `generateImage` receives an explicit image-model handle from the immutable
+ * project credential snapshot; bare/global model ids are never used.
  */
 import { generateImage, type ProviderMetadata } from 'ai';
 import {
@@ -19,10 +18,14 @@ import {
   ZERO_USAGE,
 } from '@/lib/usage/record';
 import type { ImageGenerationRequest, ImageGenerationResponse } from '@/lib/http/openai';
-import { upstreamErrorResponse } from '@/lib/gateway/upstream-error';
+import { safeGatewayErrorMessage, upstreamErrorResponse } from '@/lib/gateway/upstream-error';
 import { providerOf } from '@/lib/gateway/call';
 import { listAllModels } from '@/lib/gateway/models';
 import { type AvailableModel } from '@/lib/gateway/capabilities';
+import {
+  normalizeProjectGatewayError,
+  type ProjectGatewaySnapshot,
+} from '@/lib/gateway/project-provider';
 
 const SIZE_RE = /^\d{2,5}x\d{2,5}$/;
 const MAX_IMAGES = 10;
@@ -137,6 +140,7 @@ export function toImageResponse(
 
 export interface ImageCallContext {
   keyId: string;
+  gateway: ProjectGatewaySnapshot;
   /** Full AI Gateway image-model id, e.g. "openai/gpt-image-1". */
   model: string;
 }
@@ -156,7 +160,7 @@ export async function handleImageGeneration(
   const provider = providerOf(ctx.model);
   try {
     const result = await generateImage({
-      model: ctx.model,
+      model: ctx.gateway.gateway.imageModel(ctx.model),
       prompt: parsed.prompt,
       ...(parsed.n !== undefined ? { n: parsed.n } : {}),
       ...(parsed.size !== undefined ? { size: parsed.size as `${number}x${number}` } : {}),
@@ -168,6 +172,8 @@ export async function handleImageGeneration(
     // `gateway.{cost,generationId}` keys, so cast through unknown.
     const pm = result.providerMetadata as unknown as ProviderMetadata | undefined;
     await recordUsage({
+      projectId: ctx.gateway.projectId,
+      gatewayCredentialId: ctx.gateway.gatewayCredentialId,
       keyId: ctx.keyId,
       provider,
       model: ctx.model,
@@ -182,7 +188,10 @@ export async function handleImageGeneration(
     const payload = toImageResponse(result.images, Math.floor(startedAt / 1000));
     return Response.json(payload, { headers: { 'cache-control': 'no-store' } });
   } catch (err) {
+    const normalizedError = await normalizeProjectGatewayError(ctx.gateway, err);
     await recordUsage({
+      projectId: ctx.gateway.projectId,
+      gatewayCredentialId: ctx.gateway.gatewayCredentialId,
       keyId: ctx.keyId,
       provider,
       model: ctx.model,
@@ -190,8 +199,8 @@ export async function handleImageGeneration(
       latencyMs: Date.now() - startedAt,
       status: 'error',
       responseKind: 'image',
-      errorMessage: err instanceof Error ? err.message : String(err),
+      errorMessage: safeGatewayErrorMessage(normalizedError),
     });
-    return upstreamErrorResponse(err, 'The image generation request failed.');
+    return upstreamErrorResponse(normalizedError, 'The image generation request failed.');
   }
 }

@@ -13,7 +13,6 @@ import {
   isAuthenticated as isAuthenticatedSession,
   isAdminSession,
   type AdminSession,
-  type SessionRole,
 } from '@/lib/auth/session-config';
 
 export type { AdminSession };
@@ -35,15 +34,13 @@ export async function isAdminAuthed(): Promise<boolean> {
 
 export interface CurrentUser {
   userId: string;
-  role: SessionRole;
-  email: string;
 }
 
-/** The signed-in operator, or null (legacy admin cookies carry no userId). */
+/**
+ * The signed-in identity pointer, or null. Email, status, and every project role
+ * are loaded from Postgres by viewer.ts and never trusted from cookie claims.
+ */
 export async function currentUser(): Promise<CurrentUser | null> {
   const s = await getSession();
-  if (s.userId && s.role && s.email) {
-    return { userId: s.userId, role: s.role, email: s.email };
-  }
-  return null;
+  return s.userId ? { userId: s.userId } : null;
 }

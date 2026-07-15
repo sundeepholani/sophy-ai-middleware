@@ -11,10 +11,13 @@
  * HMAC (not bcrypt) is correct: keys are high-entropy and verified every request.
  */
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { getDb } from '@/db/client';
-import { apiKeys, type KeyParams, type KeyStatus } from '@/db/schema';
+import { apiKeys, projects, type KeyParams, type KeyStatus } from '@/db/schema';
 import { env } from '@/lib/env';
+
+type Db = ReturnType<typeof getDb>;
+type DbTx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 export interface GeneratedKey {
   fullKey: string;
@@ -24,6 +27,7 @@ export interface GeneratedKey {
 }
 
 export interface KeyConfigInput {
+  projectId: string;
   name: string;
   model: string;
   systemPrompt?: string | null;
@@ -40,6 +44,7 @@ export interface KeyConfigInput {
 
 export interface VerifiedKey {
   id: string;
+  projectId: string;
   name: string;
   model: string;
   systemPrompt: string | null;
@@ -81,11 +86,13 @@ export function generateKey(): GeneratedKey {
 /** Issue and persist a new key with its config. Returns the raw key (show once). */
 export async function issueKey(
   input: KeyConfigInput,
+  db: Db | DbTx = getDb(),
 ): Promise<{ fullKey: string; id: string; prefix: string; last4: string }> {
   const gen = generateKey();
-  const [row] = await getDb()
+  const [row] = await db
     .insert(apiKeys)
     .values({
+      projectId: input.projectId,
       name: input.name,
       keyPrefix: gen.prefix,
       keyHash: gen.hash,
@@ -123,28 +130,38 @@ export async function verifyKey(presented: string): Promise<VerifiedKey | null> 
   if (!prefix) return null;
 
   const [row] = await getDb()
-    .select()
+    .select({
+      key: apiKeys,
+      projectStatus: projects.status,
+    })
     .from(apiKeys)
+    .innerJoin(
+      projects,
+      and(eq(projects.id, apiKeys.projectId), eq(projects.status, 'active')),
+    )
     .where(eq(apiKeys.keyPrefix, prefix))
     .limit(1);
 
   if (!row) return null;
-  if (!constantTimeEqualHex(hmac(presented), row.keyHash)) return null;
-  if (row.status !== 'active') return null;
-  if (row.expiresAt && row.expiresAt.getTime() < Date.now()) return null;
+  const key = row.key;
+  if (row.projectStatus !== 'active') return null;
+  if (!constantTimeEqualHex(hmac(presented), key.keyHash)) return null;
+  if (key.status !== 'active') return null;
+  if (key.expiresAt && key.expiresAt.getTime() < Date.now()) return null;
 
   return {
-    id: row.id,
-    name: row.name,
-    model: row.model,
-    systemPrompt: row.systemPrompt,
-    params: row.params,
-    outputSchema: row.outputSchema ?? null,
-    monthlyCostCapUsd: row.monthlyCostCapUsd,
-    rpmLimit: row.rpmLimit,
-    logContent: row.logContent,
-    status: row.status,
-    knowledgebaseId: row.knowledgebaseId,
+    id: key.id,
+    projectId: key.projectId,
+    name: key.name,
+    model: key.model,
+    systemPrompt: key.systemPrompt,
+    params: key.params,
+    outputSchema: key.outputSchema ?? null,
+    monthlyCostCapUsd: key.monthlyCostCapUsd,
+    rpmLimit: key.rpmLimit,
+    logContent: key.logContent,
+    status: key.status,
+    knowledgebaseId: key.knowledgebaseId,
   };
 }
 
