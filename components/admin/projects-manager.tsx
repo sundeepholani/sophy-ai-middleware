@@ -25,6 +25,9 @@ interface ProjectsManagerProps {
   currentProjectId: string;
   createProjectAction: (input: { name: string }) => Promise<{ projectId: string }>;
   setDefaultProjectAction: (input: { projectId: string }) => Promise<void>;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  showTrigger?: boolean;
 }
 
 function actionError(error: unknown): string {
@@ -39,13 +42,22 @@ export function ProjectsManager({
   currentProjectId,
   createProjectAction,
   setDefaultProjectAction,
+  open: controlledOpen,
+  onOpenChange,
+  showTrigger = true,
 }: ProjectsManagerProps) {
   const router = useRouter();
   const pathname = usePathname();
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState('');
   const [pending, startTransition] = useTransition();
+  const open = controlledOpen ?? uncontrolledOpen;
+
+  function setOpen(nextOpen: boolean) {
+    if (controlledOpen === undefined) setUncontrolledOpen(nextOpen);
+    onOpenChange?.(nextOpen);
+  }
 
   function openProject(project: ProjectOption) {
     setOpen(false);
@@ -83,9 +95,11 @@ export function ProjectsManager({
 
   return (
     <>
-      <Button size="sm" variant="ghost" onClick={() => setOpen(true)}>
-        Manage
-      </Button>
+      {showTrigger && (
+        <Button size="sm" variant="ghost" onClick={() => setOpen(true)}>
+          Manage
+        </Button>
+      )}
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">

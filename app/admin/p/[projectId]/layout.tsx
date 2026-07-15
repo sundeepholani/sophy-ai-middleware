@@ -1,12 +1,9 @@
 import { redirect } from 'next/navigation';
 import { after } from 'next/server';
 import { createProject, setDefaultProject } from '@/app/admin/project-actions';
+import { AccountMenu } from '@/components/admin/account-menu';
 import { BrandMark } from '@/components/brand';
-import { LogoutButton } from '@/components/admin/logout-button';
 import { Nav } from '@/components/admin/nav';
-import { ProjectSwitcher } from '@/components/admin/project-switcher';
-import { projectRoleLabel } from '@/components/admin/project-types';
-import { Badge } from '@/components/ui/badge';
 import { Toaster } from '@/components/ui/sonner';
 import { getIdentityViewer, requireProjectViewer } from '@/lib/auth/viewer';
 import { listProjectsForUser, touchProjectAccess } from '@/lib/projects/repository';
@@ -38,39 +35,25 @@ export default async function ProjectLayout({
       console.error('[projects] failed to record project access', { projectId, error });
     }
   });
-  const initial = (viewer.email[0] ?? 'S').toUpperCase();
-
   return (
     <div className="min-h-screen bg-muted/40">
       <header className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur">
-        <div className="mx-auto flex w-full max-w-7xl flex-wrap items-center gap-3 px-4 py-3 sm:px-6 lg:px-8">
+        <div className="mx-auto flex w-full max-w-7xl flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 sm:px-6 lg:px-8">
           <BrandMark size="sm" href={`/admin/p/${encodeURIComponent(projectId)}`} />
 
-          <div className="order-3 flex min-w-0 w-full items-center gap-2 sm:order-none sm:w-auto sm:flex-1 lg:max-w-sm">
-            <ProjectSwitcher
+          <div className="relative order-3 min-w-0 w-full overflow-x-auto lg:order-none lg:w-auto lg:flex-1">
+            <Nav role={viewer.role} projectId={projectId} />
+          </div>
+
+          <div className="ml-auto min-w-0 shrink-0">
+            <AccountMenu
+              email={viewer.email}
+              role={viewer.role}
               projects={projects}
               currentProjectId={projectId}
               createProjectAction={createProject}
               setDefaultProjectAction={setDefaultProject}
             />
-          </div>
-
-          <div className="relative order-4 min-w-0 w-full overflow-x-auto lg:order-none lg:w-auto lg:flex-1">
-            <Nav role={viewer.role} projectId={projectId} />
-          </div>
-
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            <Badge variant="secondary" className="hidden md:inline-flex">
-              {projectRoleLabel(viewer.role)}
-            </Badge>
-            <LogoutButton />
-            <div
-              title={viewer.email}
-              aria-label={`Signed in as ${viewer.email}`}
-              className="grid size-8 place-items-center rounded-full bg-secondary text-xs font-semibold text-secondary-foreground"
-            >
-              {initial}
-            </div>
           </div>
         </div>
       </header>
