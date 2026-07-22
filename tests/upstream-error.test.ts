@@ -1,8 +1,29 @@
 import { describe, it, expect } from 'vitest';
-import { APICallError } from 'ai';
-import { mapUpstreamError, upstreamErrorResponse } from '@/lib/gateway/upstream-error';
+import {
+  createGateway,
+  GatewayInternalServerError,
+  GatewayRateLimitError,
+} from '@ai-sdk/gateway';
+import { APICallError, generateText, RetryError } from 'ai';
+import {
+  mapUpstreamError,
+  safeGatewayErrorMessage,
+  upstreamErrorResponse,
+} from '@/lib/gateway/upstream-error';
 
 const FALLBACK = 'Upstream model request failed.';
+
+function apiError(statusCode: number, message: string, headers?: Record<string, string>) {
+  return new APICallError({
+    message,
+    url: 'https://gateway.example/v1',
+    requestBodyValues: {},
+    statusCode,
+    responseHeaders: headers,
+    responseBody: message,
+    isRetryable: statusCode === 429 || statusCode >= 500,
+  });
+}
 
 describe('mapUpstreamError (pure)', () => {
   it('maps a 400 client-input rejection to 400 invalid_request and ECHOES the provider detail', () => {
@@ -67,18 +88,6 @@ describe('mapUpstreamError (pure)', () => {
 });
 
 describe('upstreamErrorResponse (wraps an AI SDK APICallError)', () => {
-  function apiError(statusCode: number, message: string, headers?: Record<string, string>) {
-    return new APICallError({
-      message,
-      url: 'https://gateway.example/v1',
-      requestBodyValues: {},
-      statusCode,
-      responseHeaders: headers,
-      responseBody: message,
-      isRetryable: statusCode === 429,
-    });
-  }
-
   it('returns a 400 body with the echoed image error for the reproduced cluster', async () => {
     const res = upstreamErrorResponse(
       apiError(400, 'At least one of the image dimensions exceed max allowed size: 8000 pixels'),
@@ -108,5 +117,96 @@ describe('upstreamErrorResponse (wraps an AI SDK APICallError)', () => {
     const body = await res.json();
     expect(body.error.message).toBe(FALLBACK);
     expect(body.error.message).not.toContain('socket hang up');
+  });
+});
+
+describe('explicit Gateway provider errors', () => {
+  it('preserves a real explicit-provider 400 instead of flattening it to 502', async () => {
+    let calls = 0;
+    const gateway = createGateway({
+      apiKey: 'test-gateway-key',
+      baseURL: 'https://gateway.example/v1/ai',
+      fetch: async () => {
+        calls += 1;
+        return Response.json(
+          {
+            error: {
+              type: 'internal_server_error',
+              message: 'The request parameter was rejected.',
+            },
+            generationId: 'gen_internal_123',
+          },
+          { status: 400 },
+        );
+      },
+    });
+    const error = await generateText({
+      model: gateway.languageModel('openai/gpt-5.4-nano'),
+      prompt: 'test',
+    }).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+
+    expect(calls).toBe(1);
+    expect(GatewayInternalServerError.isInstance(error)).toBe(true);
+    if (!GatewayInternalServerError.isInstance(error)) throw new Error('Expected gateway error');
+    expect(error.message).toContain('[gen_internal_123]');
+    expect(safeGatewayErrorMessage(error)).toBe('upstream_http_400');
+    const response = upstreamErrorResponse(error, FALLBACK);
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      error: {
+        type: 'invalid_request_error',
+        code: 'upstream_invalid_request',
+        message: 'The request parameter was rejected.',
+      },
+    });
+    expect(body.error.message).not.toContain('gen_internal_123');
+  });
+
+  it('unwraps a retried GatewayError 429 and preserves Retry-After safely', async () => {
+    const leaky = 'Quota exceeded for api_key_id_secret with $32.75 spend.';
+    const gatewayError = new GatewayRateLimitError({
+      message: leaky,
+      statusCode: 429,
+      cause: apiError(429, leaky, { 'Retry-After': '7' }),
+    });
+    const error = new RetryError({
+      message: 'Failed after 3 attempts.',
+      reason: 'maxRetriesExceeded',
+      errors: [gatewayError, gatewayError, gatewayError],
+    });
+
+    expect(safeGatewayErrorMessage(error)).toBe('upstream_http_429');
+    const response = upstreamErrorResponse(error, FALLBACK);
+    expect(response.status).toBe(429);
+    expect(response.headers.get('retry-after')).toBe('7');
+    const body = await response.json();
+    expect(body.error.type).toBe('rate_limit_error');
+    expect(body.error.message).not.toContain('api_key_id_secret');
+    expect(body.error.message).not.toContain('$32.75');
+  });
+
+  it('keeps a retried GatewayError 500 opaque while recording its status', async () => {
+    const gatewayError = new GatewayInternalServerError({
+      message: 'Internal provider detail.',
+      statusCode: 500,
+      cause: apiError(500, 'Internal provider detail.'),
+    });
+    const error = new RetryError({
+      message: 'Failed after 3 attempts.',
+      reason: 'maxRetriesExceeded',
+      errors: [gatewayError, gatewayError, gatewayError],
+    });
+
+    expect(safeGatewayErrorMessage(error)).toBe('upstream_http_500');
+    const response = upstreamErrorResponse(error, FALLBACK);
+    expect(response.status).toBe(502);
+    const body = await response.json();
+    expect(body.error.code).toBe('upstream_error');
+    expect(body.error.message).toBe(FALLBACK);
+    expect(body.error.message).not.toContain('Internal provider detail.');
   });
 });
