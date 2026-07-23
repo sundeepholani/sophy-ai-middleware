@@ -20,6 +20,7 @@
  *  - Anything ambiguous (auth/permission/not-found/5xx/unknown) stays a 502
  *    `upstream_error`, exactly as before.
  */
+import { GatewayError } from '@ai-sdk/gateway';
 import { APICallError } from 'ai';
 import { openAiError, type OpenAIErrorType } from '@/lib/http/openai';
 import {
@@ -115,6 +116,60 @@ function retryAfterHeader(headers: Record<string, string> | undefined): string |
 }
 
 /**
+ * The explicit project gateway converts provider APICallErrors into GatewayError
+ * subclasses. Retryable gateway failures are then wrapped by AI SDK RetryError.
+ * Walk only those error-chain fields so response mapping sees the status carried
+ * by the real upstream failure without inspecting arbitrary error payload data.
+ */
+function nestedErrors(error: unknown): unknown[] {
+  if (error == null || typeof error !== 'object') return [];
+  const candidate = error as { cause?: unknown; lastError?: unknown; errors?: unknown };
+  const nested: unknown[] = [];
+  if (candidate.lastError !== undefined) nested.push(candidate.lastError);
+  if (Array.isArray(candidate.errors)) nested.push(...[...candidate.errors].reverse());
+  if (candidate.cause !== undefined) nested.push(candidate.cause);
+  return nested;
+}
+
+type StatusError = APICallError | GatewayError;
+
+function findStatusError(error: unknown, seen = new Set<unknown>()): StatusError | undefined {
+  if (error == null || seen.has(error)) return undefined;
+  seen.add(error);
+  if (APICallError.isInstance(error) || GatewayError.isInstance(error)) return error;
+  for (const nested of nestedErrors(error)) {
+    const found = findStatusError(nested, seen);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function findApiCallError(
+  error: unknown,
+  seen = new Set<unknown>(),
+): APICallError | undefined {
+  if (error == null || seen.has(error)) return undefined;
+  seen.add(error);
+  if (APICallError.isInstance(error)) return error;
+  for (const nested of nestedErrors(error)) {
+    const found = findApiCallError(nested, seen);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function statusErrorMessage(error: StatusError | undefined): string | undefined {
+  if (!(error instanceof Error)) return undefined;
+  if (GatewayError.isInstance(error) && error.generationId) {
+    const generationSuffix = ` [${error.generationId}]`;
+    if (error.message.endsWith(generationSuffix)) {
+      return error.message.slice(0, -generationSuffix.length);
+    }
+  }
+  return error.message;
+}
+
+/**
  * Build the OpenAI-compatible error `Response` for an upstream failure caught in a
  * buffered (non-streaming) handler. `fallbackMessage` is the surface-specific text
  * used for the 502 default (e.g. "The embeddings request failed.").
@@ -123,14 +178,14 @@ export function upstreamErrorResponse(err: unknown, fallbackMessage: string): Re
   const unavailable = projectGatewayUnavailableResponse(err);
   if (unavailable) return unavailable;
 
-  const isApi = APICallError.isInstance(err);
-  const statusCode = isApi ? err.statusCode : undefined;
-  const upstreamMessage = err instanceof Error ? err.message : undefined;
+  const statusError = findStatusError(err);
+  const statusCode = statusError?.statusCode;
+  const upstreamMessage = statusErrorMessage(statusError);
   const mapped = mapUpstreamError(statusCode, upstreamMessage, fallbackMessage);
 
   const headers: Record<string, string> = {};
-  if (mapped.passRetryAfter && isApi) {
-    const ra = retryAfterHeader(err.responseHeaders);
+  if (mapped.passRetryAfter) {
+    const ra = retryAfterHeader(findApiCallError(err)?.responseHeaders);
     if (ra) headers['retry-after'] = ra;
   }
   return openAiError(mapped.status, mapped.type, mapped.message, {
@@ -146,15 +201,19 @@ export function upstreamErrorResponse(err: unknown, fallbackMessage: string): Re
  */
 export function safeGatewayErrorMessage(err: unknown): string {
   if (ProjectGatewayUnavailableError.isInstance(err)) return err.code;
-  if (APICallError.isInstance(err) && typeof err.statusCode === 'number') {
-    return `upstream_http_${err.statusCode}`;
-  }
   if (
     typeof DOMException !== 'undefined' &&
     err instanceof DOMException &&
     err.name === 'TimeoutError'
   ) {
     return 'upstream_timeout';
+  }
+  const statusError = findStatusError(err);
+  if (statusError instanceof Error && /timeout|timed out/i.test(statusError.name)) {
+    return 'upstream_timeout';
+  }
+  if (typeof statusError?.statusCode === 'number') {
+    return `upstream_http_${statusError.statusCode}`;
   }
   if (err instanceof Error) {
     if (/timeout|timed out/i.test(err.name)) return 'upstream_timeout';
