@@ -227,6 +227,7 @@ export async function processEvalRuns(opts?: { batch?: number }): Promise<{
         outputTokens: challenger.outputTokens,
         totalTokens: challenger.inputTokens + challenger.outputTokens,
         cachedInputTokens: 0,
+        cacheWriteTokens: null,
         reasoningTokens: 0,
       };
       await recordUsage({

@@ -37,6 +37,51 @@ describe('sumUsage', () => {
     expect(total?.cachedInputTokens).toBe(10);
     expect(total?.reasoningTokens).toBe(3);
   });
+
+  it('sums nested cache writes without inventing a measured zero', () => {
+    const first = u(10, 5, {
+      inputTokenDetails: {
+        noCacheTokens: 6,
+        cacheReadTokens: 3,
+        cacheWriteTokens: 1,
+      },
+      outputTokenDetails: { textTokens: 4, reasoningTokens: 1 },
+    });
+    const second = u(20, 10, {
+      inputTokenDetails: {
+        noCacheTokens: undefined,
+        cacheReadTokens: 5,
+        cacheWriteTokens: 2,
+      },
+      outputTokenDetails: { textTokens: 8, reasoningTokens: 2 },
+    });
+
+    const total = sumUsage(first, second);
+    expect(total?.inputTokenDetails).toEqual({
+      noCacheTokens: 6,
+      cacheReadTokens: 8,
+      cacheWriteTokens: 3,
+    });
+    expect(total?.outputTokenDetails).toEqual({
+      textTokens: 12,
+      reasoningTokens: 3,
+    });
+
+    const unreported = sumUsage(u(1, 1), u(2, 2));
+    expect(unreported?.inputTokenDetails.cacheWriteTokens).toBeUndefined();
+
+    const partlyReported = sumUsage(
+      u(1, 1, {
+        inputTokenDetails: {
+          noCacheTokens: undefined,
+          cacheReadTokens: undefined,
+          cacheWriteTokens: 5,
+        },
+      }),
+      u(2, 2),
+    );
+    expect(partlyReported?.inputTokenDetails.cacheWriteTokens).toBeUndefined();
+  });
 });
 
 describe('sumCost', () => {

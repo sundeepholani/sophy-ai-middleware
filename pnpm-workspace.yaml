@@ -3,12 +3,12 @@ ignoredBuiltDependencies:
   - unrs-resolver
 
 # Force patched versions of transitive deps flagged by the security scan:
-# - postcss <8.5.10 (XSS in CSS stringify) via next
+# - postcss <8.5.18 (CSS source-map path traversal) via next
 # - esbuild <=0.24.2 (dev-server SSRF) via drizzle-kit's deprecated @esbuild-kit/*
 # - fast-uri <3.1.4 (URL host confusion) via ajv
 # - sharp <0.35.0 (inherited libvips vulnerabilities) via next
 overrides:
-  postcss: '>=8.5.10'
+  postcss: '8.5.18'
   esbuild: '>=0.25.0'
   fast-uri: '3.1.4'
   'next@16.2.11>sharp': '0.35.3'

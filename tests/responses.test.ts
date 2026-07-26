@@ -110,6 +110,7 @@ describe('mapResponsesUsage', () => {
       outputTokens: 4,
       totalTokens: 14,
       cachedInputTokens: 2,
+      cacheWriteTokens: null,
       reasoningTokens: 1,
     });
     expect(u).toEqual({
@@ -128,6 +129,7 @@ describe('buildResponseObject', () => {
     outputTokens: 3,
     totalTokens: 8,
     cachedInputTokens: 0,
+    cacheWriteTokens: null,
     reasoningTokens: 0,
   });
 
