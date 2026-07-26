@@ -150,12 +150,46 @@ export function sumUsage(
   if (!a) return b;
   if (!b) return a;
   const n = (x: number | undefined) => x ?? 0;
+  const addOptional = (
+    x: number | undefined,
+    y: number | undefined,
+  ): number | undefined => (x == null && y == null ? undefined : n(x) + n(y));
+  const addComplete = (
+    x: number | undefined,
+    y: number | undefined,
+  ): number | undefined => (x == null || y == null ? undefined : x + y);
+  const cacheReadTokens = addOptional(
+    a.inputTokenDetails?.cacheReadTokens ?? a.cachedInputTokens,
+    b.inputTokenDetails?.cacheReadTokens ?? b.cachedInputTokens,
+  );
+  const reasoningTokens = addOptional(
+    a.outputTokenDetails?.reasoningTokens ?? a.reasoningTokens,
+    b.outputTokenDetails?.reasoningTokens ?? b.reasoningTokens,
+  );
   return {
     inputTokens: n(a.inputTokens) + n(b.inputTokens),
     outputTokens: n(a.outputTokens) + n(b.outputTokens),
     totalTokens: n(a.totalTokens) + n(b.totalTokens),
-    cachedInputTokens: n(a.cachedInputTokens) + n(b.cachedInputTokens),
-    reasoningTokens: n(a.reasoningTokens) + n(b.reasoningTokens),
+    inputTokenDetails: {
+      noCacheTokens: addOptional(
+        a.inputTokenDetails?.noCacheTokens,
+        b.inputTokenDetails?.noCacheTokens,
+      ),
+      cacheReadTokens,
+      cacheWriteTokens: addComplete(
+        a.inputTokenDetails?.cacheWriteTokens,
+        b.inputTokenDetails?.cacheWriteTokens,
+      ),
+    },
+    outputTokenDetails: {
+      textTokens: addOptional(
+        a.outputTokenDetails?.textTokens,
+        b.outputTokenDetails?.textTokens,
+      ),
+      reasoningTokens,
+    },
+    cachedInputTokens: cacheReadTokens,
+    reasoningTokens,
   } as LanguageModelUsage;
 }
 

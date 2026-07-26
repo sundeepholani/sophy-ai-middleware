@@ -111,6 +111,7 @@ export async function retrieveContext(
           outputTokens: 0,
           totalTokens: tokens ?? 0,
           cachedInputTokens: 0,
+          cacheWriteTokens: null,
           reasoningTokens: 0,
         },
         costUsd,

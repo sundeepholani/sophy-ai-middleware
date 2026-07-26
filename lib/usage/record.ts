@@ -18,6 +18,8 @@ export interface NormalizedUsage {
   outputTokens: number;
   totalTokens: number;
   cachedInputTokens: number;
+  /** Null distinguishes unreported cache writes from a reported zero. */
+  cacheWriteTokens: number | null;
   reasoningTokens: number;
 }
 
@@ -26,6 +28,7 @@ export const ZERO_USAGE: NormalizedUsage = {
   outputTokens: 0,
   totalTokens: 0,
   cachedInputTokens: 0,
+  cacheWriteTokens: null,
   reasoningTokens: 0,
 };
 
@@ -38,6 +41,7 @@ export function normalizeUsage(u: LanguageModelUsage | undefined): NormalizedUsa
     outputTokens,
     totalTokens: u.totalTokens ?? inputTokens + outputTokens,
     cachedInputTokens: u.inputTokenDetails?.cacheReadTokens ?? u.cachedInputTokens ?? 0,
+    cacheWriteTokens: u.inputTokenDetails?.cacheWriteTokens ?? null,
     reasoningTokens: u.outputTokenDetails?.reasoningTokens ?? u.reasoningTokens ?? 0,
   };
 }
@@ -96,6 +100,7 @@ export async function recordUsage(input: RecordUsageInput): Promise<void> {
         inputTokens: input.usage.inputTokens,
         outputTokens: input.usage.outputTokens,
         cachedInputTokens: input.usage.cachedInputTokens,
+        cacheWriteTokens: input.usage.cacheWriteTokens,
         reasoningTokens: input.usage.reasoningTokens,
         costUsd: input.costUsd != null ? String(input.costUsd) : null,
         latencyMs: input.latencyMs ?? null,

@@ -480,6 +480,8 @@ export const usageEvents = pgTable(
     inputTokens: integer('input_tokens').notNull().default(0),
     outputTokens: integer('output_tokens').notNull().default(0),
     cachedInputTokens: integer('cached_input_tokens').notNull().default(0),
+    /** Null means the provider/SDK did not report cache-write usage. */
+    cacheWriteTokens: integer('cache_write_tokens'),
     reasoningTokens: integer('reasoning_tokens').notNull().default(0),
     costUsd: numeric('cost_usd', { precision: 12, scale: 6 }),
     latencyMs: integer('latency_ms'),

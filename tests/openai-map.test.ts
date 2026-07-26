@@ -102,7 +102,14 @@ describe('SSE frames', () => {
       id: 'x',
       created: 1,
       model: 'm',
-      usage: { inputTokens: 3, outputTokens: 5, totalTokens: 8, cachedInputTokens: 0, reasoningTokens: 0 },
+      usage: {
+        inputTokens: 3,
+        outputTokens: 5,
+        totalTokens: 8,
+        cachedInputTokens: 0,
+        cacheWriteTokens: null,
+        reasoningTokens: 0,
+      },
     });
     expect(frame.choices).toHaveLength(0);
     expect(frame.usage?.prompt_tokens).toBe(3);
