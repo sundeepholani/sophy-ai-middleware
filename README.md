@@ -218,3 +218,7 @@ encrypted Gateway credential resolved from the Sophy key's project. It never
 falls back to deployment OIDC, a global key, or another project's credential.
 `AI_GATEWAY_API_KEY` exists only for the migration-only Channelplay bridge and
 should be removed after a Channelplay Admin connects the dedicated project key.
+
+## License
+
+[MIT](LICENSE).
