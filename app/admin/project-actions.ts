@@ -31,7 +31,7 @@ import {
 import { validateGatewayCredential } from '@/lib/gateway/project-provider';
 import { sendEmail, escapeHtml } from '@/lib/email/send';
 import { env } from '@/lib/env';
-import { CHANNELPLAY_PROJECT_ID } from '@/lib/projects/constants';
+import { LEGACY_PROJECT_ID } from '@/lib/projects/constants';
 
 type Db = ReturnType<typeof getDb>;
 type DbTx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -281,7 +281,7 @@ export async function connectProjectGateway(input: {
   if (!apiKey) throw new Error('gateway_invalid');
   const platformKey = env.aiGatewayApiKey()?.trim();
   if (
-    input.projectId !== CHANNELPLAY_PROJECT_ID &&
+    input.projectId !== LEGACY_PROJECT_ID &&
     platformKey &&
     apiKey === platformKey
   ) {

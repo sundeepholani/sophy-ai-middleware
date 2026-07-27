@@ -50,8 +50,8 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-/* Channelplay design tokens (matches @channelplay/ui): vivid blue primary,
- * white surfaces, light-gray borders, 0.5rem radius. */
+/* Design tokens: vivid blue primary, white surfaces, light-gray borders,
+ * 0.5rem radius. */
 :root {
   --radius: 0.5rem;
   --background: hsl(0 0% 100%);

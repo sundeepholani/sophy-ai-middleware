@@ -1,5 +1,5 @@
--- Convert the original single-tenant installation into the deterministic
--- Channelplay project without changing any existing Sophy key secret material.
+-- Convert the original single-tenant installation into a deterministic
+-- legacy project without changing any existing Sophy key secret material.
 DO $$
 BEGIN
   IF EXISTS (
@@ -239,8 +239,8 @@ INSERT INTO projects (
   id, name, slug, status, gateway_credential_revision
 ) SELECT
   '57c16e84-0317-4db5-9282-d25f1d25fb0a',
-  'Channelplay',
-  'channelplay',
+  'Legacy',
+  'legacy',
   'active',
   1
 WHERE EXISTS (SELECT 1 FROM users);
