@@ -51,7 +51,7 @@ export const env = {
   // --- AI Gateway ---
   /**
    * Legacy platform credential. It is only valid for the migration-only
-   * Channelplay project's `platform_env` credential row; project-scoped calls
+   * legacy project's `platform_env` credential row; project-scoped calls
    * must never fall back to it (or to Vercel OIDC) implicitly.
    */
   aiGatewayApiKey: () => optionalEnv('AI_GATEWAY_API_KEY'),

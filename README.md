@@ -143,7 +143,7 @@ Next.js 16 (App Router), AI SDK v6, Vercel AI Gateway, Supabase Postgres
      and `PROJECT_GATEWAY_FINGERPRINT_KEY` for encrypted project credentials;
      keep the fingerprint key immutable after first use unless every active
      credential is re-fingerprinted in one coordinated rotation
-   - `AI_GATEWAY_API_KEY` only for the time-limited Channelplay migration bridge
+   - `AI_GATEWAY_API_KEY` only for the time-limited legacy migration bridge
    - ZeptoMail variables for production sign-in links and optional evaluation
      summaries
 
@@ -216,8 +216,8 @@ vercel deploy --prod
 Proxy routes use the Node.js runtime. Tenant AI work always uses the explicit,
 encrypted Gateway credential resolved from the Sophy key's project. It never
 falls back to deployment OIDC, a global key, or another project's credential.
-`AI_GATEWAY_API_KEY` exists only for the migration-only Channelplay bridge and
-should be removed after a Channelplay Admin connects the dedicated project key.
+`AI_GATEWAY_API_KEY` exists only for the migration-only legacy bridge and should
+be removed after that project's Admin connects its dedicated project key.
 
 ## License
 

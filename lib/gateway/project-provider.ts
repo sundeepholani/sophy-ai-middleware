@@ -21,7 +21,7 @@ import { getDb } from '@/db/client';
 import { projectGatewayCredentials, projects } from '@/db/schema';
 import { env } from '@/lib/env';
 import { openAiError } from '@/lib/http/openai';
-import { CHANNELPLAY_PROJECT_ID } from '@/lib/projects/constants';
+import { LEGACY_PROJECT_ID } from '@/lib/projects/constants';
 import {
   decryptGatewayCredential,
   fingerprintGatewayCredential,
@@ -177,7 +177,7 @@ export async function resolveProjectGateway(projectId: string): Promise<ProjectG
     if (row.source === 'platform_env') {
       // Migration bridge only. It is intentionally impossible for a new tenant
       // to opt into the platform's environment key or the SDK's OIDC fallback.
-      if (projectId !== CHANNELPLAY_PROJECT_ID) {
+      if (projectId !== LEGACY_PROJECT_ID) {
         throw new GatewayCredentialCryptoError(
           'platform_env credentials are restricted to the migrated project.',
         );

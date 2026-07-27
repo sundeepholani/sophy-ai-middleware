@@ -365,7 +365,7 @@ The login route now supports both existing identities and verified self-signup w
 ## 10. Migration of the current enterprise
 
 Migration `0010_yielding_fabian_cortez.sql` performs the schema expansion,
-Channelplay data move, backfill, and final constraints as one coordinated
+legacy-tenant data move, backfill, and final constraints as one coordinated
 cutover. It is not rolling-compatible with the old application: quiesce old
 writers, take a verified backup, apply the migration, deploy this project-aware
 build, and run the row-count/relationship checks before reopening traffic. A
@@ -375,7 +375,7 @@ and contract releases.
 1. Provision the credential-encryption/KMS key in every production runtime before any secret-storage migration.
 2. Add project, membership, invitation, auth-intent, project-settings, and project-gateway-credential tables.
 3. Add nullable project columns, `usage_events.gateway_credential_id`, and supporting indexes to every tenant-owned table.
-4. Create one system-owned project named `Channelplay` representing the current enterprise. Its stable slug is `channelplay` and `created_by_user_id` is null for this migrated row.
+4. Create one system-owned project representing the existing single-tenant installation. It gets a stable name and slug, and `created_by_user_id` is null for this migrated row.
 5. Install a temporary database default/trigger or use a maintenance window so old application instances cannot create projectless rows while the rollout is mixed-version.
 6. Convert every existing user into a membership, mapping the current global Admin/Editor role exactly. Mark each existing user onboarded and set their default to the migrated project.
 7. Assign every existing key, KB, usage event, rollup, request log, blob, eval, KB child record, setting, and audit record to the migrated project.
@@ -491,7 +491,7 @@ Tenant isolation tests are release blockers. Include cross-project IDs for keys,
 
 - Invitation-first users receive no extra personal project; the invited project is their default.
 - Admin and Editor are the launch roles.
-- The migrated enterprise project is `Channelplay`.
+- The migrated enterprise project is the original single-tenant installation.
 - Verified users may create projects and become their Admin; plan or billing limits can be layered on later.
 - Eval judge and notification settings are project-specific.
 - Each project has one current credential; no automatic cross-project or platform failover exists.
