@@ -9,6 +9,7 @@ import { and, desc, eq, gte, inArray, isNotNull, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import {
   apiKeys,
+  CLIENT_USAGE_SOURCES,
   usageEvents,
   requestLogs,
   evalRuns,
@@ -31,19 +32,23 @@ import type { EvalRecommendation, EvalSummary } from '@/lib/eval/aggregate';
 import { evalSpendExpr } from '@/lib/eval/spend';
 import { scopeToOwner, type Viewer } from '@/lib/auth/viewer';
 
+const isClientRequest = sql`${usageEvents.source} = 'proxy'`;
+const isClientUsage = inArray(usageEvents.source, [...CLIENT_USAGE_SOURCES]);
+
 export async function getOverview(viewer: Viewer) {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  // Requests/tokens/errors are CLIENT metrics (source='proxy'): a judge failure
-  // or a cron embed must not inflate the operator's traffic/error cards. Cost
-  // splits the same way, with Sophy's own eval/KB spend reported as shadowCost.
+  // A transcription pipeline still represents one client request (the proxy
+  // row), while its language-model processor contributes client tokens and
+  // cost. The proxy row carries the terminal request outcome, so one failed
+  // request still counts as one error. Sophy-run eval/KB spend remains shadowCost.
   const [agg] = await getDb()
     .select({
-      requests: sql<string>`coalesce(count(*) filter (where ${usageEvents.source} = 'proxy'),0)`,
-      inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}) filter (where ${usageEvents.source} = 'proxy'),0)`,
-      outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}) filter (where ${usageEvents.source} = 'proxy'),0)`,
-      cost: sql<string>`coalesce(sum(${usageEvents.costUsd}) filter (where ${usageEvents.source} = 'proxy'),0)`,
-      errors: sql<string>`coalesce(count(*) filter (where ${usageEvents.status} <> 'ok' and ${usageEvents.source} = 'proxy'),0)`,
-      shadowCost: sql<string>`coalesce(sum(${usageEvents.costUsd}) filter (where ${usageEvents.source} <> 'proxy'),0)`,
+      requests: sql<string>`coalesce(count(*) filter (where ${isClientRequest}),0)`,
+      inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}) filter (where ${isClientUsage}),0)`,
+      outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}) filter (where ${isClientUsage}),0)`,
+      cost: sql<string>`coalesce(sum(${usageEvents.costUsd}) filter (where ${isClientUsage}),0)`,
+      errors: sql<string>`coalesce(count(*) filter (where ${usageEvents.status} <> 'ok' and ${isClientRequest}),0)`,
+      shadowCost: sql<string>`coalesce(sum(${usageEvents.costUsd}) filter (where not (${isClientUsage})),0)`,
     })
     .from(usageEvents)
     .where(
@@ -138,20 +143,20 @@ const tokensExpr = sql`${usageEvents.inputTokens} + ${usageEvents.outputTokens}`
 // directly in SQL because every paid call — proxy, eval challenger/judge, KB
 // embed — writes its own source-tagged usage_events row at call time):
 //   - COST counts every source (the operator's real gateway burn).
-//   - REQUESTS and TOKENS count source='proxy' only — a challenger replay or a
-//     cron embed is not client traffic.
+//   - REQUESTS count source='proxy' only.
+//   - TOKENS count proxy + transcript_processor client usage. A challenger
+//     replay or cron embed is not client traffic.
 // The chart's cost/requests/tokens toggle keeps this honest: non-proxy spend
 // surfaces under Cost and is absent under the other two.
-const isProxy = sql`${usageEvents.source} = 'proxy'`;
-const proxyRequestsExpr = sql<string>`coalesce(count(*) filter (where ${isProxy}),0)`;
-const proxyTokensExpr = sql<string>`coalesce(sum(${tokensExpr}) filter (where ${isProxy}),0)`;
+const clientRequestsExpr = sql<string>`coalesce(count(*) filter (where ${isClientRequest}),0)`;
+const clientTokensExpr = sql<string>`coalesce(sum(${tokensExpr}) filter (where ${isClientUsage}),0)`;
 
 export async function getUsageSeries(viewer: Viewer, f: UsageFilters) {
   const rows = await getDb()
     .select({
       day: sql<string>`to_char(date_trunc('day', ${usageEvents.createdAt}), 'YYYY-MM-DD')`,
-      requests: proxyRequestsExpr,
-      tokens: proxyTokensExpr,
+      requests: clientRequestsExpr,
+      tokens: clientTokensExpr,
       cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
     })
     .from(usageEvents)
@@ -191,8 +196,8 @@ export async function getUsageStacked(
   const day = sql<string>`to_char(date_trunc('day', ${usageEvents.createdAt}), 'YYYY-MM-DD')`;
   const dayTrunc = sql`date_trunc('day', ${usageEvents.createdAt})`;
   const agg = {
-    requests: proxyRequestsExpr,
-    tokens: proxyTokensExpr,
+    requests: clientRequestsExpr,
+    tokens: clientTokensExpr,
     cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
   };
 
@@ -238,9 +243,9 @@ export async function getUsageStacked(
 export async function getUsageTotals(viewer: Viewer, f: UsageFilters) {
   const [agg] = await getDb()
     .select({
-      requests: proxyRequestsExpr,
-      inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}) filter (where ${isProxy}),0)`,
-      outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}) filter (where ${isProxy}),0)`,
+      requests: clientRequestsExpr,
+      inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}) filter (where ${isClientUsage}),0)`,
+      outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}) filter (where ${isClientUsage}),0)`,
       cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
     })
     .from(usageEvents)
@@ -266,9 +271,9 @@ export async function getUsageByKey(viewer: Viewer, f: UsageFilters): Promise<Us
     .select({
       keyId: usageEvents.apiKeyId,
       keyName: apiKeys.name,
-      requests: proxyRequestsExpr,
-      inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}) filter (where ${isProxy}),0)`,
-      outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}) filter (where ${isProxy}),0)`,
+      requests: clientRequestsExpr,
+      inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}) filter (where ${isClientUsage}),0)`,
+      outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}) filter (where ${isClientUsage}),0)`,
       cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
     })
     .from(usageEvents)
@@ -298,9 +303,9 @@ export async function getUsageByModel(viewer: Viewer, f: UsageFilters): Promise<
   const rows = await getDb()
     .select({
       model: usageEvents.model,
-      requests: proxyRequestsExpr,
-      inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}) filter (where ${isProxy}),0)`,
-      outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}) filter (where ${isProxy}),0)`,
+      requests: clientRequestsExpr,
+      inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}) filter (where ${isClientUsage}),0)`,
+      outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}) filter (where ${isClientUsage}),0)`,
       cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
     })
     .from(usageEvents)
@@ -319,6 +324,7 @@ export async function getUsageByModel(viewer: Viewer, f: UsageFilters): Promise<
 /** Human labels for the source breakdown on the usage page. */
 const SOURCE_LABELS: Record<string, string> = {
   proxy: 'Client traffic',
+  transcript_processor: 'Client traffic — transcript processing',
   eval_challenger: 'Eval — challenger replays',
   eval_judge: 'Eval — judge verdicts',
   kb_ingest: 'KB — document ingestion',
@@ -327,8 +333,9 @@ const SOURCE_LABELS: Record<string, string> = {
 
 /**
  * Per-source spend breakdown (client traffic vs Sophy's own eval/KB calls).
- * Unlike the other usage queries this one reports EVERY source's requests and
- * tokens — the whole point of the card is showing where non-client spend goes.
+ * Transcript processing is a component of the proxy request, so its row shows
+ * tokens/cost but zero additional client requests. Eval/KB rows still report
+ * the Sophy-initiated calls they made.
  */
 export async function getUsageBySource(
   viewer: Viewer,
@@ -337,7 +344,7 @@ export async function getUsageBySource(
   const rows = await getDb()
     .select({
       source: usageEvents.source,
-      requests: sql<string>`count(*)`,
+      requests: sql<string>`coalesce(count(*) filter (where ${usageEvents.source} <> 'transcript_processor'),0)`,
       inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}),0)`,
       outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}),0)`,
       cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
@@ -565,14 +572,16 @@ export async function getLogDetail(
 }
 
 /**
- * Where a log row came from: a live proxy request, an eval challenger call
- * (surfaced from eval_samples, which retains judge context and content), an
- * eval judge call, or a KB embedding call (both from source-tagged usage_events).
+ * Where a log row came from: a live proxy request, its optional transcript
+ * processor component, an eval challenger call (surfaced from eval_samples,
+ * which retains judge context and content), an eval judge call, or a KB
+ * embedding call.
  */
-export type LogSource = 'proxy' | 'challenger' | 'judge' | 'kb';
+export type LogSource = 'proxy' | 'processor' | 'challenger' | 'judge' | 'kb';
 
 /** usage_events.source → LogSource for rows surfaced from usage_events. */
 function logSourceOf(source: string): LogSource {
+  if (source === 'transcript_processor') return 'processor';
   if (source === 'eval_challenger') return 'challenger'; // reachable via detail-by-id
   if (source === 'eval_judge') return 'judge';
   if (source === 'kb_ingest' || source === 'kb_query') return 'kb';
@@ -602,11 +611,12 @@ export interface LogListRow {
 const CHALLENGER_TS = sql<string>`coalesce(${evalSamples.judgedAt}, ${evalSamples.createdAt})`;
 
 /**
- * Recent request logs. Proxy, judge, and KB rows come from usage_events; eval
- * **challenger** rows come from eval_samples, which carries the judge context
- * and (until purge) the content the detail page renders. usage_events ALSO
- * records every challenger call (source='eval_challenger') for accounting —
- * those rows are excluded here so a challenger isn't listed twice.
+ * Recent request logs. Proxy, transcript-processor, judge, and KB rows come
+ * from usage_events; eval **challenger** rows come from eval_samples, which
+ * carries the judge context and (until purge) the content the detail page
+ * renders. usage_events ALSO records every challenger call
+ * (source='eval_challenger') for accounting — those rows are excluded here so
+ * a challenger isn't listed twice.
  */
 export async function getRecentLogs(
   viewer: Viewer,
@@ -624,11 +634,13 @@ export async function getRecentLogs(
     const sourceCond =
       source === 'proxy'
         ? sql`${usageEvents.source} = 'proxy'`
-        : source === 'judge'
-          ? sql`${usageEvents.source} = 'eval_judge'`
-          : source === 'kb'
-            ? sql`${usageEvents.source} in ('kb_ingest', 'kb_query')`
-            : sql`${usageEvents.source} <> 'eval_challenger'`;
+        : source === 'processor'
+          ? sql`${usageEvents.source} = 'transcript_processor'`
+          : source === 'judge'
+            ? sql`${usageEvents.source} = 'eval_judge'`
+            : source === 'kb'
+              ? sql`${usageEvents.source} in ('kb_ingest', 'kb_query')`
+              : sql`${usageEvents.source} <> 'eval_challenger'`;
     const fromUsage = await db
       .select({
         id: usageEvents.id,

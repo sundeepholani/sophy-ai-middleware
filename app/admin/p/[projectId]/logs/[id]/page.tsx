@@ -53,11 +53,13 @@ export default async function LogDetailPage({
         <h1 className="mt-1 text-2xl font-semibold">
           {event.source === 'challenger'
             ? 'Eval challenger call'
+            : event.source === 'processor'
+              ? 'Transcript processor call'
             : event.source === 'judge'
-              ? 'Eval judge call'
-              : event.source === 'kb'
-                ? 'Knowledgebase embedding call'
-                : 'Request detail'}
+                ? 'Eval judge call'
+                : event.source === 'kb'
+                  ? 'Knowledgebase embedding call'
+                  : 'Request detail'}
         </h1>
         <p className="text-sm text-muted-foreground">
           <LocalTime value={event.createdAt.toISOString()} /> · key{' '}

@@ -15,7 +15,14 @@ import {
   type GatewayCreditsResponse,
   type GatewayProvider,
 } from '@ai-sdk/gateway';
+import {
+  createGateway as createTranscriptionGateway,
+  GatewayAuthenticationError as TranscriptionGatewayAuthenticationError,
+  GatewayError as TranscriptionGatewayError,
+  type GatewayProvider as TranscriptionGatewayProvider,
+} from 'ai-gateway-v4';
 import { APICallError } from 'ai';
+import { APICallError as TranscriptionAPICallError } from 'ai-v7';
 import { and, eq, ne } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import { projectGatewayCredentials, projects } from '@/db/schema';
@@ -70,6 +77,7 @@ export interface ProjectGatewaySnapshot {
   readonly credentialRevision: number;
   readonly source: 'encrypted_api_key' | 'platform_env';
   readonly gateway: GatewayProvider;
+  readonly transcriptionGateway: TranscriptionGatewayProvider;
 }
 
 function unavailable(
@@ -81,13 +89,24 @@ function unavailable(
   return new ProjectGatewayUnavailableError(projectId, reason, gatewayCredentialId, cause);
 }
 
-/** Construct a provider only after proving the key is present and non-empty. */
-export function createExplicitGateway(apiKey: string): GatewayProvider {
+function normalizeGatewayApiKey(apiKey: string): string {
   const normalized = apiKey.trim();
   if (!normalized) {
     throw new GatewayCredentialCryptoError('Gateway credential must not be empty.');
   }
-  return createGateway({ apiKey: normalized });
+  return normalized;
+}
+
+/** Construct the AI 6 provider only after proving the key is present and non-empty. */
+export function createExplicitGateway(apiKey: string): GatewayProvider {
+  return createGateway({ apiKey: normalizeGatewayApiKey(apiKey) });
+}
+
+/** Construct the AI 7 transcription provider with the same explicit credential guard. */
+export function createExplicitTranscriptionGateway(
+  apiKey: string,
+): TranscriptionGatewayProvider {
+  return createTranscriptionGateway({ apiKey: normalizeGatewayApiKey(apiKey) });
 }
 
 /**
@@ -208,6 +227,7 @@ export async function resolveProjectGateway(projectId: string): Promise<ProjectG
       credentialRevision: row.credentialRevision,
       source: row.source,
       gateway: createExplicitGateway(apiKey),
+      transcriptionGateway: createExplicitTranscriptionGateway(apiKey),
     });
   } catch (cause) {
     if (ProjectGatewayUnavailableError.isInstance(cause)) throw cause;
@@ -222,6 +242,9 @@ function statusFromError(error: unknown, seen = new Set<unknown>()): number | un
   if (GatewayAuthenticationError.isInstance(error)) return 401;
   if (GatewayError.isInstance(error)) return error.statusCode;
   if (APICallError.isInstance(error)) return error.statusCode;
+  if (TranscriptionGatewayAuthenticationError.isInstance(error)) return 401;
+  if (TranscriptionGatewayError.isInstance(error)) return error.statusCode;
+  if (TranscriptionAPICallError.isInstance(error)) return error.statusCode;
   if (typeof error !== 'object') return undefined;
 
   const candidate = error as {
@@ -232,6 +255,11 @@ function statusFromError(error: unknown, seen = new Set<unknown>()): number | un
     lastError?: unknown;
     errors?: unknown;
   };
+  // A recognized/plain status wins over a wrapper name. This matters for the
+  // isolated Gateway v4 transcription bridge, whose real GatewayError objects
+  // retain their status code.
+  if (typeof candidate.statusCode === 'number') return candidate.statusCode;
+  if (typeof candidate.status === 'number') return candidate.status;
   // AI SDK deliberately wraps GatewayAuthenticationError before handing it to
   // callers: production uses AISDKError{name:'GatewayError'}, development uses
   // a plain Error{name:'GatewayAuthenticationError'}, and both drop status/cause.
@@ -240,8 +268,6 @@ function statusFromError(error: unknown, seen = new Set<unknown>()): number | un
   if (candidate.name === 'GatewayError' || candidate.name === 'GatewayAuthenticationError') {
     return 401;
   }
-  if (typeof candidate.statusCode === 'number') return candidate.statusCode;
-  if (typeof candidate.status === 'number') return candidate.status;
   const fromCause = statusFromError(candidate.cause, seen);
   if (fromCause !== undefined) return fromCause;
   const fromLast = statusFromError(candidate.lastError, seen);

@@ -28,7 +28,7 @@ import { cn } from '@/lib/utils';
 export const metadata: Metadata = {
   title: 'Sophy — one governed API for your AI stack',
   description:
-    'Sophy is a multi-project, OpenAI-compatible AI gateway for language, image, and embedding models, with project-owned Gateway credentials, governed keys, knowledgebases, evaluations, analytics, and cost controls.',
+    'Sophy is a multi-project, OpenAI-compatible AI gateway for language, transcription, image, and embedding models, with project-owned Gateway credentials, governed keys, knowledgebases, evaluations, analytics, and cost controls.',
 };
 
 const HERO_SAMPLES = [
@@ -46,6 +46,23 @@ resp = client.chat.completions.create(
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(resp.choices[0].message.content)`,
+  },
+  {
+    label: 'transcription',
+    code: `from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://sophy.in/v1",
+    api_key="mw_live_…",  # bound to a transcription model
+)
+
+with open("meeting.m4a", "rb") as audio:
+    resp = client.audio.transcriptions.create(
+        model="sophy",
+        file=audio,
+        language="en",
+    )
+print(resp.text)`,
   },
   {
     label: 'embeddings',
@@ -83,6 +100,7 @@ print(resp.data[0].b64_json[:32])`,
 const SURFACES = [
   { method: 'POST', path: '/chat/completions', label: 'Chat + streaming' },
   { method: 'POST', path: '/responses', label: 'Responses + tools' },
+  { method: 'POST', path: '/audio/transcriptions', label: 'Raw or policy-processed text' },
   { method: 'POST', path: '/embeddings', label: 'Float or base64 vectors' },
   { method: 'POST', path: '/images/generations', label: 'Inline image output' },
   { method: 'POST', path: '/files', label: 'Key-scoped uploads' },
@@ -93,12 +111,12 @@ const FEATURES: { icon: typeof Plug; title: string; body: string }[] = [
   {
     icon: Plug,
     title: 'A familiar API surface',
-    body: 'Use supported OpenAI SDK methods for Chat Completions, Responses, embeddings, image generation, models, and files.',
+    body: 'Use supported OpenAI SDK methods for Chat Completions, Responses, audio transcription, embeddings, image generation, models, and files.',
   },
   {
     icon: KeyRound,
     title: 'Policy lives on the key',
-    body: 'Pin one model and centrally own its prompt, parameters, schema, knowledgebase, logging policy, budget, and rate limit.',
+    body: 'Pin a primary model and centrally own its prompt, optional transcript processor, parameters, schema, knowledgebase, logging policy, budget, and rate limit.',
   },
   {
     icon: Wrench,
@@ -118,7 +136,7 @@ const FEATURES: { icon: typeof Plug; title: string; body: string }[] = [
   {
     icon: Boxes,
     title: 'A searchable model catalog',
-    body: 'Compare supported language, image, and embedding models by provider, capability, context window, and estimated pricing.',
+    body: 'Compare supported language, transcription, image, and embedding models by provider, capability, context window, and estimated pricing.',
   },
   {
     icon: Gauge,
@@ -187,7 +205,7 @@ const STEPS: { n: string; title: string; body: string }[] = [
   {
     n: '2',
     title: 'Configure a Sophy API key',
-    body: 'Choose one supported model and set its prompt policy, parameters, limits, logging, schema, and optional project knowledgebase.',
+    body: 'Choose a primary model and set its prompt policy, parameters, limits, logging, schema, optional transcript processor, and optional project knowledgebase.',
   },
   {
     n: '3',
@@ -241,7 +259,7 @@ export default function HomePage() {
         <div className="mx-auto grid w-full max-w-7xl items-center gap-12 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:gap-10 lg:px-8 lg:py-28">
           <div className="space-y-6">
             <Badge variant="secondary" className="rounded-full px-3 py-1 text-xs">
-              Multi-project · OpenAI-compatible · Language, image, and embeddings
+              Multi-project · OpenAI-compatible · Language, audio, image, and embeddings
             </Badge>
             <h1 className="font-heading text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-6xl">
               One governed API for your AI stack.
@@ -267,7 +285,7 @@ export default function HomePage() {
               </Link>
             </div>
             <p className="text-xs text-muted-foreground">
-              Each key is bound to one model; use an API route that matches its capabilities.
+              Each key is bound to one primary model; use an API route that matches its capabilities.
             </p>
           </div>
           <CodeTabs samples={HERO_SAMPLES} className="shadow-xl shadow-primary/5" />
@@ -278,7 +296,7 @@ export default function HomePage() {
         <div className="mx-auto w-full max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <p className="text-sm font-medium text-primary">Six supported API routes</p>
+              <p className="text-sm font-medium text-primary">Seven supported API routes</p>
               <h2 id="surfaces-title" className="font-heading mt-1 text-2xl font-semibold tracking-tight">
                 One base URL, purpose-built surfaces
               </h2>

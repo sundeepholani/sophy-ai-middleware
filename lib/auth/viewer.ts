@@ -15,6 +15,7 @@ import {
   projectMemberships,
   projects,
   users,
+  type KeyParams,
   type ProjectRole,
   type ProjectStatus,
 } from '@/db/schema';
@@ -142,6 +143,8 @@ export async function assertCanManageKey(
   viewer: ProjectViewer;
   ownerUserId: string | null;
   model: string;
+  systemPrompt: string | null;
+  params: KeyParams;
   status: string;
   name: string;
 }> {
@@ -150,6 +153,8 @@ export async function assertCanManageKey(
     .select({
       ownerUserId: apiKeys.ownerUserId,
       model: apiKeys.model,
+      systemPrompt: apiKeys.systemPrompt,
+      params: apiKeys.params,
       status: apiKeys.status,
       name: apiKeys.name,
     })

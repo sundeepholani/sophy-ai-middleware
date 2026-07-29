@@ -6,9 +6,14 @@
  * Guarded by CRON_SECRET (Vercel sends it as a Bearer token) + a Redis lock so
  * overlapping invocations don't double-work.
  */
-import { and, eq, gte, lt, sql } from 'drizzle-orm';
+import { and, gte, inArray, lt, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
-import { usageEvents, usageRollups, requestLogs } from '@/db/schema';
+import {
+  CLIENT_USAGE_SOURCES,
+  usageEvents,
+  usageRollups,
+  requestLogs,
+} from '@/db/schema';
 import { acquireLock, releaseLock } from '@/lib/counters';
 import { sweepStaleUploads } from '@/lib/files/blob';
 import { processEvalRuns } from '@/lib/eval/process';
@@ -21,23 +26,29 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
-async function rollupRecentDays(): Promise<number> {
+export async function rollupRecentDays(): Promise<number> {
   const since = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
   const rows = await getDb()
     .select({
       projectId: usageEvents.projectId,
       apiKeyId: usageEvents.apiKeyId,
       periodStart: sql<string>`to_char(date_trunc('day', ${usageEvents.createdAt}), 'YYYY-MM-DD')`,
-      requests: sql<string>`count(*)`,
+      requests: sql<string>`coalesce(count(*) filter (where ${usageEvents.source} = 'proxy'),0)`,
       inputTokens: sql<string>`coalesce(sum(${usageEvents.inputTokens}),0)`,
       outputTokens: sql<string>`coalesce(sum(${usageEvents.outputTokens}),0)`,
       cost: sql<string>`coalesce(sum(${usageEvents.costUsd}),0)`,
-      errors: sql<string>`coalesce(count(*) filter (where ${usageEvents.status} <> 'ok'),0)`,
+      errors: sql<string>`coalesce(count(*) filter (where ${usageEvents.status} <> 'ok' and ${usageEvents.source} = 'proxy'),0)`,
     })
     .from(usageEvents)
-    // Client traffic only: rollups are per-key request/error/cost history, and
-    // eval/kb rows (key-attributed or keyless) would skew those semantics.
-    .where(and(gte(usageEvents.createdAt, since), eq(usageEvents.source, 'proxy')))
+    // One proxy row counts the uploaded clip/request and its terminal outcome.
+    // A transcript-processor component contributes tokens/cost but not another
+    // request or request-level error. Sophy-initiated eval/KB rows stay out.
+    .where(
+      and(
+        gte(usageEvents.createdAt, since),
+        inArray(usageEvents.source, [...CLIENT_USAGE_SOURCES]),
+      ),
+    )
     .groupBy(
       usageEvents.projectId,
       usageEvents.apiKeyId,
@@ -45,7 +56,7 @@ async function rollupRecentDays(): Promise<number> {
     );
 
   for (const r of rows) {
-    if (!r.apiKeyId) continue; // proxy rows always carry a key; guard for the type
+    if (!r.apiKeyId) continue; // client usage rows always carry a key; guard for the type
     await getDb()
       .insert(usageRollups)
       .values({

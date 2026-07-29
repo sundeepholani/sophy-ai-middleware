@@ -14,6 +14,7 @@ import {
   type KeyFormInput,
   type BulkActionResult,
 } from '@/app/admin/actions';
+import { transcriptProcessorSelectionError } from '@/lib/admin/keys';
 import type { KeyRow } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
 import type { ProjectRole } from '@/components/admin/project-types';
@@ -105,6 +106,7 @@ export function KeysManager({
   gatewayReady,
   keys,
   models,
+  transcriptProcessorModels,
   modelsUnavailable = false,
   evalStatuses = {},
   judgeModel,
@@ -117,6 +119,8 @@ export function KeysManager({
   gatewayReady: boolean;
   keys: KeyRow[];
   models: AvailableModel[];
+  /** Language models eligible to process a raw speech-to-text transcript. */
+  transcriptProcessorModels: AvailableModel[];
   modelsUnavailable?: boolean;
   evalStatuses?: Record<string, EvalRunStatus>;
   judgeModel: string;
@@ -239,6 +243,7 @@ export function KeysManager({
               projectId={projectId}
               mode="create"
               models={models}
+              transcriptProcessorModels={transcriptProcessorModels}
               modelsUnavailable={modelsUnavailable}
               role={role}
               users={users}
@@ -431,6 +436,7 @@ export function KeysManager({
               keyId={editing.id}
               initial={editing}
               models={models}
+              transcriptProcessorModels={transcriptProcessorModels}
               modelsUnavailable={modelsUnavailable}
               role={role}
               users={users}
@@ -975,6 +981,7 @@ function KeyForm({
   keyId,
   initial,
   models,
+  transcriptProcessorModels,
   modelsUnavailable = false,
   role,
   users,
@@ -988,6 +995,7 @@ function KeyForm({
   keyId?: string;
   initial?: KeyRow;
   models: AvailableModel[];
+  transcriptProcessorModels: AvailableModel[];
   modelsUnavailable?: boolean;
   role: ProjectRole;
   users: { id: string; email: string }[];
@@ -1013,6 +1021,13 @@ function KeyForm({
   const [allowClientPrompt, setAllowClientPrompt] = useState(
     initial?.params.allowClientPrompt ?? false,
   );
+  const [transcriptProcessorModel, setTranscriptProcessorModel] = useState(
+    (
+      initial?.params as KeyRow['params'] & {
+        transcriptProcessorModel?: string;
+      }
+    )?.transcriptProcessorModel ?? '',
+  );
   const [schemaText, setSchemaText] = useState(
     initial?.outputSchema ? JSON.stringify(initial.outputSchema, null, 2) : '',
   );
@@ -1031,6 +1046,7 @@ function KeyForm({
     ? models.filter((m) => modelHasAllTags(m, requiredCaps))
     : models;
   const currentModel = models.find((m) => m.id === model);
+  const isTranscriptionModel = currentModel?.type === 'transcription';
   const missingCaps = currentModel
     ? requiredCaps.filter((c) => !currentModel.tags.includes(c))
     : [];
@@ -1038,6 +1054,13 @@ function KeyForm({
   function submit(stopEval = false) {
     if (!name.trim()) return toast.error('Name is required');
     if (!model.trim()) return toast.error('Model is required');
+    const transcriptProcessorError = transcriptProcessorSelectionError({
+      primaryModel: currentModel,
+      systemPrompt,
+      transcriptProcessorModel,
+      models,
+    });
+    if (transcriptProcessorError) return toast.error(transcriptProcessorError);
 
     // Output schema must be a JSON object (not an array/string/number/null).
     let outputSchema: Record<string, unknown> | null = null;
@@ -1102,20 +1125,32 @@ function KeyForm({
       maxOut = n;
     }
 
+    const keyParams = {
+      ...initial?.params,
+      temperature: temp,
+      maxOutputTokens: maxOut,
+      topP: topPV,
+      // Off serializes out of the jsonb like the blank fields — absent = disabled.
+      allowClientPrompt: allowClientPrompt || undefined,
+      // This second model is meaningful only for batch transcription keys. If
+      // the catalog is temporarily unavailable, preserve the stored value
+      // instead of silently deleting configuration we cannot classify.
+      ...(currentModel
+        ? {
+            transcriptProcessorModel: isTranscriptionModel
+              ? transcriptProcessorModel.trim() || undefined
+              : undefined,
+          }
+        : {}),
+    } as KeyFormInput['params'] & { transcriptProcessorModel?: string };
+
     const input: KeyFormInput = {
       name: name.trim(),
       model: model.trim(),
       systemPrompt: systemPrompt.trim() ? systemPrompt : null,
       // Spread the original params so any field we don't surface survives an edit;
       // blank UI fields serialize out of the jsonb as undefined.
-      params: {
-        ...initial?.params,
-        temperature: temp,
-        maxOutputTokens: maxOut,
-        topP: topPV,
-        // Off serializes out of the jsonb like the blank fields — absent = disabled.
-        allowClientPrompt: allowClientPrompt || undefined,
-      },
+      params: keyParams,
       outputSchema,
       monthlyCostCapUsd: costCapV,
       rpmLimit: rpmV,
@@ -1224,6 +1259,27 @@ function KeyForm({
         )}
       </div>
 
+      {isTranscriptionModel && (
+        <div className="space-y-1.5 rounded-md border border-primary/20 bg-primary/5 p-3">
+          <Label htmlFor={`${uid}-transcript-processor`} className="text-xs">
+            Transcript processor{systemPrompt.trim() ? ' (required)' : ' (optional)'}
+          </Label>
+          <ModelCombobox
+            id={`${uid}-transcript-processor`}
+            value={transcriptProcessorModel}
+            onValueChange={setTranscriptProcessorModel}
+            models={transcriptProcessorModels.map((candidate) => candidate.id)}
+            modelsUnavailable={modelsUnavailable}
+            placeholder="Select a language model…"
+          />
+          <p className="text-xs text-muted-foreground">
+            Speech-to-text creates the raw transcript first. This language model then applies the
+            system prompt—for example, to clean up, translate, summarize, or extract action items.
+            Leave both this field and the system prompt blank to return the raw transcript.
+          </p>
+        </div>
+      )}
+
       {role === 'admin' && (
         <div className="space-y-1">
           <Label htmlFor={`${uid}-owner`} className="text-xs">
@@ -1257,7 +1313,7 @@ function KeyForm({
         </div>
       )}
 
-      {knowledgebases.length > 0 && (
+      {knowledgebases.length > 0 && !isTranscriptionModel && (
         <div className="space-y-1">
           <Label htmlFor={`${uid}-kb`} className="text-xs">
             Knowledgebase
@@ -1298,10 +1354,19 @@ function KeyForm({
           id={`${uid}-system`}
           rows={5}
           className="text-sm"
-          placeholder="You are a helpful assistant for…"
+          placeholder={
+            isTranscriptionModel
+              ? 'For example: Summarize the transcript and list action items.'
+              : 'You are a helpful assistant for…'
+          }
           value={systemPrompt}
           onChange={(e) => setSystemPrompt(e.target.value)}
         />
+        {isTranscriptionModel && (
+          <p className="text-xs text-muted-foreground">
+            Applied after speech-to-text by the transcript processor selected above.
+          </p>
+        )}
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
@@ -1338,7 +1403,9 @@ function KeyForm({
             Log message content
           </Label>
           <p className="text-xs text-muted-foreground">
-            Store inbound prompts &amp; model replies for this key (viewable in Logs, kept 30 days).
+            {isTranscriptionModel
+              ? 'Store the filename, language hint, raw transcript, and final text for 30 days. Audio bytes are never stored.'
+              : 'Store inbound prompts & model replies for this key (viewable in Logs, kept 30 days).'}
           </p>
         </div>
         <Switch id={`${uid}-log`} checked={logContent} onCheckedChange={setLogContent} />
@@ -1349,11 +1416,21 @@ function KeyForm({
         className="text-xs text-muted-foreground underline"
         onClick={() => setShowAdvanced((s) => !s)}
       >
-        {showAdvanced ? 'Hide advanced' : 'Advanced (params, structured output)'}
+        {showAdvanced
+          ? 'Hide advanced'
+          : isTranscriptionModel
+            ? 'Advanced (processor parameters)'
+            : 'Advanced (params, structured output)'}
       </button>
 
       {showAdvanced && (
         <div className="space-y-4 rounded-md border p-3">
+          {isTranscriptionModel && (
+            <p className="text-xs text-muted-foreground">
+              These generation settings apply only to the transcript processor. Agent mode,
+              output schemas, and knowledgebases are not used by the audio transcription endpoint.
+            </p>
+          )}
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1">
               <Label htmlFor={`${uid}-temp`} className="text-xs">
@@ -1392,43 +1469,47 @@ function KeyForm({
               />
             </div>
           </div>
-          <div className="flex items-center justify-between gap-4 rounded-md border p-3">
-            <div>
-              <Label htmlFor={`${uid}-agent`} className="text-sm">
-                Agent mode — honor the client&apos;s prompt
+          {!isTranscriptionModel && (
+            <div className="flex items-center justify-between gap-4 rounded-md border p-3">
+              <div>
+                <Label htmlFor={`${uid}-agent`} className="text-sm">
+                  Agent mode — honor the client&apos;s prompt
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Appends the client&apos;s own system prompt (leading system/developer messages,
+                  or <code>instructions</code>) after this key&apos;s prompt — for server-side
+                  agentic SDK flows whose instructions change per request. Client prompts run at
+                  operator level: enable only for keys used by server-side apps that build the
+                  message array themselves and never forward end-user-authored system messages.
+                </p>
+              </div>
+              <Switch
+                id={`${uid}-agent`}
+                checked={allowClientPrompt}
+                onCheckedChange={setAllowClientPrompt}
+              />
+            </div>
+          )}
+          {!isTranscriptionModel && (
+            <div className="space-y-1">
+              <Label htmlFor={`${uid}-schema`} className="text-xs">
+                Output JSON schema (blank = plain text)
               </Label>
+              <Textarea
+                id={`${uid}-schema`}
+                className="font-mono text-xs"
+                rows={6}
+                placeholder='{ "type": "object", "properties": { ... }, "required": [...] }'
+                value={schemaText}
+                onChange={(e) => setSchemaText(e.target.value)}
+              />
               <p className="text-xs text-muted-foreground">
-                Appends the client&apos;s own system prompt (leading system/developer messages,
-                or <code>instructions</code>) after this key&apos;s prompt — for server-side
-                agentic SDK flows whose instructions change per request. Client prompts run at
-                operator level: enable only for keys used by server-side apps that build the
-                message array themselves and never forward end-user-authored system messages.
+                Normalized on save to work on any model: optional fields become nullable and required,
+                and an OpenAI <code>{'{ name, schema, strict }'}</code> wrapper is unwrapped. Reopen the
+                key to see the stored form.
               </p>
             </div>
-            <Switch
-              id={`${uid}-agent`}
-              checked={allowClientPrompt}
-              onCheckedChange={setAllowClientPrompt}
-            />
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor={`${uid}-schema`} className="text-xs">
-              Output JSON schema (blank = plain text)
-            </Label>
-            <Textarea
-              id={`${uid}-schema`}
-              className="font-mono text-xs"
-              rows={6}
-              placeholder='{ "type": "object", "properties": { ... }, "required": [...] }'
-              value={schemaText}
-              onChange={(e) => setSchemaText(e.target.value)}
-            />
-            <p className="text-xs text-muted-foreground">
-              Normalized on save to work on any model: optional fields become nullable and required,
-              and an OpenAI <code>{'{ name, schema, strict }'}</code> wrapper is unwrapped. Reopen the
-              key to see the stored form.
-            </p>
-          </div>
+          )}
         </div>
       )}
 

@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/db/client', () => ({ getDb: mocks.getDb }));
 
-import { recordUsage, ZERO_USAGE } from '@/lib/usage/record';
+import { recordUsage, recordUsageBatch, ZERO_USAGE } from '@/lib/usage/record';
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -53,5 +53,49 @@ describe('recordUsage cache-write telemetry', () => {
         cacheWriteTokens: null,
       }),
     );
+  });
+
+  it('inserts all model components for one request in a single statement', async () => {
+    const values = vi.fn().mockResolvedValue(undefined);
+    mocks.getDb.mockReturnValue({ insert: vi.fn(() => ({ values })) });
+
+    await recordUsageBatch([
+      {
+        id: '00000000-0000-4000-8000-000000000011',
+        projectId: '00000000-0000-4000-8000-000000000001',
+        gatewayCredentialId: '00000000-0000-4000-8000-000000000002',
+        keyId: '00000000-0000-4000-8000-000000000003',
+        source: 'proxy',
+        model: 'openai/gpt-4o-mini-transcribe',
+        usage: { ...ZERO_USAGE },
+        status: 'ok',
+        responseKind: 'transcription',
+      },
+      {
+        id: '00000000-0000-4000-8000-000000000012',
+        projectId: '00000000-0000-4000-8000-000000000001',
+        gatewayCredentialId: '00000000-0000-4000-8000-000000000002',
+        keyId: '00000000-0000-4000-8000-000000000003',
+        source: 'transcript_processor',
+        model: 'anthropic/claude-sonnet-4.5',
+        usage: { ...ZERO_USAGE, inputTokens: 20, outputTokens: 5, totalTokens: 25 },
+        status: 'ok',
+        responseKind: 'transcription',
+      },
+    ]);
+
+    expect(values).toHaveBeenCalledOnce();
+    expect(values).toHaveBeenCalledWith([
+      expect.objectContaining({
+        source: 'proxy',
+        model: 'openai/gpt-4o-mini-transcribe',
+      }),
+      expect.objectContaining({
+        source: 'transcript_processor',
+        model: 'anthropic/claude-sonnet-4.5',
+        inputTokens: 20,
+        outputTokens: 5,
+      }),
+    ]);
   });
 });

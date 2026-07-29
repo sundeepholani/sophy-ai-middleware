@@ -10,12 +10,13 @@ export const dynamic = 'force-dynamic';
 const FILTERS: { value: LogSource | 'all'; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'proxy', label: 'Proxy' },
+  { value: 'processor', label: 'Transcript processor' },
   { value: 'challenger', label: 'Challenger' },
   { value: 'judge', label: 'Judge' },
   { value: 'kb', label: 'KB' },
 ];
 
-const SOURCES: LogSource[] = ['proxy', 'challenger', 'judge', 'kb'];
+const SOURCES: LogSource[] = ['proxy', 'processor', 'challenger', 'judge', 'kb'];
 
 export default async function LogsPage({
   params,
@@ -35,8 +36,8 @@ export default async function LogsPage({
       <div>
         <h1 className="text-2xl font-semibold">Request logs</h1>
         <p className="text-sm text-muted-foreground">
-          The most recent requests in {viewer.projectName}, including proxy traffic and Sophy’s
-          eval and knowledgebase Gateway calls.
+          The most recent client requests and component Gateway calls in {viewer.projectName},
+          including transcript processing and Sophy’s eval and knowledgebase work.
         </p>
       </div>
 

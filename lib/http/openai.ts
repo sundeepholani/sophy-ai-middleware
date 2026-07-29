@@ -226,3 +226,22 @@ export interface EmbeddingsResponse {
   model: string;
   usage: { prompt_tokens: number; total_tokens: number };
 }
+
+// ---- Audio transcription (POST /v1/audio/transcriptions) ------------------
+
+/**
+ * OpenAI-compatible transcription response. `text` is the normal SDK field.
+ * Sophy's extensions make it explicit whether the key's system prompt produced
+ * a processed version. Raw speech is returned only when no processing policy
+ * ran; otherwise exposing it would let clients bypass instructions such as
+ * redaction.
+ */
+export interface AudioTranscriptionResponse {
+  /** Final text returned to the caller (processed when a system prompt is set). */
+  text: string;
+  /** Raw speech-to-text output. Present only when no processing policy ran. */
+  transcript?: string;
+  processed: boolean;
+  language?: string;
+  duration?: number;
+}

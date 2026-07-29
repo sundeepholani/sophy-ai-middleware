@@ -2,6 +2,9 @@
   "name": "sophy",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -19,6 +22,8 @@
     "@vercel/blob": "^2.4.0",
     "@vercel/functions": "^3.7.1",
     "ai": "^6.0.207",
+    "ai-gateway-v4": "npm:@ai-sdk/gateway@4.0.31",
+    "ai-v7": "npm:ai@7.0.41",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "bcryptjs": "^3.0.3",
