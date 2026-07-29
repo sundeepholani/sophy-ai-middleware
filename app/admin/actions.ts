@@ -31,7 +31,9 @@ import { recordedEvalSpendUsd } from '@/lib/eval/spend';
 import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
 import { schemaCompileError } from '@/lib/gateway/openai-map';
 import { getSettings } from '@/lib/admin/settings';
+import { transcriptProcessorSelectionError } from '@/lib/admin/keys';
 import { getKeyEvals, type KeyEval } from '@/lib/admin/queries';
+import { listAllModels, modelSupportsBatchTranscription } from '@/lib/gateway/models';
 import { getProjectGatewaySummary } from '@/lib/projects/repository';
 
 /** The drizzle client, or a transaction executor — both expose the same query API. */
@@ -192,11 +194,23 @@ function validateKeyInput(input: KeyFormInput): void {
   if (monthlyCostCapUsd != null && (!Number.isFinite(monthlyCostCapUsd) || monthlyCostCapUsd <= 0)) {
     throw new Error('Monthly cost budget must be a positive amount');
   }
-  const { temperature, topP, maxOutputTokens, allowClientPrompt } = params;
+  const {
+    temperature,
+    topP,
+    maxOutputTokens,
+    allowClientPrompt,
+    transcriptProcessorModel,
+  } = params;
   // Strict boolean: agent mode is security-relevant, so a crafted truthy value
   // (string/number) must not slip into the jsonb and read as enabled.
   if (allowClientPrompt !== undefined && typeof allowClientPrompt !== 'boolean') {
     throw new Error('allowClientPrompt must be a boolean');
+  }
+  if (
+    transcriptProcessorModel !== undefined &&
+    (typeof transcriptProcessorModel !== 'string' || !transcriptProcessorModel.trim())
+  ) {
+    throw new Error('Transcript processor model must be a non-empty string');
   }
   if (
     temperature !== undefined &&
@@ -213,6 +227,32 @@ function validateKeyInput(input: KeyFormInput): void {
   ) {
     throw new Error('Max output tokens must be a positive whole number');
   }
+}
+
+/**
+ * Enforce the cross-model transcription rule against the current public
+ * catalog. A temporary catalog outage preserves Sophy's existing custom/stale
+ * model behavior; the runtime route independently fails closed before a paid
+ * call if required processor configuration is absent.
+ */
+async function validateTranscriptProcessorInput(input: KeyFormInput): Promise<void> {
+  let models;
+  try {
+    models = await listAllModels();
+  } catch {
+    return;
+  }
+  const primaryModel = models.find((model) => model.id === input.model.trim());
+  if (primaryModel?.type === 'transcription' && !modelSupportsBatchTranscription(primaryModel)) {
+    throw new Error('Choose a batch transcription model for uploaded audio');
+  }
+  const error = transcriptProcessorSelectionError({
+    primaryModel,
+    systemPrompt: input.systemPrompt ?? '',
+    transcriptProcessorModel: input.params.transcriptProcessorModel ?? '',
+    models,
+  });
+  if (error) throw new Error(error);
 }
 
 /**
@@ -239,6 +279,7 @@ export async function createKey(
   const gateway = await getProjectGatewaySummary(input.projectId);
   if (!gateway.isReady) throw new Error('gateway_not_ready');
   validateKeyInput(input);
+  await validateTranscriptProcessorInput(input);
   // Editors always own what they create; admins choose (defaults to unassigned).
   const ownerUserId =
     viewer.role === 'editor'
@@ -275,6 +316,9 @@ export async function createKey(
         ownerUserId,
         monthlyCostCapUsd,
         ...(input.params.allowClientPrompt ? { allowClientPrompt: true } : {}),
+        ...(input.params.transcriptProcessorModel
+          ? { transcriptProcessorModel: input.params.transcriptProcessorModel }
+          : {}),
       },
       tx,
     );
@@ -302,6 +346,7 @@ export async function updateKey(
   const { viewer, ownerUserId: currentOwner, model: currentModel } =
     await assertCanManageKey(input.projectId, input.id);
   validateKeyInput(input);
+  await validateTranscriptProcessorInput(input);
 
   // Only admins may reassign ownership; editors' owner is left untouched.
   let newOwner = currentOwner;
@@ -683,6 +728,16 @@ export async function bulkUpdateKeyModel(input: {
   if (!model) throw new Error('Model is required');
   const ids = normalizeBulkIds(input.ids);
   const confirmedStops = new Set(input.stopEvalIds ?? []);
+  let catalogModels: Awaited<ReturnType<typeof listAllModels>> = [];
+  try {
+    catalogModels = await listAllModels();
+  } catch {
+    // Preserve the existing custom/stale-model behavior during catalog outages.
+  }
+  const targetModel = catalogModels.find((candidate) => candidate.id === model);
+  if (targetModel?.type === 'transcription' && !modelSupportsBatchTranscription(targetModel)) {
+    throw new Error('Choose a batch transcription model for uploaded audio');
+  }
 
   let done = 0;
   let stoppedEvals = 0;
@@ -701,6 +756,16 @@ export async function bulkUpdateKeyModel(input: {
       }
       if (key.model === model) {
         skipped.push({ name, reason: 'already on this model' });
+        continue;
+      }
+      const transcriptProcessorError = transcriptProcessorSelectionError({
+        primaryModel: targetModel,
+        systemPrompt: key.systemPrompt ?? '',
+        transcriptProcessorModel: key.params.transcriptProcessorModel ?? '',
+        models: catalogModels,
+      });
+      if (transcriptProcessorError) {
+        skipped.push({ name, reason: transcriptProcessorError });
         continue;
       }
       // A model change invalidates a running eval (see updateKey). Only a key

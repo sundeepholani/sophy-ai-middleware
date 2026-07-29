@@ -22,6 +22,8 @@
  */
 import { GatewayError } from '@ai-sdk/gateway';
 import { APICallError } from 'ai';
+import { GatewayError as TranscriptionGatewayError } from 'ai-gateway-v4';
+import { APICallError as TranscriptionAPICallError } from 'ai-v7';
 import { openAiError, type OpenAIErrorType } from '@/lib/http/openai';
 import {
   projectGatewayUnavailableResponse,
@@ -131,12 +133,23 @@ function nestedErrors(error: unknown): unknown[] {
   return nested;
 }
 
-type StatusError = APICallError | GatewayError;
+type StatusError =
+  | APICallError
+  | GatewayError
+  | TranscriptionAPICallError
+  | TranscriptionGatewayError;
 
 function findStatusError(error: unknown, seen = new Set<unknown>()): StatusError | undefined {
   if (error == null || seen.has(error)) return undefined;
   seen.add(error);
-  if (APICallError.isInstance(error) || GatewayError.isInstance(error)) return error;
+  if (
+    APICallError.isInstance(error) ||
+    GatewayError.isInstance(error) ||
+    TranscriptionAPICallError.isInstance(error) ||
+    TranscriptionGatewayError.isInstance(error)
+  ) {
+    return error;
+  }
   for (const nested of nestedErrors(error)) {
     const found = findStatusError(nested, seen);
     if (found) return found;
@@ -147,10 +160,10 @@ function findStatusError(error: unknown, seen = new Set<unknown>()): StatusError
 function findApiCallError(
   error: unknown,
   seen = new Set<unknown>(),
-): APICallError | undefined {
+): APICallError | TranscriptionAPICallError | undefined {
   if (error == null || seen.has(error)) return undefined;
   seen.add(error);
-  if (APICallError.isInstance(error)) return error;
+  if (APICallError.isInstance(error) || TranscriptionAPICallError.isInstance(error)) return error;
   for (const nested of nestedErrors(error)) {
     const found = findApiCallError(nested, seen);
     if (found) return found;
@@ -160,7 +173,10 @@ function findApiCallError(
 
 function statusErrorMessage(error: StatusError | undefined): string | undefined {
   if (!(error instanceof Error)) return undefined;
-  if (GatewayError.isInstance(error) && error.generationId) {
+  if (
+    (GatewayError.isInstance(error) || TranscriptionGatewayError.isInstance(error)) &&
+    error.generationId
+  ) {
     const generationSuffix = ` [${error.generationId}]`;
     if (error.message.endsWith(generationSuffix)) {
       return error.message.slice(0, -generationSuffix.length);

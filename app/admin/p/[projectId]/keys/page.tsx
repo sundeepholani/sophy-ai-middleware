@@ -34,6 +34,7 @@ export default async function KeysPage({
   } catch {
     modelsUnavailable = true;
   }
+  const transcriptProcessorModels = models.filter((model) => model.type === 'language');
 
   return (
     <div className="space-y-6">
@@ -50,6 +51,7 @@ export default async function KeysPage({
         gatewayReady={gateway.isReady}
         keys={keys}
         models={models}
+        transcriptProcessorModels={transcriptProcessorModels}
         modelsUnavailable={modelsUnavailable}
         evalStatuses={evalStatuses}
         judgeModel={settings.judgeModel}

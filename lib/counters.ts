@@ -62,16 +62,19 @@ function startOfUtcMonth(d: Date = new Date()): Date {
 
 /**
  * USD spend by this key so far this UTC month (summed from recorded gateway
- * costs). Client traffic only: eval challenger/judge and KB rows carry the
- * key's id for attribution but are Sophy-initiated spend — charging them here
- * would let an operator-started eval push a client key over its cap.
+ * costs). Both the primary proxy row and an optional transcript-processor
+ * component are client spend. Eval challenger/judge and KB rows carry the key's
+ * id for attribution but are Sophy-initiated spend — charging them here would
+ * let an operator-started eval push a client key over its cap.
  */
 export async function costUsedThisMonth(keyId: string): Promise<number> {
   const since = startOfUtcMonth();
   const res = (await getDb().execute(sql`
     SELECT coalesce(sum(cost_usd), 0)::numeric AS used
     FROM usage_events
-    WHERE api_key_id = ${keyId} AND created_at >= ${since} AND source = 'proxy'
+    WHERE api_key_id = ${keyId}
+      AND created_at >= ${since}
+      AND source IN ('proxy', 'transcript_processor')
   `)) as unknown as Rows;
   return Number(res.rows?.[0]?.used ?? 0);
 }

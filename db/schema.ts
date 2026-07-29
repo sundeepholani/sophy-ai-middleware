@@ -34,16 +34,28 @@ import {
 // ---- Shared TS types --------------------------------------------------------
 
 export type UsageStatus = 'ok' | 'validation_failed' | 'error';
-export type ResponseKind = 'text' | 'structured' | 'image' | 'embedding';
+export type ResponseKind = 'text' | 'structured' | 'image' | 'embedding' | 'transcription';
 export type KeyStatus = 'active' | 'revoked';
 /**
- * What kind of gateway call a usage_event records. 'proxy' = a client request
- * served through a key (the only kind that counts toward the key's quota and
- * the client-facing usage charts). The rest are Sophy's own spend: eval
- * challenger replays / judge verdicts (billed per call — re-judging a continued
- * conversation adds rows rather than overwriting) and knowledgebase embeddings.
+ * What kind of gateway call a usage_event records. 'proxy' = the one
+ * client-request row. 'transcript_processor' is a second paid model component
+ * of that same client request: its tokens/cost count toward client usage and
+ * quota, but it never adds another client request. The rest are Sophy's own
+ * spend: eval challenger replays / judge verdicts (billed per call —
+ * re-judging a continued conversation adds rows rather than overwriting) and
+ * knowledgebase embeddings.
  */
-export type UsageSource = 'proxy' | 'eval_challenger' | 'eval_judge' | 'kb_ingest' | 'kb_query';
+export type UsageSource =
+  | 'proxy'
+  | 'transcript_processor'
+  | 'eval_challenger'
+  | 'eval_judge'
+  | 'kb_ingest'
+  | 'kb_query';
+export const CLIENT_USAGE_SOURCES = [
+  'proxy',
+  'transcript_processor',
+] as const satisfies readonly UsageSource[];
 export type ProjectRole = 'admin' | 'editor';
 export type ProjectStatus = 'active' | 'suspended' | 'archived';
 export type MembershipStatus = 'active' | 'suspended';
@@ -56,6 +68,13 @@ export interface KeyParams {
   temperature?: number;
   maxOutputTokens?: number;
   topP?: number;
+  /**
+   * Optional language model used after a transcription completes. It is
+   * required when a transcription key has a system prompt, because speech
+   * recognition models cannot reliably follow arbitrary instructions such as
+   * summarization, translation, redaction, or action-item extraction.
+   */
+  transcriptProcessorModel?: string;
   /**
    * Agent mode: honor the CLIENT's system prompt (chat LEADING `system`/
    * `developer` messages; responses `instructions` + leading system items) by
@@ -473,7 +492,7 @@ export const usageEvents = pgTable(
     gatewayCredentialId: uuid('gateway_credential_id'),
     /** Null for spend not attributable to a key (kb_ingest runs from the cron). */
     apiKeyId: uuid('api_key_id'),
-    /** See UsageSource — only 'proxy' rows are client traffic. */
+    /** See UsageSource — proxy + transcript_processor are client-attributable usage. */
     source: text('source').$type<UsageSource>().notNull().default('proxy'),
     provider: text('provider'),
     model: text('model'),
@@ -549,7 +568,7 @@ export const requestLogs = pgTable(
     id: uuid('id').primaryKey(), // == usage_events.id (app-generated, shared)
     projectId: uuid('project_id').notNull(),
     apiKeyId: uuid('api_key_id').notNull(),
-    surface: text('surface'), // 'chat' | 'responses' | 'embedding'
+    surface: text('surface'), // 'chat' | 'responses' | 'embedding' | 'transcription'
     systemPrompt: text('system_prompt'),
     request: jsonb('request'), // inbound messages sent to the model (embedding: the input strings)
     response: text('response'), // outbound model text (null for embeddings — vectors, not text)

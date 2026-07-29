@@ -2,15 +2,16 @@
 
 Sophy is a multi-project AI control plane. Client applications use Sophy-issued
 keys instead of holding provider credentials. Each project connects its own
-Vercel AI Gateway key, and each Sophy key owns one
-configured model plus its prompt, generation parameters, optional output schema,
-knowledgebase, rate limit, and monthly USD budget. Operators can change that
+Vercel AI Gateway key, and each Sophy key owns one primary model plus its prompt,
+generation parameters, optional output schema, knowledgebase, rate limit, and
+monthly USD budget. A transcription key can also name a language model that
+applies the key-owned prompt to the raw transcript. Operators can change that
 configuration without changing or redeploying the client.
 
 Sophy exposes a practical OpenAI-compatible surface for Chat Completions,
-Responses, embeddings, image generation, model discovery, and temporary file
-uploads. Outbound calls use Vercel AI Gateway; Sophy owns client keys, policy,
-usage accounting, evaluations, and the admin console.
+Responses, audio transcription, embeddings, image generation, model discovery,
+and temporary file uploads. Outbound calls use Vercel AI Gateway; Sophy owns
+client keys, policy, usage accounting, evaluations, and the admin console.
 
 > Migrating an application? Give its developers
 > [AI API Migration.md](AI%20API%20Migration.md).
@@ -24,13 +25,16 @@ client (OpenAI SDK, baseURL=<sophy>/v1, apiKey=mw_live_...)
   -> enforce the key's rate limit and monthly budget
   -> apply the key's model, prompt, parameters, schema, and knowledgebase
   -> pass supported input/tools through Vercel AI Gateway
+  -> for configured transcription keys, apply the prompt to the raw transcript
   -> return an OpenAI-shaped response and record usage
 ```
 
 - **The key is the configuration.** A client-sent `model` is ignored on every
   surface. On Chat/Responses, the key's temperature, top-p, maximum output
   tokens, and prompt also win. By default, client `system`/`developer` messages
-  and Responses `instructions` are ignored.
+  and Responses `instructions` are ignored. Audio transcription rejects a
+  client `prompt`; the key's system prompt controls optional transcript
+  processing instead.
 - **Agent mode is explicit.** An operator can enable it for a trusted server-side
   application. Sophy then appends leading client system/developer instructions
   after the key-owned prompt. Do not enable it for clients that forward
@@ -38,9 +42,10 @@ client (OpenAI SDK, baseURL=<sophy>/v1, apiKey=mw_live_...)
 - **Tools are passthrough.** Function tools work on Chat Completions and
   Responses. Sophy returns model tool calls but never executes them; the client
   runs each tool and sends its result in the next request.
-- **One key selects one model.** Bind separate keys to language, image, or
-  embedding models as needed. `GET /v1/models` returns the one model configured
-  for the presented key.
+- **One key selects one primary model.** Bind separate keys to language,
+  transcription, image, or embedding models as needed. A transcription key can
+  optionally select a language model only for post-processing. `GET /v1/models`
+  returns the primary model configured for the presented key.
 - **Configuration is live.** Edits and revocation are read from Postgres on each
   request, so they apply immediately without a config cache.
 
@@ -50,6 +55,7 @@ client (OpenAI SDK, baseURL=<sophy>/v1, apiKey=mw_live_...)
 |---|---|
 | `POST /v1/chat/completions` | Buffered or streaming text, multimodal input, function tools, tool-result turns, and key-configured structured output. Legacy top-level `functions` is not supported; use `tools`. |
 | `POST /v1/responses` | Buffered or streaming text, multimodal input, function tools, tool-result turns, and key-configured structured output. It is stateless: `previous_response_id` is rejected, so send the full input each time. |
+| `POST /v1/audio/transcriptions` | Multipart audio transcription for MP3/MPEG/MPGA, MP4/M4A, WAV, WebM, FLAC, or OGG files up to 4 MiB. Returns raw text when no processing policy is set, or only the policy-processed text when the key has a system prompt plus a language processor model. |
 | `POST /v1/embeddings` | A string or up to 2,048 strings; `float` and `base64` encodings. Token-array inputs are not supported. `dimensions` is supported only for `openai/*` embedding models. |
 | `POST /v1/images/generations` | Uses the key's image model and returns `b64_json` only. Supports 1-10 images and validates `WIDTHxHEIGHT` size strings; provider-specific options still depend on the selected model. Generated images are not stored by Sophy. |
 | `POST /v1/files` | Multipart `file` upload, at most 4 MiB (4,194,304 bytes). Allowed types: PDF, PNG, JPEG, WebP, GIF, plain text, CSV, and JSON. Uploads become eligible for cleanup after 24 hours. |
@@ -63,9 +69,10 @@ validated after completion, but already-streamed bytes cannot be retracted.
 Validation and buffered failures return OpenAI-shaped errors. Common statuses
 are `400` for an invalid or unsupported request, `401` for a
 missing/invalid/revoked key or inactive project, `402` for an exhausted Sophy-key
-monthly budget, `403` for a cross-key file reference, `413` for an oversized upload,
-`429` for a rate limit, `502` for a transient upstream or structured-output failure,
-and `503 project_gateway_unavailable` when the key is valid but its project has no
+monthly budget, `403` for a cross-key file reference, `413` for an oversized file
+or audio upload, `429` for a rate limit, `502` for a transient upstream
+(including transient transcription or processing) or structured-output failure, and
+`503 project_gateway_unavailable` when the key is valid but its project has no
 usable Vercel Gateway credential.
 A `Retry-After` header is included when available for rate limits. An upstream
 failure after SSE streaming begins ends the stream; it cannot be replaced with a
@@ -87,20 +94,23 @@ manage only their owned keys and related usage, logs, and evaluations.
   and connect, validate, rotate, or disconnect the project-owned Vercel Gateway
   credential. AI work and Sophy-key creation stay paused until it is healthy.
 - **Sophy API Keys** — create, edit, rotate, revoke, search, and bulk-change keys.
-  Configure model, prompt, generation parameters, agent mode, JSON schema,
-  knowledgebase, monthly USD budget, RPM limit, ownership, and optional content
-  logging. Secrets are shown once; rotation preserves configuration and history.
+  Configure primary model, prompt, optional transcript processor model, generation
+  parameters, agent mode, JSON schema, knowledgebase, monthly USD budget, RPM
+  limit, ownership, and optional content logging. Secrets are shown once; rotation
+  preserves configuration and history.
 - **Models** — search and sort the gateway catalog by provider, type, context
-  window, price, and capabilities such as image input, file input, tool use, and
-  reasoning. The key picker can filter by the same capabilities.
+  window, price, and capabilities such as transcription, image input, file input,
+  tool use, and reasoning. The key picker can filter by the same capabilities.
 - **Usage** — 7/30/90-day request, token, and estimated-cost analytics with
   key/model filters, absolute/share charts, and breakdowns by key, model, and
   source. Gateway cost is a real-time estimate, not a billing-grade invoice.
-- **Logs** — recent proxy and evaluation calls with model, tokens, cost, kind,
-  streaming status, and errors. Per-key content logging captures buffered Chat,
-  buffered/streaming Responses, and embedding inputs for 30 days; streaming Chat
-  and image generation record usage metadata only. Usage metadata remains after
-  content expires.
+- **Logs** — recent client requests plus transcript-processor, evaluation, and
+  knowledgebase component calls, with model, tokens, cost, kind, streaming
+  status, and errors. Per-key content logging captures buffered Chat,
+  buffered/streaming Responses, embedding inputs, and transcription text for 30
+  days; transcription audio bytes are never stored. Streaming Chat and image
+  generation record usage metadata only. Usage metadata remains after content
+  expires.
 - **Evals** — run champion-vs-challenger evaluations on live text traffic. A
   blind judge reports win rate, confidence interval, cost, latency, projected
   monthly impact, and a recommendation. Results update in the console and can be
@@ -117,8 +127,9 @@ manage only their owned keys and related usage, logs, and evaluations.
 
 ## Stack
 
-Next.js 16 (App Router), AI SDK v6, Vercel AI Gateway, Supabase Postgres
-(Drizzle), Vercel Blob, shadcn/ui, and iron-session.
+Node.js 22 or newer, Next.js 16 (App Router), AI SDK v6 with an isolated v7
+transcription adapter, Vercel AI Gateway, Supabase Postgres (Drizzle), Vercel
+Blob, shadcn/ui, and iron-session.
 
 ## Provision on Vercel
 
@@ -187,7 +198,8 @@ const response = await client.chat.completions.create({
 ```
 
 See [AI API Migration.md](AI%20API%20Migration.md) for tools, agent mode,
-multimodal input, files, embeddings, image generation, limits, and error handling.
+multimodal input, files, audio transcription, embeddings, image generation,
+limits, and error handling.
 
 ## Verify end to end
 
@@ -196,14 +208,18 @@ multimodal input, files, embeddings, image generation, limits, and error handlin
 3. Test buffered and streaming Chat/Responses calls.
 4. Pass function tools, execute the returned calls client-side, and send results.
 5. If a schema is configured, verify a non-streaming reply is valid JSON.
-6. Exercise embeddings or image generation with a matching key.
-7. Exceed RPM and monthly USD budget limits; expect `429` and `402`.
-8. Rotate or revoke a key; the old secret must fail immediately.
-9. Upload a file and confirm another key cannot reuse its public-but-unguessable
+6. Exercise audio transcription, embeddings, or image generation with a matching
+   key.
+7. For a transcription key, verify a blank system prompt returns the raw
+   transcript unchanged, then configure a system prompt and language processor
+   model and verify the client receives only the processed `text`.
+8. Exceed RPM and monthly USD budget limits; expect `429` and `402`.
+9. Rotate or revoke a key; the old secret must fail immediately.
+10. Upload a file and confirm another key cannot reuse its public-but-unguessable
    Sophy URL through the API.
-10. Confirm admin cookies cannot authenticate `/v1/*` and API keys cannot access
+11. Confirm admin cookies cannot authenticate `/v1/*` and API keys cannot access
     admin actions.
-11. Test two projects with distinct Vercel Gateway keys and verify live requests,
+12. Test two projects with distinct Vercel Gateway keys and verify live requests,
     structured retries, KB embeddings, and eval work record only the correct
     project and immutable Gateway-credential ID.
 

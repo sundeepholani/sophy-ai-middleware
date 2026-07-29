@@ -2,12 +2,15 @@
 
 Sophy is a project-scoped AI gateway. Applications authenticate with a
 Sophy-issued `mw_live_...` key instead of a provider key. Each project connects
-its own Vercel AI Gateway credential, and each Sophy key is bound
-to one model and carries the operator-owned prompt, generation parameters,
-optional JSON schema, knowledgebase, rate limit, and monthly USD budget.
+its own Vercel AI Gateway credential, and each Sophy key is bound to one primary
+model and carries the operator-owned prompt, generation parameters, optional
+JSON schema, knowledgebase, rate limit, and monthly USD budget. A transcription
+key can also name a language model that applies the operator-owned prompt after
+speech-to-text.
 
 Sophy provides an OpenAI-compatible subset for Chat Completions, Responses,
-embeddings, image generation, model discovery, and temporary file uploads.
+audio transcription, embeddings, image generation, model discovery, and
+temporary file uploads.
 
 ## TL;DR
 
@@ -15,13 +18,14 @@ embeddings, image generation, model discovery, and temporary file uploads.
 |---|---|
 | OpenAI SDK: Chat Completions | Change `base_url` and `api_key`; keep using `chat.completions.create`. |
 | OpenAI SDK: Responses | Change `base_url` and `api_key`; keep using `responses.create`, but send full history because Sophy is stateless. |
+| OpenAI SDK: audio transcription | Change `base_url` and `api_key`; keep using `audio.transcriptions.create` with a Sophy key bound to a transcription model. |
 | OpenAI SDK: embeddings or images | Change `base_url` and `api_key`; use a Sophy key bound to the matching model type. |
 | Anthropic/Claude SDK | Switch to the OpenAI SDK pointed at Sophy. The key can still select a Claude model. |
 
 - **Base URL:** `https://sophy.in/v1`
 - **API key:** a Sophy key issued inside your project in the console
-- **Model:** the key's configured model always wins; send a placeholder such as
-  `"sophy"` when the SDK requires a `model` argument
+- **Model:** the key's configured primary model always wins; send a placeholder
+  such as `"sophy"` when the SDK requires a `model` argument
 - **Prompt and parameters:** key-owned by default; client values are ignored
 - **Tools:** passed to the model and returned to your application; Sophy never
   executes them
@@ -31,13 +35,14 @@ embeddings, image generation, model discovery, and temporary file uploads.
 Ask the operator for a key suited to your endpoint:
 
 - a language model for `/chat/completions` or `/responses`,
+- a transcription model for `/audio/transcriptions`,
 - an embedding model for `/embeddings`, or
 - an image model for `/images/generations`.
 
 The operator can also configure a system prompt, temperature, top-p, maximum
 output tokens, structured-output schema, knowledgebase, RPM limit, monthly USD
-budget, content logging, and optional agent mode. Store the key in a secret such
-as `SOPHY_API_KEY`.
+budget, content logging, optional agent mode, and an optional transcript
+processor model. Store the key in a secret such as `SOPHY_API_KEY`.
 
 ## 2. Point the OpenAI SDK at Sophy
 
@@ -252,7 +257,79 @@ base64 data only; `response_format="url"` is not supported. `quality`, `style`,
 support depends on the configured provider/model. Sophy does not store generated
 images.
 
-## 8. Structured output
+## 8. Audio transcription
+
+Use a key bound to a transcription model and send the audio as multipart form
+data:
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["SOPHY_API_KEY"],
+    base_url="https://sophy.in/v1",
+)
+
+with open("meeting.m4a", "rb") as audio:
+    response = client.audio.transcriptions.create(
+        model="sophy",  # ignored; the Sophy key selects the transcription model
+        file=audio,
+        language="en",
+        response_format="json",
+    )
+
+print(response.text)
+```
+
+The required `file` may be MP3/MPEG/MPGA, MP4/M4A, WAV, WebM, FLAC, or OGG
+and must not exceed 4 MiB (4,194,304 bytes). Sophy detects the format from the
+audio bytes rather than trusting the filename or MIME type. `language` is an
+optional two-letter ISO-639-1 hint such as `"en"`. `response_format` is optional
+but only `"json"` is supported in this version. Client `prompt`, `temperature`,
+`logprobs`, `stream`, timestamp, diarization, chunking, and known-speaker
+options are rejected rather than silently ignored.
+
+When a processing policy is configured, the response contains only the
+policy-processed text:
+
+```json
+{
+  "text": "Decisions: launch on Friday and send the checklist today.",
+  "processed": true,
+  "language": "en",
+  "duration": 8.4
+}
+```
+
+With a blank key system prompt, `text` and `transcript` are identical and
+`processed` is `false`. With a non-blank system prompt, the operator must also
+configure `params.transcriptProcessorModel` with a language model. Sophy first
+creates the raw transcript, then uses that prompt and processor model to produce
+`text`; the raw `transcript` field is omitted so clients cannot bypass a
+centrally managed transformation such as redaction. This second step can
+summarize, format, translate, or otherwise transform the transcript. It is not
+controlled by a client `prompt`.
+
+One clip consumes one RPM slot and counts as one client request. Sophy attributes
+the transcription and optional processor to their actual models, while the
+processor component does not add a second client request. When content logging
+is enabled, the filename, size, language hint, raw transcript, and final text can
+be retained for 30 days; the audio bytes are never stored. Disable content
+logging on the key when an unprocessed transcript must not be retained.
+
+The equivalent curl request is:
+
+```bash
+curl https://sophy.in/v1/audio/transcriptions \
+  -H "Authorization: Bearer $SOPHY_API_KEY" \
+  -F "file=@meeting.m4a" \
+  -F "model=sophy" \
+  -F "language=en" \
+  -F "response_format=json"
+```
+
+## 9. Structured output
 
 Structured output is configured on the key, not per request. Client
 `response_format` or Responses `text.format` does not replace the stored schema.
@@ -264,7 +341,7 @@ JSON. For a streaming call, validation is recorded after completion; bytes that
 were already sent cannot be recalled, so validate streamed JSON in your client
 before using it.
 
-## 9. Moving from the Anthropic SDK
+## 10. Moving from the Anthropic SDK
 
 The Anthropic SDK cannot call Sophy's OpenAI-compatible endpoints directly.
 Switch to the OpenAI SDK and point it at Sophy; the operator can bind the key to
@@ -280,7 +357,7 @@ a Claude model.
 | `msg.content[0].text` | `response.choices[0].message.content` |
 | Anthropic tool use | Convert definitions/results to OpenAI function-tool shapes; tools are supported but execute in your application. |
 
-## 10. Errors and limits
+## 11. Errors and limits
 
 Validation and buffered failures use the OpenAI body shape:
 
@@ -297,11 +374,11 @@ Validation and buffered failures use the OpenAI body shape:
 
 | Status | Typical meaning |
 |---|---|
-| `400` | Invalid JSON/input, unsupported field or feature, a known non-embedding/image model on those modality endpoints, malformed media URL, or upstream input rejection. |
+| `400` | Invalid input, unsupported field or feature, a model that does not match the endpoint, invalid audio/multipart data, missing transcription processor configuration, malformed media URL, or upstream input rejection. |
 | `401` | Missing, invalid, expired, or revoked Sophy key, or a key whose project is inactive. |
 | `402` | The Sophy key's monthly USD budget is exhausted. |
 | `403` | A Sophy-hosted file belongs to another key. |
-| `413` | `/v1/files` upload exceeds 4 MiB (4,194,304 bytes). |
+| `413` | A `/v1/files` or `/v1/audio/transcriptions` upload exceeds 4 MiB (4,194,304 bytes). |
 | `429` | Sophy RPM limit or upstream provider rate/quota limit; honor `Retry-After` when present. |
 | `502` | A transient upstream service failure or buffered structured-output failure. |
 | `503` | The Sophy key is valid, but its project has no usable Vercel AI Gateway credential (`project_gateway_unavailable`). |
@@ -312,7 +389,15 @@ the remaining budget can still add its final cost. If an upstream failure occurs
 after SSE streaming begins, the stream ends instead of changing into a JSON
 error response; clients should treat an incomplete stream as failed.
 
-## 11. Smoke test
+For transcription-specific setup failures, check the error `code`:
+`model_not_transcription` means the key's primary model cannot transcribe;
+`transcript_processor_required` means the key has processing instructions but no
+processor; and `processor_model_not_language` means that processor is not a
+language model. Invalid multipart/audio requests use codes such as
+`missing_file`, `empty_file`, `unsupported_audio_format`, or
+`unsupported_transcription_option`.
+
+## 12. Smoke test
 
 ```bash
 curl https://sophy.in/v1/chat/completions \
@@ -340,6 +425,6 @@ shape; your application validates, authorizes, executes, and returns results.
 **Can I use `previous_response_id`?** No. Sophy's Responses endpoint is stateless;
 send the complete input and tool history every time.
 
-**Do Chat, Responses, embeddings, and images use different base URLs?** No. They
-share `https://sophy.in/v1`; choose the SDK method and a key whose configured
-model matches that endpoint.
+**Do Chat, Responses, audio transcription, embeddings, and images use different
+base URLs?** No. They share `https://sophy.in/v1`; choose the SDK method and a key
+whose configured primary model matches that endpoint.

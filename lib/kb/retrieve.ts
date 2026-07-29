@@ -97,7 +97,7 @@ export async function retrieveContext(
     // Book the paid query embedding (source='kb_query') OFF the hot path —
     // retrieval sits in front of the user-visible response, so the insert runs
     // under waitUntil. Attributed to the serving key but excluded from its
-    // quota (quota counts source='proxy' only).
+    // quota (quota counts client traffic sources, never kb_query).
     waitUntil(
       recordUsage({
         projectId: opts.gateway.projectId,

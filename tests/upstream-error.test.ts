@@ -6,6 +6,12 @@ import {
 } from '@ai-sdk/gateway';
 import { APICallError, generateText, RetryError } from 'ai';
 import {
+  createGateway as createTranscriptionGateway,
+  GatewayError as TranscriptionGatewayError,
+  GatewayInvalidRequestError as TranscriptionGatewayInvalidRequestError,
+} from 'ai-gateway-v4';
+import { transcribe } from 'ai-v7';
+import {
   mapUpstreamError,
   safeGatewayErrorMessage,
   upstreamErrorResponse,
@@ -208,5 +214,89 @@ describe('explicit Gateway provider errors', () => {
     expect(body.error.code).toBe('upstream_error');
     expect(body.error.message).toBe(FALLBACK);
     expect(body.error.message).not.toContain('Internal provider detail.');
+  });
+});
+
+describe('Gateway v4 transcription errors', () => {
+  const wav = Uint8Array.from([
+    0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+  ]);
+
+  it('preserves a real transcription-provider 400 and removes its generation id', async () => {
+    const gateway = createTranscriptionGateway({
+      apiKey: 'test-gateway-key',
+      baseURL: 'https://gateway.example/v1/ai',
+      fetch: async () =>
+        Response.json(
+          {
+            error: {
+              type: 'invalid_request_error',
+              message: 'Unsupported audio container.',
+            },
+            generationId: 'gen_transcription_400',
+          },
+          { status: 400 },
+        ),
+    });
+    const error = await transcribe({
+      model: gateway.transcriptionModel('openai/gpt-4o-mini-transcribe'),
+      audio: wav,
+      maxRetries: 0,
+    }).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+
+    expect(TranscriptionGatewayInvalidRequestError.isInstance(error)).toBe(true);
+    expect(safeGatewayErrorMessage(error)).toBe('upstream_http_400');
+    const response = upstreamErrorResponse(error, 'The transcription request failed.');
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      error: {
+        code: 'upstream_invalid_request',
+        message: 'Unsupported audio container.',
+      },
+    });
+    expect(body.error.message).not.toContain('gen_transcription_400');
+  });
+
+  it('preserves Retry-After on a real transcription-provider 429 without leaking detail', async () => {
+    const gateway = createTranscriptionGateway({
+      apiKey: 'test-gateway-key',
+      baseURL: 'https://gateway.example/v1/ai',
+      fetch: async () =>
+        Response.json(
+          {
+            error: {
+              type: 'rate_limit_error',
+              message: 'Quota for api_key_id_secret is exhausted at $91.50.',
+            },
+            generationId: 'gen_transcription_429',
+          },
+          { status: 429, headers: { 'retry-after': '9' } },
+        ),
+    });
+    const error = await transcribe({
+      model: gateway.transcriptionModel('openai/gpt-4o-mini-transcribe'),
+      audio: wav,
+      maxRetries: 0,
+    }).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+
+    // Gateway currently uses an internal-server subclass for this response
+    // shape, but retains the real 429. Mapping must follow the status, not the
+    // subclass name.
+    expect(TranscriptionGatewayError.isInstance(error)).toBe(true);
+    expect((error as { statusCode?: number }).statusCode).toBe(429);
+    expect(safeGatewayErrorMessage(error)).toBe('upstream_http_429');
+    const response = upstreamErrorResponse(error, 'The transcription request failed.');
+    expect(response.status).toBe(429);
+    expect(response.headers.get('retry-after')).toBe('9');
+    const body = await response.json();
+    expect(body.error.message).not.toContain('api_key_id_secret');
+    expect(body.error.message).not.toContain('$91.50');
   });
 });

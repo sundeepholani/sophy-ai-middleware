@@ -5,7 +5,7 @@ import { CodeTabs, CodeBlock } from '@/components/marketing/code-tabs';
 export const metadata: Metadata = {
   title: 'Docs — Sophy',
   description:
-    'Sophy documentation for its multi-project console, project-owned Vercel Gateway credentials, Chat Completions, Responses, embeddings, images, tools, files, key policy, knowledgebases, evaluations, errors, and limits.',
+    'Sophy documentation for its multi-project console, project-owned Vercel Gateway credentials, Chat Completions, Responses, audio transcription, embeddings, images, tools, files, key policy, knowledgebases, evaluations, errors, and limits.',
 };
 
 const BASE_URL = 'https://sophy.in/v1';
@@ -33,6 +33,7 @@ const NAV_GROUPS = [
   {
     label: 'Other APIs',
     items: [
+      { id: 'audio-transcriptions', label: 'Audio transcription' },
       { id: 'embeddings', label: 'Embeddings' },
       { id: 'images', label: 'Image generation' },
       { id: 'files', label: 'Files' },
@@ -186,6 +187,72 @@ const ERROR_ROWS: { status: string; type: string; code: string; when: string }[]
   {
     status: '400',
     type: 'invalid_request_error',
+    code: 'invalid_content_type',
+    when: 'Audio transcription was not sent as multipart/form-data.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'invalid_multipart_form',
+    when: 'The audio transcription multipart body could not be parsed.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'missing_file',
+    when: 'The transcription multipart body did not contain a `file` field.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'invalid_file',
+    when: 'The transcription `file` field was not a valid uploaded file.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'empty_file',
+    when: 'The uploaded audio file contained no bytes.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'unsupported_audio_format',
+    when: 'The uploaded bytes were not recognized as an allowed audio format.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'invalid_language',
+    when: 'The optional transcription `language` value was invalid.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'unsupported_transcription_option',
+    when: 'A client `prompt`, streaming, or timestamp option was sent.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'model_not_transcription',
+    when: 'The key’s known model cannot handle buffered audio transcription, including realtime-only models.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'transcript_processor_required',
+    when: 'The key has transcript-processing instructions but no processor model.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'processor_model_not_language',
+    when: 'The configured transcript processor is a known non-language model.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
     code: 'invalid_url',
     when: 'A Chat or Responses image/file part contains a malformed URL.',
   },
@@ -199,7 +266,7 @@ const ERROR_ROWS: { status: string; type: string; code: string; when: string }[]
     status: '400',
     type: 'invalid_request_error',
     code: 'unsupported_response_format',
-    when: 'Image `response_format` was set to anything other than `b64_json`.',
+    when: 'Image output requested anything but `b64_json`, or transcription requested anything but `json`.',
   },
   {
     status: '400',
@@ -265,7 +332,7 @@ const ERROR_ROWS: { status: string; type: string; code: string; when: string }[]
     status: '413',
     type: 'invalid_request_error',
     code: 'file_too_large',
-    when: 'A file upload exceeds 4 MiB (4,194,304 bytes).',
+    when: 'A file or audio upload exceeds 4 MiB (4,194,304 bytes).',
   },
   {
     status: '429',
@@ -401,7 +468,7 @@ export default function DocsPage() {
           <h1 className="font-heading text-4xl font-semibold tracking-tight">Build on a governed AI gateway</h1>
           <P>
             Use supported OpenAI client methods at <Code>{BASE_URL}</Code>. Each Sophy key is bound
-            to one model and carries its policy, limits, and optional knowledge server-side.
+            to one primary model and carries its policy, limits, and optional knowledge server-side.
           </P>
         </header>
 
@@ -416,8 +483,9 @@ export default function DocsPage() {
             <P>
               Compatibility is intentionally scoped. Chat Completions and Responses cover text,
               streaming, multimodal input, and function-tool loops. Dedicated routes cover
-              embeddings, image generation, short-lived file uploads, and the model bound to a key.
-              The sections below call out differences from the full OpenAI platform.
+              audio transcription, embeddings, image generation, short-lived file uploads, and the
+              primary model bound to a key. The sections below call out differences from the full
+              OpenAI platform.
             </P>
             <Method method="BASE URL" path={BASE_URL} />
           </Section>
@@ -446,10 +514,11 @@ export default function DocsPage() {
                   {[
                     ['POST', '/chat/completions', 'Language generation', 'Text, streaming, multimodal input, function tools'],
                     ['POST', '/responses', 'Language generation', 'Stateless; full input required on every call'],
+                    ['POST', '/audio/transcriptions', 'Transcription', 'Multipart audio; JSON with raw or policy-processed text'],
                     ['POST', '/embeddings', 'Embedding', 'String input; float or base64 vectors'],
                     ['POST', '/images/generations', 'Image generation', 'Base64 image output only'],
                     ['POST', '/files', 'Any', '201 response; 4 MiB; cleanup-eligible after 24 hours'],
-                    ['GET', '/models', 'Any', 'Returns only the model bound to this key'],
+                    ['GET', '/models', 'Any', 'Returns only the primary model bound to this key'],
                   ].map(([method, path, model, note]) => (
                     <tr key={path} className="border-t align-top">
                       <td className="px-4 py-2.5 font-mono text-[13px] text-primary">{method}</td>
@@ -463,10 +532,12 @@ export default function DocsPage() {
                 </tbody>
               </table>
             </div>
-            <Note title="One key, one model">
+            <Note title="One key, one primary model">
               <p>
-                Bind keys around workloads and call a route the bound model’s capabilities support.
-                The client-sent <Code>model</Code> never switches the key’s bound model.
+                Bind keys around workloads and call a route the primary model’s capabilities
+                support. The client-sent <Code>model</Code> never switches that model. A
+                transcription key may separately name a language model for key-owned transcript
+                processing.
               </p>
             </Note>
           </Section>
@@ -896,6 +967,118 @@ second = client.responses.create(model="sophy", tools=tools, input=[
             </Note>
           </Section>
 
+          <Section id="audio-transcriptions" title="Audio transcription">
+            <Method method="POST" path={`${BASE_URL}/audio/transcriptions`} />
+            <P>
+              Bind the key’s primary model to a transcription model and send audio as{' '}
+              <Code>multipart/form-data</Code>. Sophy returns raw text when no processing policy is
+              set, or applies centrally managed instructions in a second language-model step and
+              returns only that processed text.
+            </P>
+            <FieldTable
+              caption="Audio transcription request fields"
+              rows={[
+                {
+                  name: 'file',
+                  type: 'File',
+                  note: 'Required, non-empty, and at most 4 MiB (4,194,304 bytes).',
+                },
+                {
+                  name: 'model',
+                  type: 'string',
+                  note: 'Optional for wire compatibility and ignored. The key’s primary transcription model wins.',
+                },
+                {
+                  name: 'language',
+                  type: 'string',
+                  note: 'Optional two-letter ISO-639-1 language hint, such as en.',
+                },
+                {
+                  name: 'response_format',
+                  type: 'json',
+                  note: 'Optional; defaults to json. Other OpenAI transcription formats are not supported in this version.',
+                },
+                {
+                  name: 'advanced transcription options',
+                  type: 'unsupported',
+                  note: 'Client prompt, temperature, logprobs, stream, timestamps, diarization, include, chunking, and known-speaker fields are rejected with 400 unsupported_transcription_option.',
+                },
+              ]}
+            />
+            <P>
+              Accepted audio formats are MP3/MPEG/MPGA, MP4/M4A, WAV, WebM, FLAC, and
+              OGG. Sophy identifies the format from the file bytes instead of trusting its name
+              or client-declared MIME type. Files outside that allowlist return{' '}
+              <Code>400 unsupported_audio_format</Code>; files over the limit return{' '}
+              <Code>413 file_too_large</Code>.
+            </P>
+            <CodeTabs
+              samples={[
+                {
+                  label: 'python',
+                  code: `from openai import OpenAI
+
+client = OpenAI(base_url="${BASE_URL}", api_key="mw_live_…")
+
+with open("meeting.m4a", "rb") as audio:
+    resp = client.audio.transcriptions.create(
+        model="sophy",
+        file=audio,
+        language="en",
+        response_format="json",
+    )
+
+print(resp.text)`,
+                },
+                {
+                  label: 'curl',
+                  code: `curl ${BASE_URL}/audio/transcriptions \\
+  -H "Authorization: Bearer mw_live_…" \\
+  -F "file=@meeting.m4a" \\
+  -F "model=sophy" \\
+  -F "language=en" \\
+  -F "response_format=json"`,
+                },
+              ]}
+            />
+            <CodeBlock
+              label="json"
+              code={`{
+  "text": "Decisions: launch on Friday and send the checklist today.",
+  "processed": true,
+  "language": "en",
+  "duration": 8.4
+}`}
+            />
+            <Note title="Processing policy controls what the client receives">
+              <p>
+                With a blank key system prompt, <Code>text</Code> and <Code>transcript</Code> are
+                identical and <Code>processed</Code> is <Code>false</Code>. With a non-blank system
+                prompt, the operator must also set <Code>params.transcriptProcessorModel</Code> to
+                a language model. Sophy transcribes first, then applies the key-owned instructions
+                to produce <Code>text</Code>. The raw <Code>transcript</Code> field is omitted so a
+                client cannot bypass centrally managed processing such as redaction.{' '}
+                <Code>language</Code> and <Code>duration</Code> appear only when the transcription
+                provider returns them.
+              </p>
+            </Note>
+            <Note title="Compatibility boundary">
+              <p>
+                This route returns JSON only. Client prompts, temperature, logprobs, streaming,
+                timestamp granularities, diarization, chunking, known-speaker hints, subtitle text,
+                and verbose transcription formats are not supported in this version.
+              </p>
+            </Note>
+            <P>
+              One uploaded clip consumes one RPM slot and counts as one client request. Sophy
+              attributes transcription and processing to their actual models, while the processor
+              component does not add a second client request. If content logging is enabled on the
+              key, Sophy stores the filename, byte count, language hint, raw transcript, and final
+              text—but never the audio bytes. Turn content logging off when unprocessed text must
+              not be retained.
+            </P>
+          </Section>
+
           <Section id="embeddings" title="Embeddings">
             <Method method="POST" path={`${BASE_URL}/embeddings`} />
             <P>
@@ -1102,9 +1285,9 @@ with open("out.png", "wb") as f:
           <Section id="models" title="Models">
             <Method method="GET" path={`${BASE_URL}/models`} />
             <P>
-              Returns exactly the model currently bound to the authenticated key in OpenAI list
-              shape. This route does not return the full console catalog and does not select a model
-              for a later request.
+              Returns exactly the primary model currently bound to the authenticated key in OpenAI
+              list shape. This route does not return the full console catalog or an optional
+              transcript processor, and it does not select a model for a later request.
             </P>
             <CodeBlock
               label="json"
@@ -1133,17 +1316,22 @@ with open("out.png", "wb") as f:
                 {
                   name: 'model',
                   type: 'model id',
-                  note: 'One model id. Use API routes supported by its catalog capabilities.',
+                  note: 'One primary model id. Use API routes supported by its catalog capabilities.',
                 },
                 {
                   name: 'system prompt',
                   type: 'string',
-                  note: 'Authoritative prompt for language calls. Client prompts are dropped by default.',
+                  note: 'Authoritative prompt for language calls and optional transcript processing. Client prompts are dropped or rejected.',
+                },
+                {
+                  name: 'transcript processor model',
+                  type: 'language model id',
+                  note: 'Optional params.transcriptProcessorModel. Required when a transcription key has a non-blank system prompt.',
                 },
                 {
                   name: 'generation params',
                   type: 'object',
-                  note: 'Temperature, top-p, and max output tokens for language calls.',
+                  note: 'Temperature, top-p, and max output tokens for language calls, including transcript processing.',
                 },
                 {
                   name: 'output schema',
@@ -1163,7 +1351,7 @@ with open("out.png", "wb") as f:
                 {
                   name: 'content logging',
                   type: 'boolean',
-                  note: 'Captures buffered Chat, buffered/streaming Responses, and embedding inputs. Streaming Chat and image prompts record usage metadata only.',
+                  note: 'Captures buffered Chat, buffered/streaming Responses, embedding inputs, and text from audio transcription. Audio bytes are never stored. Streaming Chat and image prompts record usage metadata only.',
                 },
                 {
                   name: 'owner / status',
@@ -1173,14 +1361,17 @@ with open("out.png", "wb") as f:
               ]}
             />
             <P>
-              Client values for model and generation parameters are silently ignored. Client prompt
-              behavior is controlled separately by Agent mode.
+              Client values for model and generation parameters are silently ignored. Chat and
+              Responses prompt behavior is controlled separately by Agent mode. Audio transcription
+              rejects a client <Code>prompt</Code>; only the key-owned system prompt can request
+              post-processing.
             </P>
             <P>
-              When a language request has an effective system prompt, Sophy prepends a fixed
-              platform security preamble before the key and any Agent-mode client instructions.
-              Eligible multi-turn Anthropic requests also receive an ephemeral prompt-cache
-              breakpoint; cache reads appear in Responses usage as <Code>cached_tokens</Code>.
+              When a language or transcript-processing call has an effective system prompt, Sophy
+              prepends a fixed platform security preamble before the key and any applicable
+              Agent-mode client instructions. Eligible multi-turn Anthropic requests also receive an
+              ephemeral prompt-cache breakpoint; cache reads appear in Responses usage as{' '}
+              <Code>cached_tokens</Code>.
             </P>
           </Section>
 
@@ -1207,7 +1398,7 @@ with open("out.png", "wb") as f:
               </li>
             </ul>
             <P>
-              Later system-role items in the transcript are still dropped. Model, generation
+              Later system-role items in the conversation are still dropped. Model, generation
               parameters, schema, knowledge, budgets, and rate limits remain key-owned.
             </P>
             <Note title="Trust boundary">
@@ -1361,9 +1552,10 @@ with open("out.png", "wb") as f:
 
           <Section id="rate-limits" title="Rate limits and monthly quota">
             <P>
-              Chat, Responses, embeddings, and image generation enforce the key’s optional
-              requests-per-minute limit and monthly cost cap before the paid model call.{' '}
-              <Code>/files</Code> and <Code>/models</Code> do not consume those request counters.
+              Chat, Responses, audio transcription, embeddings, and image generation enforce the
+              key’s optional requests-per-minute limit and monthly cost cap before the paid model
+              call. <Code>/files</Code> and <Code>/models</Code> do not consume those request
+              counters.
             </P>
             <ul className="list-disc space-y-2 pl-5 text-[15px] leading-relaxed text-muted-foreground">
               <li>
@@ -1371,8 +1563,9 @@ with open("out.png", "wb") as f:
                 <Code>429 rate_limit_exceeded</Code> with <Code>Retry-After</Code> in seconds.
               </li>
               <li>
-                Monthly quota uses the current UTC calendar month and counts only client proxy
-                traffic. Reaching it returns <Code>402 quota_exceeded</Code>.
+                Monthly quota uses the current UTC calendar month and counts client-attributable
+                spend, including transcript processing. Reaching it returns{' '}
+                <Code>402 quota_exceeded</Code>.
               </li>
               <li>
                 Evaluation and knowledgebase spend is recorded under separate sources for
