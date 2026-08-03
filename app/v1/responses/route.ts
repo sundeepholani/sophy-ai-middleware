@@ -26,7 +26,8 @@ import {
   collectResponsesClientSystemText,
   type ResponsesRequest,
 } from '@/lib/http/responses';
-import { assertOwnedBlobs } from '@/lib/files/blob';
+import { assertOwnedBlobs, extractModelImageUrls } from '@/lib/files/blob';
+import { IMAGE_INPUT_RETENTION_DAYS } from '@/lib/usage/record';
 import { openAiError } from '@/lib/http/openai';
 import {
   projectGatewayUnavailableResponse,
@@ -39,6 +40,7 @@ export const maxDuration = 800;
 export const preferredRegion = 'bom1';
 
 export async function POST(req: Request): Promise<Response> {
+  const requestStartedAt = new Date();
   // 1) Authenticate the key (carries the whole config).
   const token = bearerFromHeader(req.headers.get('authorization'));
   if (!token) {
@@ -131,7 +133,15 @@ export async function POST(req: Request): Promise<Response> {
   // Cross-key blob protection: a key may not reference another key's upload.
   const referencedUrls = responsesReferencedUrls(body.input);
   if (referencedUrls.length > 0) {
-    const ok = await assertOwnedBlobs(key.projectId, key.id, referencedUrls);
+    const ok = await assertOwnedBlobs(key.projectId, key.id, referencedUrls, {
+      retainImageUrls: key.logContent ? extractModelImageUrls(messages) : undefined,
+      retainUntil: key.logContent
+        ? new Date(
+            requestStartedAt.getTime() +
+              IMAGE_INPUT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+          )
+        : undefined,
+    });
     if (!ok) {
       return openAiError(403, 'invalid_request_error', 'Referenced file is not accessible to this key.', {
         code: 'file_access_denied',
@@ -174,6 +184,7 @@ export async function POST(req: Request): Promise<Response> {
     schema: structured ? normalizeOutputSchema(key.outputSchema) : key.outputSchema,
     includeUsage: true,
     logContent: key.logContent,
+    requestStartedAt,
     tools: aiTools?.tools,
     toolChoice: aiTools?.toolChoice,
   };

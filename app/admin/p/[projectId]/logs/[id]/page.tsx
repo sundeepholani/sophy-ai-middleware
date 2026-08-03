@@ -43,6 +43,7 @@ export default async function LogDetailPage({
   ]
     .filter(Boolean)
     .join(' · ');
+  const activeImageRetention = content?.imageInputsExpiresAt ?? null;
 
   return (
     <div className="space-y-6">
@@ -111,6 +112,13 @@ export default async function LogDetailPage({
 
       {content && (
         <>
+          {activeImageRetention && (
+            <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm">
+              Complete image inputs are retained privately until{' '}
+              <LocalTime value={activeImageRetention.toISOString()} /> for quality review. This page
+              shows placeholders instead of the image values.
+            </div>
+          )}
           {content.systemPrompt && (
             <Card>
               <CardHeader>

@@ -14,7 +14,7 @@ import type { VercelConfig } from '@vercel/config/v1';
 export const config: VercelConfig = {
   framework: 'nextjs',
   crons: [
-    // Idempotent usage rollups + stale-blob sweep every 15 minutes.
+    // Idempotent usage rollups + retention cleanup every 15 minutes.
     { path: '/api/cron/rollup', schedule: '*/15 * * * *' },
   ],
 };

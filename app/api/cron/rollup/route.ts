@@ -1,7 +1,7 @@
 /**
  * Idempotent maintenance cron (every 15 min). Vercel Cron is best-effort (no
  * retries; may be missed OR duplicated) so everything here is safe to re-run:
- * usage rollups are upserts and the blob sweep is a delete-if-older-than.
+ * usage rollups are upserts and retention cleanup uses explicit expiries.
  *
  * Guarded by CRON_SECRET (Vercel sends it as a Bearer token) + a Redis lock so
  * overlapping invocations don't double-work.
@@ -16,6 +16,7 @@ import {
 } from '@/db/schema';
 import { acquireLock, releaseLock } from '@/lib/counters';
 import { sweepStaleUploads } from '@/lib/files/blob';
+import { discardExpiredImageInputs } from '@/lib/usage/record';
 import { processEvalRuns } from '@/lib/eval/process';
 import { processKbIngestion } from '@/lib/kb/ingest';
 import { env } from '@/lib/env';
@@ -97,7 +98,10 @@ export async function GET(req: Request): Promise<Response> {
 
   try {
     const rolled = await rollupRecentDays();
-    const swept = await sweepStaleUploads(24);
+    // Remove complete image values before sweeping any Sophy-owned source
+    // objects whose matching retention window has ended.
+    const discardedImageInputs = await discardExpiredImageInputs();
+    const swept = await sweepStaleUploads();
     const cutoff = new Date(Date.now() - REQUEST_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000);
     const purged = await getDb().delete(requestLogs).where(lt(requestLogs.createdAt, cutoff));
     const evals = await processEvalRuns({ batch: 25 });
@@ -107,6 +111,7 @@ export async function GET(req: Request): Promise<Response> {
     return Response.json({
       ok: true,
       rolledRows: rolled,
+      discardedImageInputs,
       sweptBlobs: swept,
       purgedRequestLogs: purged.rowCount ?? 0,
       evalsJudged: evals.judged,

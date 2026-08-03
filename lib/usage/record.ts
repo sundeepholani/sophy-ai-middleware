@@ -4,6 +4,7 @@
  * but never propagated into the client response path.
  */
 import type { LanguageModelUsage, ModelMessage } from 'ai';
+import { and, isNotNull, lte, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import {
   usageEvents,
@@ -149,6 +150,8 @@ export async function recordUsageBatch(inputs: RecordUsageInput[]): Promise<void
 // ---- Request content logging (per-key, separate retention) -----------------
 
 const MAX_LOG_CHARS = 100_000;
+export const IMAGE_INPUT_RETENTION_DAYS = 7;
+const IMAGE_INPUT_RETENTION_MS = IMAGE_INPUT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
 function cap(s: string): string {
   return s.length > MAX_LOG_CHARS ? `${s.slice(0, MAX_LOG_CHARS)}…[truncated]` : s;
@@ -164,40 +167,138 @@ export interface RecordRequestLogInput {
   systemPrompt: string | null;
   /** Inbound messages actually sent to the model. */
   messages: ModelMessage[];
+  /** When Sophy accepted the request; the seven-day image window starts here. */
+  requestStartedAt: Date;
   /** Outbound model text. */
   response: string | null;
   streamed?: boolean;
   status: UsageStatus;
 }
 
+export interface PreparedRequestLog {
+  /** Exact normalized messages. Image sources are uncapped for seven days. */
+  request: object;
+  /** Long-lived copy with every image source replaced before size capping. */
+  requestAfterImageExpiry: object | null;
+  imageInputsExpiresAt: Date | null;
+}
+
+function cappedRequest(serialized: string, parsed: unknown): object {
+  return (serialized.length > MAX_LOG_CHARS
+    ? { truncated: true, preview: serialized.slice(0, MAX_LOG_CHARS) }
+    : parsed) as object;
+}
+
+/**
+ * Build the two retention views of a Chat/Responses request.
+ *
+ * Image inputs bypass the normal 100k cap only in the private seven-day copy.
+ * The 30-day copy is redacted first and capped second, so neither a small image
+ * nor the beginning of a large Base64 value can leak past the shorter window.
+ * Pure and exported so the privacy boundary is directly unit-testable.
+ */
+export function prepareRequestLog(
+  messages: ModelMessage[],
+  requestStartedAt: Date,
+): PreparedRequestLog {
+  const serialized = JSON.stringify(messages ?? []);
+  const exactRequest = JSON.parse(serialized) as unknown;
+  const redactedRequest = JSON.parse(serialized) as unknown;
+  const expiresAt = new Date(requestStartedAt.getTime() + IMAGE_INPUT_RETENTION_MS);
+  let hasImage = false;
+
+  if (Array.isArray(redactedRequest)) {
+    for (const message of redactedRequest) {
+      if (!message || typeof message !== 'object') continue;
+      const content = (message as { content?: unknown }).content;
+      if (!Array.isArray(content)) continue;
+      for (const part of content) {
+        if (!part || typeof part !== 'object') continue;
+        const imagePart = part as { type?: unknown; image?: unknown };
+        if (imagePart.type !== 'image') continue;
+        hasImage = true;
+        imagePart.image = {
+          contentOmittedFromLongTermLog: true,
+          sourceType:
+            typeof imagePart.image === 'string' && imagePart.image.startsWith('data:')
+              ? 'inline_data'
+              : 'url',
+          retainedUntil: expiresAt.toISOString(),
+        };
+      }
+    }
+  }
+
+  if (!hasImage) {
+    return {
+      request: cappedRequest(serialized, exactRequest),
+      requestAfterImageExpiry: null,
+      imageInputsExpiresAt: null,
+    };
+  }
+
+  const redactedSerialized = JSON.stringify(redactedRequest);
+  return {
+    request: exactRequest as object,
+    requestAfterImageExpiry: cappedRequest(redactedSerialized, redactedRequest),
+    imageInputsExpiresAt: expiresAt,
+  };
+}
+
 /**
  * Persist inbound/outbound content for a request (gated by the key's logContent
- * upstream). Size-capped and fully resilient — never throws into the response path.
+ * upstream). Text is size-capped. Exact image input values are retained for no
+ * more than seven days, with a precomputed redacted copy ready to replace them.
+ * Fully resilient — never throws into the response path.
  */
 export async function recordRequestLog(input: RecordRequestLogInput): Promise<void> {
   try {
-    const serialized = JSON.stringify(input.messages ?? []);
-    const request =
-      serialized.length > MAX_LOG_CHARS
-        ? { truncated: true, preview: serialized.slice(0, MAX_LOG_CHARS) }
-        : input.messages;
-    await getDb()
-      .insert(requestLogs)
-      .values({
-        id: input.id,
-        projectId: input.projectId,
-        apiKeyId: input.keyId,
-        surface: input.surface,
-        systemPrompt: input.systemPrompt ? cap(input.systemPrompt) : null,
-        request: request as object,
-        response: input.response != null ? cap(input.response) : null,
-        streamed: input.streamed ?? false,
-        status: input.status,
-      })
-      .onConflictDoNothing();
-  } catch (err) {
-    console.error('[request-log] failed to insert request_log', err);
+    const prepared = prepareRequestLog(input.messages, input.requestStartedAt);
+    const values: typeof requestLogs.$inferInsert = {
+      id: input.id,
+      projectId: input.projectId,
+      apiKeyId: input.keyId,
+      surface: input.surface,
+      systemPrompt: input.systemPrompt ? cap(input.systemPrompt) : null,
+      request: prepared.request,
+      requestAfterImageExpiry: prepared.requestAfterImageExpiry,
+      imageInputsExpiresAt: prepared.imageInputsExpiresAt,
+      response: input.response != null ? cap(input.response) : null,
+      streamed: input.streamed ?? false,
+      status: input.status,
+      // Anchor both the row and its image expiry to request acceptance rather
+      // than model completion, which may be minutes later.
+      createdAt: input.requestStartedAt,
+    };
+    await getDb().insert(requestLogs).values(values).onConflictDoNothing();
+  } catch {
+    // Drizzle errors can contain bound parameters. Those parameters may now
+    // include uncapped image data or signed URLs, so never pass the error object
+    // to application logging.
+    console.error('[request-log] failed to insert request_log');
   }
+}
+
+/**
+ * Atomically replace expired image-bearing requests with their precomputed
+ * redacted copy. Safe to repeat; rows leave the eligible set after one update.
+ */
+export async function discardExpiredImageInputs(now = new Date()): Promise<number> {
+  const result = await getDb()
+    .update(requestLogs)
+    .set({
+      request: sql`${requestLogs.requestAfterImageExpiry}`,
+      requestAfterImageExpiry: null,
+      imageInputsExpiresAt: null,
+    })
+    .where(
+      and(
+        isNotNull(requestLogs.requestAfterImageExpiry),
+        isNotNull(requestLogs.imageInputsExpiresAt),
+        lte(requestLogs.imageInputsExpiresAt, now),
+      ),
+    );
+  return result.rowCount ?? 0;
 }
 
 export interface RecordEmbeddingLogInput {

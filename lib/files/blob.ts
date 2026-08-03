@@ -8,7 +8,8 @@
  * so the provider can fetch them — access control is enforced by us, not the URL.
  */
 import { put, del } from '@vercel/blob';
-import { and, eq, inArray, lt } from 'drizzle-orm';
+import { and, eq, inArray, lte } from 'drizzle-orm';
+import type { ModelMessage } from 'ai';
 import { getDb } from '@/db/client';
 import { blobUploads, kbDocuments } from '@/db/schema';
 import { env } from '@/lib/env';
@@ -209,32 +210,86 @@ export async function assertOwnedBlobs(
   projectId: string,
   keyId: string,
   urls: string[],
+  options?: {
+    /** Normalized image URLs that are actually sent to the model. */
+    retainImageUrls?: string[];
+    /** Shared seven-day deadline for the request log and managed source object. */
+    retainUntil?: Date;
+  },
 ): Promise<boolean> {
   const managed = [...new Set(urls.filter((url) => managedBlobNamespace(url) != null))];
   if (managed.length === 0) return true;
-  const rows = await getDb()
-    .select({
-      url: blobUploads.url,
-      projectId: blobUploads.projectId,
-      apiKeyId: blobUploads.apiKeyId,
-    })
-    .from(blobUploads)
-    .where(
-      and(
-        eq(blobUploads.projectId, projectId),
-        eq(blobUploads.apiKeyId, keyId),
-        inArray(blobUploads.url, managed),
-      ),
+  const retainedManaged = [
+    ...new Set(
+      (options?.retainImageUrls ?? []).filter((url) => managed.includes(url)),
+    ),
+  ];
+
+  const inspect = async (
+    db: Pick<ReturnType<typeof getDb>, 'select' | 'update'>,
+    lockRows: boolean,
+  ): Promise<boolean> => {
+    const query = db
+      .select({
+        url: blobUploads.url,
+        projectId: blobUploads.projectId,
+        apiKeyId: blobUploads.apiKeyId,
+      })
+      .from(blobUploads)
+      .where(
+        and(
+          eq(blobUploads.projectId, projectId),
+          eq(blobUploads.apiKeyId, keyId),
+          inArray(blobUploads.url, managed),
+        ),
+      );
+    const rows = await (lockRows ? query.for('update') : query);
+    const owned = new Set(
+      rows
+        .filter((row) => row.projectId === projectId && row.apiKeyId === keyId)
+        .map((row) => row.url),
     );
-  const owned = new Set(
-    rows
-      .filter((row) => row.projectId === projectId && row.apiKeyId === keyId)
-      .map((row) => row.url),
-  );
-  for (const url of managed) {
-    if (!owned.has(url)) return false;
+    if (managed.some((url) => !owned.has(url))) return false;
+
+    if (options?.retainUntil && retainedManaged.length > 0) {
+      await db
+        .update(blobUploads)
+        .set({ expiresAt: options.retainUntil })
+        .where(
+          and(
+            eq(blobUploads.projectId, projectId),
+            eq(blobUploads.apiKeyId, keyId),
+            inArray(blobUploads.url, retainedManaged),
+            lte(blobUploads.expiresAt, options.retainUntil),
+          ),
+        );
+    }
+    return true;
+  };
+
+  const db = getDb();
+  if (options?.retainUntil && retainedManaged.length > 0) {
+    // Lock the same upload rows as the sweeper. Whichever transaction wins is
+    // decisive: either retention extends before cleanup can select the object,
+    // or cleanup removes the row and this request fails closed before model use.
+    return db.transaction((tx) => inspect(tx, true));
   }
-  return true;
+  return inspect(db, false);
+}
+
+/** Extract the normalized image URLs that are actually forwarded to a model. */
+export function extractModelImageUrls(messages: ModelMessage[]): string[] {
+  const urls: string[] = [];
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (!part || typeof part !== 'object' || part.type !== 'image') continue;
+      const image = (part as { image?: unknown }).image;
+      if (image instanceof URL) urls.push(image.href);
+      else if (typeof image === 'string') urls.push(image);
+    }
+  }
+  return [...new Set(urls)];
 }
 
 /**
@@ -245,33 +300,47 @@ export async function assertOwnedBlobs(
  */
 export async function deleteBlobObjects(urls: string[]): Promise<void> {
   if (urls.length === 0) return;
-  await del(urls, { token: env.blobReadWriteToken() }).catch((err) =>
-    console.error('[blob] del failed', err),
+  await del(urls, { token: env.blobReadWriteToken() }).catch(() =>
+    console.error('[blob] del failed'),
   );
 }
 
-/** Idempotent cron sweep: delete uploads older than N hours. Returns count. */
-export async function sweepStaleUploads(olderThanHours: number): Promise<number> {
-  const cutoff = new Date(Date.now() - olderThanHours * 60 * 60 * 1000);
-  const stale = await getDb()
-    .select({ pathname: blobUploads.pathname, url: blobUploads.url })
-    .from(blobUploads)
-    .where(lt(blobUploads.createdAt, cutoff))
-    .limit(500);
-  if (stale.length === 0) return 0;
+/**
+ * Idempotent cron sweep for uploads whose explicit retention has ended.
+ * Metadata is removed only after Blob confirms deletion; a failed object delete
+ * leaves the row in place so the next cron can retry instead of orphaning data.
+ */
+export async function sweepStaleUploads(now = new Date()): Promise<number> {
+  return getDb().transaction(async (tx) => {
+    const stale = await tx
+      .select({ pathname: blobUploads.pathname, url: blobUploads.url })
+      .from(blobUploads)
+      .where(lte(blobUploads.expiresAt, now))
+      .limit(500)
+      .for('update', { skipLocked: true });
+    if (stale.length === 0) return 0;
 
-  await del(
-    stale.map((s) => s.url),
-    { token: env.blobReadWriteToken() },
-  ).catch((err) => console.error('[blob] del failed', err));
+    try {
+      await del(
+        stale.map((s) => s.url),
+        { token: env.blobReadWriteToken() },
+      );
+    } catch {
+      console.error('[blob] del failed; retaining metadata for retry');
+      return 0;
+    }
 
-  await getDb()
-    .delete(blobUploads)
-    .where(
-      inArray(
-        blobUploads.pathname,
-        stale.map((s) => s.pathname),
-      ),
-    );
-  return stale.length;
+    await tx
+      .delete(blobUploads)
+      .where(
+        and(
+          inArray(
+            blobUploads.pathname,
+            stale.map((s) => s.pathname),
+          ),
+          lte(blobUploads.expiresAt, now),
+        ),
+      );
+    return stale.length;
+  });
 }
