@@ -20,7 +20,12 @@ import {
 import { handleNonStreaming, handleStreaming, type CallContext } from '@/lib/gateway/call';
 import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
 import { systemPromptWithKb } from '@/lib/kb/retrieve';
-import { assertOwnedBlobs, extractReferencedUrls } from '@/lib/files/blob';
+import {
+  assertOwnedBlobs,
+  extractModelImageUrls,
+  extractReferencedUrls,
+} from '@/lib/files/blob';
+import { IMAGE_INPUT_RETENTION_DAYS } from '@/lib/usage/record';
 import { openAiError, type ChatCompletionRequest } from '@/lib/http/openai';
 import {
   projectGatewayUnavailableResponse,
@@ -34,6 +39,7 @@ export const maxDuration = 800;
 export const preferredRegion = 'bom1';
 
 export async function POST(req: Request): Promise<Response> {
+  const requestStartedAt = new Date();
   // 1) Authenticate the key (which carries the whole config).
   const token = bearerFromHeader(req.headers.get('authorization'));
   if (!token) {
@@ -130,7 +136,15 @@ export async function POST(req: Request): Promise<Response> {
   // Cross-key blob protection: a key may not reference another key's upload.
   const referencedUrls = extractReferencedUrls(body.messages);
   if (referencedUrls.length > 0) {
-    const ok = await assertOwnedBlobs(key.projectId, key.id, referencedUrls);
+    const ok = await assertOwnedBlobs(key.projectId, key.id, referencedUrls, {
+      retainImageUrls: key.logContent ? extractModelImageUrls(messages) : undefined,
+      retainUntil: key.logContent
+        ? new Date(
+            requestStartedAt.getTime() +
+              IMAGE_INPUT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+          )
+        : undefined,
+    });
     if (!ok) {
       return openAiError(403, 'invalid_request_error', 'Referenced file is not accessible to this key.', {
         code: 'file_access_denied',
@@ -172,6 +186,7 @@ export async function POST(req: Request): Promise<Response> {
     schema: structured ? normalizeOutputSchema(key.outputSchema) : key.outputSchema,
     includeUsage: body.stream_options?.include_usage === true,
     logContent: key.logContent,
+    requestStartedAt,
     tools: aiTools?.tools,
     toolChoice: aiTools?.toolChoice,
   };

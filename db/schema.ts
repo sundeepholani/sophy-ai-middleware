@@ -557,10 +557,13 @@ export const usageRollups = pgTable(
   ],
 );
 
-// ---- Request logs (inbound/outbound content; per-key, 30-day retention) -----
+// ---- Request logs (inbound/outbound content; per-key retention) -------------
 // Shares its primary key with the corresponding usage_events row so the two
 // correlate. Kept separate from usage_events so content can be purged on its own
-// retention schedule without losing usage/cost history.
+// retention schedule without losing usage/cost history. Complete image inputs
+// are retained for at most seven days; requestAfterImageExpiry is the same
+// message history with image sources replaced by placeholders, and replaces
+// request when that shorter window ends. Other request content lasts 30 days.
 
 export const requestLogs = pgTable(
   'request_logs',
@@ -571,6 +574,8 @@ export const requestLogs = pgTable(
     surface: text('surface'), // 'chat' | 'responses' | 'embedding' | 'transcription'
     systemPrompt: text('system_prompt'),
     request: jsonb('request'), // inbound messages sent to the model (embedding: the input strings)
+    requestAfterImageExpiry: jsonb('request_after_image_expiry'),
+    imageInputsExpiresAt: timestamp('image_inputs_expires_at', { withTimezone: true }),
     response: text('response'), // outbound model text (null for embeddings — vectors, not text)
     streamed: boolean('streamed').notNull().default(false),
     status: text('status').$type<UsageStatus>(),
@@ -580,6 +585,7 @@ export const requestLogs = pgTable(
     index('request_logs_project_time_idx').on(t.projectId, t.createdAt),
     index('request_logs_key_time_idx').on(t.apiKeyId, t.createdAt),
     index('request_logs_time_idx').on(t.createdAt),
+    index('request_logs_image_inputs_expiry_idx').on(t.imageInputsExpiresAt),
     foreignKey({
       name: 'request_logs_usage_event_fk',
       columns: [t.projectId, t.id],
@@ -590,6 +596,16 @@ export const requestLogs = pgTable(
       columns: [t.projectId, t.apiKeyId],
       foreignColumns: [apiKeys.projectId, apiKeys.id],
     }).onDelete('restrict'),
+    check(
+      'request_logs_image_retention_pair_check',
+      sql`(${t.imageInputsExpiresAt} is null and ${t.requestAfterImageExpiry} is null)
+          or (${t.imageInputsExpiresAt} is not null and ${t.requestAfterImageExpiry} is not null)`,
+    ),
+    check(
+      'request_logs_image_retention_max_check',
+      sql`${t.imageInputsExpiresAt} is null
+          or ${t.imageInputsExpiresAt} <= ${t.createdAt} + interval '7 days'`,
+    ),
   ],
 );
 
@@ -605,15 +621,22 @@ export const blobUploads = pgTable(
     contentType: text('content_type'),
     size: bigint('size', { mode: 'number' }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    /** 24 hours by default; a content-logged image reference extends this to
+     * the matching request's seven-day image-input expiry. */
+    expiresAt: timestamp('expires_at', { withTimezone: true })
+      .default(sql`now() + interval '24 hours'`)
+      .notNull(),
   },
   (t) => [
     index('blob_uploads_project_idx').on(t.projectId),
     index('blob_uploads_key_idx').on(t.apiKeyId),
+    index('blob_uploads_expiry_idx').on(t.expiresAt),
     foreignKey({
       name: 'blob_uploads_api_key_fk',
       columns: [t.projectId, t.apiKeyId],
       foreignColumns: [apiKeys.projectId, apiKeys.id],
     }).onDelete('cascade'),
+    check('blob_uploads_expiry_check', sql`${t.expiresAt} >= ${t.createdAt}`),
   ],
 );
 

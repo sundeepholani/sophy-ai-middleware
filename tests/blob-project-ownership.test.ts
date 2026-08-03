@@ -14,6 +14,8 @@ vi.mock('@/lib/env', () => ({
 
 import {
   assertOwnedBlobs,
+  extractModelImageUrls,
+  sweepStaleUploads,
   uploadClientFile,
   uploadKbDocument,
 } from '@/lib/files/blob';
@@ -125,5 +127,85 @@ describe('project-scoped Blob ownership', () => {
     expect(values).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: PROJECT_ID, kbId: KB_ID }),
     );
+  });
+
+  it('locks and extends an owned image before it can be used by a logged request', async () => {
+    const row = { url: UPLOAD_URL, projectId: PROJECT_ID, apiKeyId: KEY_ID };
+    const lock = vi.fn().mockResolvedValue([row]);
+    const selectWhere = vi.fn(() => ({ for: lock }));
+    const from = vi.fn(() => ({ where: selectWhere }));
+    const select = vi.fn(() => ({ from }));
+    const updateWhere = vi.fn().mockResolvedValue({ rowCount: 1 });
+    const set = vi.fn(() => ({ where: updateWhere }));
+    const update = vi.fn(() => ({ set }));
+    const tx = { select, update };
+    const transaction = vi.fn(async (fn: (value: typeof tx) => Promise<boolean>) => fn(tx));
+    mocks.getDb.mockReturnValue({ transaction });
+    const retainUntil = new Date('2026-08-10T00:00:00Z');
+
+    await expect(
+      assertOwnedBlobs(PROJECT_ID, KEY_ID, [UPLOAD_URL], {
+        retainImageUrls: [UPLOAD_URL],
+        retainUntil,
+      }),
+    ).resolves.toBe(true);
+
+    expect(lock).toHaveBeenCalledWith('update');
+    expect(set).toHaveBeenCalledWith({ expiresAt: retainUntil });
+    expect(updateWhere).toHaveBeenCalledOnce();
+  });
+
+  it('extracts only image values actually forwarded to the model', () => {
+    expect(
+      extractModelImageUrls([
+        {
+          role: 'user',
+          content: [
+            { type: 'image', image: new URL(UPLOAD_URL) },
+            { type: 'file', data: new URL(`${UPLOAD_URL}.pdf`), mediaType: 'application/pdf' },
+            { type: 'text', text: 'inspect' },
+          ],
+        },
+      ]),
+    ).toEqual([UPLOAD_URL]);
+  });
+});
+
+describe('upload retention cleanup', () => {
+  function mockExpiredUploads() {
+    const stale = [{ pathname: 'uploads/project/key/image.png', url: UPLOAD_URL }];
+    const lock = vi.fn().mockResolvedValue(stale);
+    const limit = vi.fn(() => ({ for: lock }));
+    const selectWhere = vi.fn(() => ({ limit }));
+    const from = vi.fn(() => ({ where: selectWhere }));
+    const select = vi.fn(() => ({ from }));
+    const deleteWhere = vi.fn().mockResolvedValue({ rowCount: 1 });
+    const deleteRow = vi.fn(() => ({ where: deleteWhere }));
+    const tx = { select, delete: deleteRow };
+    const transaction = vi.fn(async (fn: (value: typeof tx) => Promise<number>) => fn(tx));
+    mocks.getDb.mockReturnValue({ transaction });
+    return { deleteRow, deleteWhere, selectWhere, transaction, lock };
+  }
+
+  it('deletes expired objects and then their metadata', async () => {
+    const db = mockExpiredUploads();
+    mocks.del.mockResolvedValue(undefined);
+
+    await expect(sweepStaleUploads(new Date('2026-08-03T00:00:00Z'))).resolves.toBe(1);
+    expect(mocks.del).toHaveBeenCalledWith([UPLOAD_URL], { token: 'test-blob-token' });
+    expect(db.lock).toHaveBeenCalledWith('update', { skipLocked: true });
+    expect(db.deleteRow).toHaveBeenCalledOnce();
+    expect(db.deleteWhere).toHaveBeenCalledOnce();
+  });
+
+  it('retains metadata for a later retry when object deletion fails', async () => {
+    const db = mockExpiredUploads();
+    mocks.del.mockRejectedValue(new Error('temporary Blob failure'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await expect(sweepStaleUploads(new Date('2026-08-03T00:00:00Z'))).resolves.toBe(0);
+    expect(db.deleteRow).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith('[blob] del failed; retaining metadata for retry');
+    error.mockRestore();
   });
 });

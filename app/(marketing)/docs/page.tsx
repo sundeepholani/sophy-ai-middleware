@@ -853,6 +853,15 @@ resp = client.responses.create(
                 console exposes capabilities such as image analysis and file input.
               </p>
             </Note>
+            <Note title="Image-input retention">
+              <p>
+                When content logging is enabled, Sophy retains the exact image value supplied to
+                Chat or Responses for seven days, then replaces it with a placeholder in the
+                30-day message log. An inline data URL contains the complete submitted bytes; for a
+                public external URL, Sophy retains the URL rather than copying content owned by the
+                external host. Turning content logging off retains neither form.
+              </p>
+            </Note>
           </Section>
 
           <Section id="tools" title="Tool / function calling">
@@ -1351,7 +1360,7 @@ with open("out.png", "wb") as f:
                 {
                   name: 'content logging',
                   type: 'boolean',
-                  note: 'Captures buffered Chat, buffered/streaming Responses, embedding inputs, and text from audio transcription. Audio bytes are never stored. Streaming Chat and image prompts record usage metadata only.',
+                  note: 'Captures Chat/Responses text and replies, embedding inputs, and transcription text for 30 days. Complete Chat/Responses image input values are discarded after 7 days and replaced by placeholders. Audio bytes and generated images are never stored.',
                 },
                 {
                   name: 'owner / status',

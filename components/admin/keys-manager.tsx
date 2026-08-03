@@ -1405,7 +1405,7 @@ function KeyForm({
           <p className="text-xs text-muted-foreground">
             {isTranscriptionModel
               ? 'Store the filename, language hint, raw transcript, and final text for 30 days. Audio bytes are never stored.'
-              : 'Store inbound prompts & model replies for this key (viewable in Logs, kept 30 days).'}
+              : 'Store text and model replies for 30 days. Complete image input values are discarded after 7 days; the log keeps a placeholder.'}
           </p>
         </div>
         <Switch id={`${uid}-log`} checked={logContent} onCheckedChange={setLogContent} />

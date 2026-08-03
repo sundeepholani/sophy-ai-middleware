@@ -426,6 +426,8 @@ export interface LogDetailContent {
   surface: string | null;
   systemPrompt: string | null;
   request: unknown;
+  /** Present only for proxy logs containing an unexpired image input. */
+  imageInputsExpiresAt?: Date | null;
   response: string | null;
 }
 
@@ -475,7 +477,11 @@ export async function getLogDetail(
       .select({
         surface: requestLogs.surface,
         systemPrompt: requestLogs.systemPrompt,
-        request: requestLogs.request,
+        // The console never loads complete image values. Before expiry it uses
+        // the precomputed redacted copy; after the cron replacement it falls
+        // back to the now-redacted request column.
+        request: sql<object | null>`coalesce(${requestLogs.requestAfterImageExpiry}, ${requestLogs.request})`,
+        imageInputsExpiresAt: requestLogs.imageInputsExpiresAt,
         response: requestLogs.response,
       })
       .from(requestLogs)

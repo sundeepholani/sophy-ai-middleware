@@ -83,6 +83,12 @@ export interface CallContext {
   includeUsage: boolean;
   /** Whether to persist inbound/outbound message content for this request. */
   logContent: boolean;
+  /**
+   * Shared retention anchor established before a managed image can be used.
+   * Routes set this once so Blob retention and the eventual request log expire
+   * together. Optional only for internal/test callers that do not use uploads.
+   */
+  requestStartedAt?: Date;
   /** Client-supplied tools (passthrough; no execute) — undefined = none. */
   tools?: ToolSet;
   toolChoice?: AiToolChoice;
@@ -173,6 +179,7 @@ export async function handleNonStreaming(
           surface: 'chat',
           systemPrompt: ctx.systemPrompt,
           messages,
+          requestStartedAt: ctx.requestStartedAt ?? new Date(start),
           response,
           streamed: false,
           status,
@@ -314,6 +321,7 @@ export function handleStreaming(ctx: CallContext, messages: ModelMessage[]): Res
           surface: 'chat',
           systemPrompt: ctx.systemPrompt,
           messages,
+          requestStartedAt: ctx.requestStartedAt ?? new Date(start),
           response,
           streamed: true,
           status,

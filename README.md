@@ -106,11 +106,13 @@ manage only their owned keys and related usage, logs, and evaluations.
   source. Gateway cost is a real-time estimate, not a billing-grade invoice.
 - **Logs** — recent client requests plus transcript-processor, evaluation, and
   knowledgebase component calls, with model, tokens, cost, kind, streaming
-  status, and errors. Per-key content logging captures buffered Chat,
-  buffered/streaming Responses, embedding inputs, and transcription text for 30
-  days; transcription audio bytes are never stored. Streaming Chat and image
-  generation record usage metadata only. Usage metadata remains after content
-  expires.
+  status, and errors. Per-key content logging captures Chat and Responses
+  messages/replies, embedding inputs, and transcription text for 30 days.
+  Complete Chat/Responses image input values use a shorter seven-day window and
+  are then replaced by placeholders; inline data URLs include their bytes, while
+  an external URL remains only a reference to externally owned content.
+  Transcription audio bytes and generated images are never stored. Usage metadata
+  remains after content expires.
 - **Evals** — run champion-vs-challenger evaluations on live text traffic. A
   blind judge reports win rate, confidence interval, cost, latency, projected
   monthly impact, and a recommendation. Results update in the console and can be
@@ -177,9 +179,11 @@ pnpm build
 ```
 
 The idempotent `/api/cron/rollup` job runs every 15 minutes. It rolls up usage,
-purges 30-day request content, sweeps 24-hour client uploads, processes model
-evaluations, and ingests knowledgebase documents. `CRON_SECRET` protects the
-route, and a Postgres lock prevents overlapping runs; Redis is not used.
+discards seven-day image input values, purges 30-day request content, sweeps
+expired client uploads (24 hours by default, extended to the matching seven-day
+window for content-logged image references), processes model evaluations, and
+ingests knowledgebase documents. `CRON_SECRET` protects the route, and a
+Postgres lock prevents overlapping runs; Redis is not used.
 
 ## Minimal client migration
 

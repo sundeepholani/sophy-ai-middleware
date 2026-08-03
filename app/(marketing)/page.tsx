@@ -159,7 +159,7 @@ const OPERATIONS: { icon: typeof FlaskConical; title: string; body: string }[] =
   {
     icon: ChartNoAxesCombined,
     title: 'Usage analytics and request tracing',
-    body: 'Explore requests, tokens, estimated cost, latency, model mix, errors, and spend by source—with optional content capture where supported.',
+    body: 'Explore requests, tokens, estimated cost, latency, model mix, errors, and spend by source—with optional content capture and a shorter seven-day boundary for complete image inputs.',
   },
   {
     icon: UsersRound,
