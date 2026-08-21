@@ -13,12 +13,6 @@ export const metadata: Metadata = {
     "Sophy — a governed AI gateway for language, image, and embedding models, with centralized policy, knowledge, usage, and evaluations.",
 };
 
-// Render every page/route next to the database (Supabase ap-south-1 / Mumbai),
-// the same region the /v1 proxy routes pin. Cross-region DB round-trips were the
-// dominant cost of admin page loads (each page makes several queries). Inherited
-// by all routes; individual routes may still override.
-export const preferredRegion = "bom1";
-
 export default function RootLayout({
   children,
 }: Readonly<{

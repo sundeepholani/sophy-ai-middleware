@@ -14,7 +14,9 @@
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:push": "drizzle-kit push"
+    "db:push": "drizzle-kit push",
+    "db:compare": "node scripts/database/compare.mjs",
+    "db:smoke": "node scripts/database/smoke.mjs"
   },
   "dependencies": {
     "@ai-sdk/gateway": "^3.0.133",

@@ -1,6 +1,6 @@
 /**
- * Hot-path counters on Postgres (replaces the previous Upstash Redis layer so
- * the whole stack runs on Supabase + Vercel).
+ * Hot-path counters on PostgreSQL. This layer replaces the previous Upstash
+ * Redis layer and keeps quota state in the application database.
  *
  * - Rate limiting: atomic fixed-window counter (`rate_counters`), one statement.
  * - Quota: derived from the sum of cost_usd in `usage_events` for the current UTC

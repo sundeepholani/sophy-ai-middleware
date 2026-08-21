@@ -43,7 +43,7 @@ CREDENTIALS.local.md
 # vercel
 .vercel
 
-# supabase (CLI temp/local state — we use Drizzle for migrations)
+# legacy Supabase CLI state (Drizzle owns application migrations)
 supabase/.temp
 supabase/.branches
 

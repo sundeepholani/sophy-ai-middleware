@@ -22,30 +22,25 @@ function optionalEnv(name: string): string | undefined {
   return value && value.length > 0 ? value : undefined;
 }
 
-function requireOneOf(...names: string[]): string {
-  for (const n of names) {
-    const v = optionalEnv(n);
-    if (v) return v;
+function positiveIntegerEnv(name: string, fallback: number, maximum: number): number {
+  const value = optionalEnv(name);
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > maximum) {
+    throw new Error(`${name} must be an integer from 1 through ${maximum}.`);
   }
-  throw new Error(
-    `Missing required environment variable: one of ${names.join(', ')}. ` +
-      `See .env.example for the full list and provisioning notes.`,
-  );
+  return parsed;
 }
 
 export const env = {
-  // --- Postgres (Supabase via Vercel Marketplace) ---
-  // The Vercel↔Supabase integration provisions POSTGRES_URL (pooled / Supavisor
-  // transaction mode) and POSTGRES_URL_NON_POOLING (direct). A manual setup uses
-  // DATABASE_URL / DATABASE_URL_UNPOOLED. We accept either naming.
-  /** Pooled (transaction-mode) connection string used by the running app. */
-  databaseUrl: () => requireOneOf('DATABASE_URL', 'POSTGRES_URL'),
-  /** Direct/unpooled connection string used only for migrations. */
-  databaseUrlUnpooled: () =>
-    optionalEnv('DATABASE_URL_UNPOOLED') ??
-    optionalEnv('POSTGRES_URL_NON_POOLING') ??
-    requireOneOf('DATABASE_URL', 'POSTGRES_URL'),
-  /** Set to "1" to skip TLS CA verification (some poolers present an untrusted chain). */
+  // --- Azure Database for PostgreSQL ---
+  /** Pooled Azure PgBouncer connection string used by the running app. */
+  databaseUrl: () => requireEnv('DATABASE_URL'),
+  /** Maximum connections per Vercel function instance. */
+  databasePoolMax: () => positiveIntegerEnv('DATABASE_POOL_MAX', 5, 20),
+  /** Optional runtime guard against a connection to the old database provider. */
+  databaseExpectedHostSuffix: () => optionalEnv('DATABASE_EXPECTED_HOST_SUFFIX'),
+  /** Local diagnostic escape hatch. Production rejects this setting. */
   databaseSslNoVerify: () => optionalEnv('DATABASE_SSL_NO_VERIFY') === '1',
 
   // --- AI Gateway ---

@@ -130,25 +130,36 @@ manage only their owned keys and related usage, logs, and evaluations.
 ## Stack
 
 Node.js 22 or newer, Next.js 16 (App Router), AI SDK v6 with an isolated v7
-transcription adapter, Vercel AI Gateway, Supabase Postgres (Drizzle), Vercel
-Blob, shadcn/ui, and iron-session.
+transcription adapter, Vercel AI Gateway, Azure Database for PostgreSQL
+(Drizzle), Vercel Blob, shadcn/ui, and iron-session.
 
-## Provision on Vercel
+## Provision on Azure and Vercel
 
-1. Link the project and add Supabase:
+1. Create a dedicated PostgreSQL 17 Flexible Server in Central India.
+
+   Use the General Purpose tier. Enable the built-in PgBouncer service.
+
+2. Enable the `vector` extension on the server.
+
+   Create the `sophy` database and separate migration and application roles.
+
+3. Enable Vercel Static IPs for the `bom1` region.
+
+   Add only the assigned IP addresses to the Azure firewall.
+
+4. Link the Vercel project:
 
    ```bash
    vercel link
-   vercel integration add supabase
    ```
 
-   The integration supplies pooled and direct Postgres URLs. For manual setup,
-   use `DATABASE_URL` for the app and `DATABASE_URL_UNPOOLED` for migrations.
-   Enable Vercel Blob and AI Gateway, then configure the required provider
+   Enable Vercel Blob and AI Gateway. Then configure the required provider
    credentials in AI Gateway.
 
-2. Configure the environment variables documented in `.env.example`:
+5. Configure the environment variables in `.env.example`:
 
+   - `DATABASE_URL` for Azure PgBouncer on port 6432
+   - `DATABASE_EXPECTED_HOST_SUFFIX` and `DATABASE_POOL_MAX`
    - `KEY_HASH_PEPPER`, `SESSION_PASSWORD`, and `CRON_SECRET`
    - The canonical production `APP_ORIGIN`
    - `BLOB_READ_WRITE_TOKEN`
@@ -162,11 +173,16 @@ Blob, shadcn/ui, and iron-session.
 
    Generate random secrets with `openssl rand -hex 32`.
 
-3. Apply database migrations:
+   Keep `DATABASE_URL_UNPOOLED` only on the protected migration host. Do not add the owner-capable URL to Vercel.
+
+6. Apply database migrations for a new, empty installation:
 
    ```bash
    pnpm db:migrate
    ```
+
+   For an existing Supabase installation, use
+   [the Azure migration runbook](docs/azure-postgres-migration.md).
 
 ## Develop
 

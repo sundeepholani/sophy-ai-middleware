@@ -25,8 +25,6 @@ import {
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 800;
-// Run near the database (Supabase ap-south-1) to minimize per-request DB latency.
-export const preferredRegion = 'bom1';
 
 type MultipartFormReadResult =
   | { ok: true; form: FormData }
