@@ -20,6 +20,17 @@ describe('projectSwitchPath', () => {
     ).toBe('/admin/p/project-b');
   });
 
+  it('keeps the knowledgebase surface when an editor switches projects', () => {
+    expect(
+      projectSwitchPath(
+        '/admin/p/project-a/knowledgebases',
+        'project-a',
+        'project-b',
+        'editor',
+      ),
+    ).toBe('/admin/p/project-b/knowledgebases');
+  });
+
   it('does not change the user default as part of route switching', () => {
     expect(projectSwitchPath('/admin/p/project-a/usage', 'project-a', 'project-b', 'admin')).toBe(
       '/admin/p/project-b/usage',

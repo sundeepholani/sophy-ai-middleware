@@ -65,7 +65,7 @@ const ENTRIES: NavEntry[] = [
       { segment: 'logs', label: 'Logs', icon: ScrollText },
     ],
   },
-  { segment: 'knowledgebases', label: 'Knowledgebases', icon: Library, adminOnly: true },
+  { segment: 'knowledgebases', label: 'Knowledgebases', icon: Library },
   {
     label: 'Settings',
     icon: Settings,

@@ -103,11 +103,10 @@ async function resolveOwner(
 }
 
 /**
- * Validate a chosen knowledgebase: '' / null → none; otherwise must be a real KB.
- * v1 decision (intentional): KBs are a SHARED, admin-curated, single-org resource,
- * so any operator who can manage a key may attach ANY KB to it — there is no
- * per-owner KB scoping (the schema carries ownerUserId for a future tightening).
- * If KBs ever become team/tenant-private, gate this to admin or scope by owner.
+ * Validate a chosen knowledgebase: '' / null → none; otherwise it must belong
+ * to the project. KBs are shareable inside a project, so any operator may attach
+ * any project KB to a key they can manage. Key authorization happens before
+ * this resolver on updates; editors automatically own newly created keys.
  */
 async function resolveKnowledgebase(
   projectId: string,
@@ -354,8 +353,8 @@ export async function updateKey(
     newOwner = await resolveOwner(input.projectId, input.ownerUserId);
   }
 
-  // Knowledgebase: anyone who can manage the key may attach/detach one. Only
-  // change it when the field is present (undefined = leave as-is).
+  // Anyone who can manage the key may attach/detach a project KB. Only change
+  // it when the field is present (undefined = leave as-is).
   const kbId =
     input.knowledgebaseId !== undefined
       ? await resolveKnowledgebase(input.projectId, input.knowledgebaseId)

@@ -1,6 +1,4 @@
-import { redirect } from 'next/navigation';
 import { KbManager } from '@/components/admin/kb-manager';
-import { projectPath } from '@/components/admin/project-path';
 import { listKnowledgebases } from '@/lib/admin/queries';
 import { requireProjectViewer } from '@/lib/auth/viewer';
 
@@ -13,7 +11,6 @@ export default async function KnowledgebasesPage({
 }) {
   const { projectId } = await params;
   const viewer = await requireProjectViewer(projectId);
-  if (viewer.role !== 'admin') redirect(projectPath(projectId));
   const knowledgebases = await listKnowledgebases(viewer);
 
   return (
@@ -21,8 +18,10 @@ export default async function KnowledgebasesPage({
       <div>
         <h1 className="text-2xl font-semibold">Knowledgebases</h1>
         <p className="text-sm text-muted-foreground">
-          Project-owned document collections for retrieval-augmented generation in{' '}
-          {viewer.projectName}. Attach one to a Sophy API key to ground its answers.
+          {viewer.role === 'admin'
+            ? `Project-owned document collections for retrieval-augmented generation in ${viewer.projectName}.`
+            : `Document collections you own in ${viewer.projectName}.`}{' '}
+          Attach one to a Sophy API key you manage to ground its answers.
         </p>
       </div>
       <KbManager projectId={projectId} knowledgebases={knowledgebases} />

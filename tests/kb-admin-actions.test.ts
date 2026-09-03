@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),
-  assertProjectAdmin: vi.fn(),
+  requireProjectViewer: vi.fn(),
   revalidatePath: vi.fn(),
   uploadKbDocument: vi.fn(),
   deleteBlobObjects: vi.fn(),
@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/db/client', () => ({ getDb: mocks.getDb }));
-vi.mock('@/lib/auth/viewer', () => ({ assertProjectAdmin: mocks.assertProjectAdmin }));
+vi.mock('@/lib/auth/viewer', () => ({ requireProjectViewer: mocks.requireProjectViewer }));
 vi.mock('next/cache', () => ({ revalidatePath: mocks.revalidatePath }));
 vi.mock('@/lib/files/blob', () => ({
   uploadKbDocument: mocks.uploadKbDocument,
@@ -27,8 +27,10 @@ vi.mock('@/lib/admin/queries', () => ({
 
 import {
   createKnowledgebase,
+  deleteKnowledgebase,
   deleteKbDocument,
   listKbDocumentsAction,
+  retryKbDocument,
   uploadKbDocumentAction,
 } from '@/app/admin/kb-actions';
 
@@ -36,6 +38,7 @@ const PROJECT_ID = '00000000-0000-4000-8000-000000000001';
 const OTHER_PROJECT_ID = '00000000-0000-4000-8000-000000000002';
 const KB_ID = '00000000-0000-4000-8000-000000000003';
 const DOC_ID = '00000000-0000-4000-8000-000000000004';
+const OTHER_USER_ID = '00000000-0000-4000-8000-000000000006';
 const VIEWER = {
   userId: '00000000-0000-4000-8000-000000000005',
   email: 'admin@example.com',
@@ -45,6 +48,11 @@ const VIEWER = {
   projectSlug: 'project',
   projectStatus: 'active',
   defaultProjectId: PROJECT_ID,
+};
+const EDITOR = {
+  ...VIEWER,
+  email: 'editor@example.com',
+  role: 'editor',
 };
 
 function selectionDb(rows: unknown[]) {
@@ -57,15 +65,17 @@ function selectionDb(rows: unknown[]) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.assertProjectAdmin.mockResolvedValue(VIEWER);
+  mocks.requireProjectViewer.mockResolvedValue(VIEWER);
   mocks.isKbContentTypeAllowed.mockReturnValue(true);
   mocks.listKbDocuments.mockResolvedValue([]);
   mocks.uploadKbDocument.mockResolvedValue({});
 });
 
-describe('project-scoped KB admin actions', () => {
-  it('authorizes the project, verifies the KB, and passes the viewer to document reads', async () => {
-    const selected = selectionDb([{ id: KB_ID, projectId: PROJECT_ID }]);
+describe('project-scoped KB actions', () => {
+  it('lets an admin manage an editor-owned KB', async () => {
+    const selected = selectionDb([
+      { id: KB_ID, projectId: PROJECT_ID, ownerUserId: OTHER_USER_ID },
+    ]);
     mocks.getDb.mockReturnValue(selected.db);
     const documents = [{ id: DOC_ID }];
     mocks.listKbDocuments.mockResolvedValue(documents);
@@ -73,12 +83,14 @@ describe('project-scoped KB admin actions', () => {
     await expect(
       listKbDocumentsAction({ projectId: PROJECT_ID, kbId: KB_ID }),
     ).resolves.toBe(documents);
-    expect(mocks.assertProjectAdmin).toHaveBeenCalledWith(PROJECT_ID);
+    expect(mocks.requireProjectViewer).toHaveBeenCalledWith(PROJECT_ID);
     expect(mocks.listKbDocuments).toHaveBeenCalledWith(VIEWER, KB_ID);
   });
 
   it('rejects a KB row from another project before reading its documents', async () => {
-    const selected = selectionDb([{ id: KB_ID, projectId: OTHER_PROJECT_ID }]);
+    const selected = selectionDb([
+      { id: KB_ID, projectId: OTHER_PROJECT_ID, ownerUserId: VIEWER.userId },
+    ]);
     mocks.getDb.mockReturnValue(selected.db);
 
     await expect(
@@ -87,7 +99,8 @@ describe('project-scoped KB admin actions', () => {
     expect(mocks.listKbDocuments).not.toHaveBeenCalled();
   });
 
-  it('persists projectId on the KB and its audit row, then revalidates the project route', async () => {
+  it('makes an editor the owner of the KB they create', async () => {
+    mocks.requireProjectViewer.mockResolvedValue(EDITOR);
     const returning = vi.fn().mockResolvedValue([{ id: KB_ID }]);
     const kbValues = vi.fn(() => ({ returning }));
     const auditValues = vi.fn().mockResolvedValue(undefined);
@@ -101,7 +114,11 @@ describe('project-scoped KB admin actions', () => {
       createKnowledgebase({ projectId: PROJECT_ID, name: ' Product docs ' }),
     ).resolves.toEqual({ id: KB_ID });
     expect(kbValues).toHaveBeenCalledWith(
-      expect.objectContaining({ projectId: PROJECT_ID, name: 'Product docs' }),
+      expect.objectContaining({
+        projectId: PROJECT_ID,
+        name: 'Product docs',
+        ownerUserId: EDITOR.userId,
+      }),
     );
     expect(auditValues).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: PROJECT_ID, action: 'kb.create', target: KB_ID }),
@@ -111,8 +128,11 @@ describe('project-scoped KB admin actions', () => {
     );
   });
 
-  it('uploads only after project-admin and KB ownership checks', async () => {
-    const selected = selectionDb([{ id: KB_ID, projectId: PROJECT_ID }]);
+  it('lets an editor upload to a KB they own', async () => {
+    mocks.requireProjectViewer.mockResolvedValue(EDITOR);
+    const selected = selectionDb([
+      { id: KB_ID, projectId: PROJECT_ID, ownerUserId: EDITOR.userId },
+    ]);
     const auditValues = vi.fn().mockResolvedValue(undefined);
     const insert = vi.fn(() => ({ values: auditValues }));
     mocks.getDb.mockReturnValue({ ...selected.db, insert });
@@ -123,7 +143,7 @@ describe('project-scoped KB admin actions', () => {
     formData.set('file', file);
 
     await expect(uploadKbDocumentAction(formData)).resolves.toEqual({ filename: 'guide.md' });
-    expect(mocks.assertProjectAdmin).toHaveBeenCalledWith(PROJECT_ID);
+    expect(mocks.requireProjectViewer).toHaveBeenCalledWith(PROJECT_ID);
     expect(mocks.uploadKbDocument).toHaveBeenCalledWith(
       expect.objectContaining({
         projectId: PROJECT_ID,
@@ -151,6 +171,56 @@ describe('project-scoped KB admin actions', () => {
     await expect(deleteKbDocument({ projectId: PROJECT_ID, id: DOC_ID })).rejects.toThrow(
       'Document not found',
     );
+    expect(mocks.deleteBlobObjects).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['read documents', async () => listKbDocumentsAction({ projectId: PROJECT_ID, kbId: KB_ID })],
+    [
+      'upload a document',
+      async () => {
+        const formData = new FormData();
+        formData.set('projectId', PROJECT_ID);
+        formData.set('kbId', KB_ID);
+        formData.set('file', new File(['private'], 'private.md', { type: 'text/markdown' }));
+        return uploadKbDocumentAction(formData);
+      },
+    ],
+    ['delete the KB', async () => deleteKnowledgebase({ projectId: PROJECT_ID, id: KB_ID })],
+  ])('does not let an editor %s in another editor\'s KB', async (_label, action) => {
+    mocks.requireProjectViewer.mockResolvedValue(EDITOR);
+    const selected = selectionDb([
+      { id: KB_ID, projectId: PROJECT_ID, ownerUserId: OTHER_USER_ID },
+    ]);
+    mocks.getDb.mockReturnValue(selected.db);
+
+    await expect(action()).rejects.toThrow('forbidden');
+    expect(mocks.listKbDocuments).not.toHaveBeenCalled();
+    expect(mocks.uploadKbDocument).not.toHaveBeenCalled();
+    expect(mocks.deleteBlobObjects).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['delete', async () => deleteKbDocument({ projectId: PROJECT_ID, id: DOC_ID })],
+    ['retry', async () => retryKbDocument({ projectId: PROJECT_ID, id: DOC_ID })],
+  ])('does not let an editor %s a document in another editor\'s KB', async (_label, action) => {
+    mocks.requireProjectViewer.mockResolvedValue(EDITOR);
+    const selectedDocument = selectionDb([
+      {
+        id: DOC_ID,
+        projectId: PROJECT_ID,
+        kbId: KB_ID,
+        url: 'https://store.public.blob.vercel-storage.com/kb/private/source.pdf',
+      },
+    ]);
+    const selectedKb = selectionDb([
+      { id: KB_ID, projectId: PROJECT_ID, ownerUserId: OTHER_USER_ID },
+    ]);
+    mocks.getDb
+      .mockReturnValueOnce(selectedDocument.db)
+      .mockReturnValueOnce(selectedKb.db);
+
+    await expect(action()).rejects.toThrow('forbidden');
     expect(mocks.deleteBlobObjects).not.toHaveBeenCalled();
   });
 });

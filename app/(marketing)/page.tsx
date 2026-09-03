@@ -131,7 +131,7 @@ const FEATURES: { icon: typeof Plug; title: string; body: string }[] = [
   {
     icon: Library,
     title: 'Managed knowledgebases',
-    body: 'Ingest PDF, DOCX, Markdown, text, CSV, and JSON sources once, share them across keys, and ground Chat or Responses automatically.',
+    body: 'Let Admins manage every collection and Editors build their own from PDF, DOCX, Markdown, text, CSV, or JSON, then share them across permitted keys.',
   },
   {
     icon: Boxes,

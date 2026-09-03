@@ -84,8 +84,9 @@ The passwordless console is at `/admin`. Any verified email can create an accoun
 independent signup creates a renameable `My Project` and makes that person its
 Admin. Invitation-first signup joins only the invited project and makes it the
 person's default. The same identity can be an Admin in one project and an Editor
-in another. Project Admins see the whole current project, while Editors see and
-manage only their owned keys and related usage, logs, and evaluations.
+in another. Project Admins see the whole current project, while Editors manage
+only their owned keys and knowledgebases and see only their related usage, logs,
+and evaluations.
 
 - **Overview** — trailing-30-day requests, tokens, estimated cost, Sophy spend,
   and errors.
@@ -120,9 +121,11 @@ manage only their owned keys and related usage, logs, and evaluations.
   containing media/file content or supplying tools. While a run is active, its
   text samples are captured independently of the key's content-logging setting
   and raw prompts/outputs are purged when the run completes or is cancelled.
-- **Knowledgebases** — upload text, Markdown, CSV, JSON, PDF, or DOCX documents.
-  The cron extracts, chunks, and embeds them; attached keys retrieve relevant
-  passages for Chat Completions and Responses requests.
+- **Knowledgebases** — Project Admins manage every project collection; Editors
+  can create and manage collections they own. Upload text, Markdown, CSV, JSON,
+  PDF, or DOCX documents. The cron extracts, chunks, and embeds them; Editors can
+  attach project knowledgebases to keys they own, and attached keys retrieve
+  relevant passages for Chat Completions and Responses requests.
 - **Members / Project settings** — manage per-project Admin/Editor roles, the
   project name and Gateway connection, and project-specific evaluation judge and
   summary-email settings.

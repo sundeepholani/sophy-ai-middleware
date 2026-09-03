@@ -1,16 +1,17 @@
 'use server';
 
 /**
- * Knowledgebase management mutations (admin-only in v1). Creating a KB and
- * uploading documents are admin actions; ingestion (extract → chunk → embed)
- * happens later in the cron. Deletes reclaim the blob storage and cascade to
- * chunks; a KB that's still attached to keys can't be deleted (detach first).
+ * Knowledgebase management mutations. Project admins may manage every KB;
+ * editors may create KBs and manage only the ones they own. Ingestion
+ * (extract → chunk → embed) happens later in the cron. Deletes reclaim the
+ * blob storage and cascade to chunks; a KB that's still attached to keys can't
+ * be deleted (detach first).
  */
 import { revalidatePath } from 'next/cache';
 import { and, eq, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import { knowledgebases, kbDocuments, kbChunks, apiKeys, auditLog } from '@/db/schema';
-import { assertProjectAdmin } from '@/lib/auth/viewer';
+import { requireProjectViewer, type ProjectViewer } from '@/lib/auth/viewer';
 import { uploadKbDocument, deleteBlobObjects, MAX_UPLOAD_BYTES } from '@/lib/files/blob';
 import { isKbContentTypeAllowed } from '@/lib/kb/extract';
 import { listKbDocuments, type KbDocumentRow } from '@/lib/admin/queries';
@@ -31,13 +32,25 @@ function revalidateKnowledgebases(projectId: string): void {
   revalidatePath(`/admin/p/${projectId}/knowledgebases`);
 }
 
-async function requireKnowledgebase(projectId: string, kbId: string): Promise<void> {
+async function requireKnowledgebase(viewer: ProjectViewer, kbId: string): Promise<void> {
   const [kb] = await getDb()
-    .select({ id: knowledgebases.id, projectId: knowledgebases.projectId })
+    .select({
+      id: knowledgebases.id,
+      projectId: knowledgebases.projectId,
+      ownerUserId: knowledgebases.ownerUserId,
+    })
     .from(knowledgebases)
-    .where(and(eq(knowledgebases.projectId, projectId), eq(knowledgebases.id, kbId)))
+    .where(
+      and(
+        eq(knowledgebases.projectId, viewer.projectId),
+        eq(knowledgebases.id, kbId),
+      ),
+    )
     .limit(1);
-  if (!kb || kb.projectId !== projectId) throw new Error('Knowledgebase not found');
+  if (!kb || kb.projectId !== viewer.projectId) throw new Error('Knowledgebase not found');
+  if (viewer.role !== 'admin' && kb.ownerUserId !== viewer.userId) {
+    throw new Error('forbidden');
+  }
 }
 
 /** Best-effort content-type when the browser sends an empty/unknown File.type. */
@@ -57,13 +70,13 @@ function inferContentType(filename: string, provided: string): string {
   return byExt[ext] ?? '';
 }
 
-/** Documents in a KB — called by the manage dialog on open (admin-only). */
+/** Documents in a KB — called by the manage dialog on open. */
 export async function listKbDocumentsAction(input: {
   projectId: string;
   kbId: string;
 }): Promise<KbDocumentRow[]> {
-  const viewer = await assertProjectAdmin(input.projectId);
-  await requireKnowledgebase(input.projectId, input.kbId);
+  const viewer = await requireProjectViewer(input.projectId);
+  await requireKnowledgebase(viewer, input.kbId);
   return listKbDocuments(viewer, input.kbId);
 }
 
@@ -71,7 +84,7 @@ export async function createKnowledgebase(input: {
   projectId: string;
   name: string;
 }): Promise<{ id: string }> {
-  const viewer = await assertProjectAdmin(input.projectId);
+  const viewer = await requireProjectViewer(input.projectId);
   const name = input.name.trim();
   if (!name) throw new Error('Name is required');
   if (name.length > 200) throw new Error('Name is too long');
@@ -95,11 +108,11 @@ export async function uploadKbDocumentAction(
   const kbId = String(formData.get('kbId') ?? '');
   const file = formData.get('file');
   if (!projectId) throw new Error('Missing project');
-  const viewer = await assertProjectAdmin(projectId);
+  const viewer = await requireProjectViewer(projectId);
   if (!kbId) throw new Error('Missing knowledgebase');
   if (!(file instanceof File) || file.size === 0) throw new Error('Choose a file to upload');
 
-  await requireKnowledgebase(projectId, kbId);
+  await requireKnowledgebase(viewer, kbId);
 
   if (file.size > MAX_UPLOAD_BYTES) {
     throw new Error(`File is too large (max ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB)`);
@@ -121,7 +134,7 @@ export async function uploadKbDocumentAction(
 }
 
 export async function deleteKbDocument(input: { projectId: string; id: string }): Promise<void> {
-  const viewer = await assertProjectAdmin(input.projectId);
+  const viewer = await requireProjectViewer(input.projectId);
   const [doc] = await getDb()
     .select({
       id: kbDocuments.id,
@@ -133,6 +146,7 @@ export async function deleteKbDocument(input: { projectId: string; id: string })
     .where(and(eq(kbDocuments.projectId, input.projectId), eq(kbDocuments.id, input.id)))
     .limit(1);
   if (!doc || doc.projectId !== input.projectId) throw new Error('Document not found');
+  await requireKnowledgebase(viewer, doc.kbId);
 
   // Atomic cascade for the chunks + row (no FKs in the schema). Retrieval only
   // serves chunks whose document row still exists and is 'ingested', so even if
@@ -160,7 +174,19 @@ export async function deleteKbDocument(input: { projectId: string; id: string })
 
 /** Re-queue a document for ingestion (e.g. after a transient failure). */
 export async function retryKbDocument(input: { projectId: string; id: string }): Promise<void> {
-  const viewer = await assertProjectAdmin(input.projectId);
+  const viewer = await requireProjectViewer(input.projectId);
+  const [doc] = await getDb()
+    .select({
+      id: kbDocuments.id,
+      projectId: kbDocuments.projectId,
+      kbId: kbDocuments.kbId,
+    })
+    .from(kbDocuments)
+    .where(and(eq(kbDocuments.projectId, input.projectId), eq(kbDocuments.id, input.id)))
+    .limit(1);
+  if (!doc || doc.projectId !== input.projectId) throw new Error('Document not found');
+  await requireKnowledgebase(viewer, doc.kbId);
+
   const updated = await getDb()
     .update(kbDocuments)
     .set({ status: 'pending', errorMessage: null, chunkCount: 0 })
@@ -182,7 +208,7 @@ export async function retryKbDocument(input: { projectId: string; id: string }):
         eq(kbChunks.documentId, input.id),
       ),
     );
-  await audit(input.projectId, viewer.email, 'kb.document.retry', updated[0].kbId, {
+  await audit(input.projectId, viewer.email, 'kb.document.retry', doc.kbId, {
     documentId: input.id,
   });
   revalidateKnowledgebases(input.projectId);
@@ -192,8 +218,8 @@ export async function deleteKnowledgebase(input: {
   projectId: string;
   id: string;
 }): Promise<void> {
-  const viewer = await assertProjectAdmin(input.projectId);
-  await requireKnowledgebase(input.projectId, input.id);
+  const viewer = await requireProjectViewer(input.projectId);
+  await requireKnowledgebase(viewer, input.id);
 
   // Blob URLs read up-front; the storage is reclaimed after the DB cascade commits.
   const docs = await getDb()
@@ -234,7 +260,13 @@ export async function deleteKnowledgebase(input: {
     const deleted = await tx
       .delete(knowledgebases)
       .where(
-        and(eq(knowledgebases.projectId, input.projectId), eq(knowledgebases.id, input.id)),
+        and(
+          eq(knowledgebases.projectId, input.projectId),
+          eq(knowledgebases.id, input.id),
+          viewer.role === 'admin'
+            ? undefined
+            : eq(knowledgebases.ownerUserId, viewer.userId),
+        ),
       )
       .returning({ id: knowledgebases.id });
     if (deleted.length === 0) throw new Error('Knowledgebase not found');

@@ -204,7 +204,7 @@ export function extractReferencedUrls(messages: OpenAIMessage[]): string[] {
  * upload owned by this exact project + key. External/public URLs pass through
  * (a client could reference those anyway). Managed URLs fail closed when the
  * database row is absent; this also prevents API keys from directly reading
- * admin-only `kb/` source documents, which are intentionally not blobUploads.
+ * operator-curated `kb/` source documents, which are intentionally not blobUploads.
  */
 export async function assertOwnedBlobs(
   projectId: string,
