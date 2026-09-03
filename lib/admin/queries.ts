@@ -2,8 +2,8 @@
  * Read-side queries for the admin console (server components only).
  *
  * Every query takes a project Viewer. The project predicate is mandatory;
- * scopeToOwner() then narrows editors to their own keys while admins see all
- * data inside that one project. An admin is never an unfiltered tenant query.
+ * editors are then narrowed to resources they own while admins see all data
+ * inside that one project. An admin is never an unfiltered tenant query.
  */
 import { and, desc, eq, gte, inArray, isNotNull, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
@@ -1227,13 +1227,12 @@ export interface KnowledgebaseRow {
 }
 
 /**
- * All knowledgebases with their document + attached-key counts. KB management is
- * admin-only in v1 (the page guards it), so this lists everything — no owner
- * scoping. Counts come from separate grouped queries (not joins) to avoid the
- * cartesian inflation two left-joins on the same id would cause.
+ * Knowledgebases this viewer may manage, with document + attached-key counts.
+ * Admins see the project; editors see only KBs they own. Counts come from
+ * separate grouped queries (not joins) to avoid the cartesian inflation two
+ * left-joins on the same id would cause.
  */
 export async function listKnowledgebases(viewer: Viewer): Promise<KnowledgebaseRow[]> {
-  if (viewer.role !== 'admin') throw new Error('forbidden');
   const db = getDb();
   const kbs = await db
     .select({
@@ -1244,14 +1243,26 @@ export async function listKnowledgebases(viewer: Viewer): Promise<KnowledgebaseR
       createdAt: knowledgebases.createdAt,
     })
     .from(knowledgebases)
-    .where(eq(knowledgebases.projectId, viewer.projectId))
+    .where(
+      and(
+        eq(knowledgebases.projectId, viewer.projectId),
+        viewer.role === 'admin'
+          ? undefined
+          : eq(knowledgebases.ownerUserId, viewer.userId),
+      ),
+    )
     .orderBy(desc(knowledgebases.createdAt));
   if (kbs.length === 0) return [];
 
   const docCounts = await db
     .select({ kbId: kbDocuments.kbId, n: sql<string>`count(*)` })
     .from(kbDocuments)
-    .where(eq(kbDocuments.projectId, viewer.projectId))
+    .where(
+      and(
+        eq(kbDocuments.projectId, viewer.projectId),
+        inArray(kbDocuments.kbId, kbs.map((kb) => kb.id)),
+      ),
+    )
     .groupBy(kbDocuments.kbId);
   const keyCounts = await db
     .select({ kbId: apiKeys.knowledgebaseId, n: sql<string>`count(*)` })
@@ -1260,6 +1271,7 @@ export async function listKnowledgebases(viewer: Viewer): Promise<KnowledgebaseR
       and(
         eq(apiKeys.projectId, viewer.projectId),
         isNotNull(apiKeys.knowledgebaseId),
+        inArray(apiKeys.knowledgebaseId, kbs.map((kb) => kb.id)),
       ),
     )
     .groupBy(apiKeys.knowledgebaseId);
@@ -1273,7 +1285,10 @@ export async function listKnowledgebases(viewer: Viewer): Promise<KnowledgebaseR
   }));
 }
 
-/** Lightweight {id,name} list for the key-form knowledgebase picker. */
+/**
+ * Lightweight project-scoped list for the key form. KBs remain shareable inside
+ * a project; the key mutation separately ensures editors manage only their keys.
+ */
 export async function listKnowledgebaseOptions(
   viewer: Viewer,
 ): Promise<{ id: string; name: string }[]> {
@@ -1296,12 +1311,11 @@ export interface KbDocumentRow {
   ingestedAt: Date | null;
 }
 
-/** Documents in a knowledgebase, newest first. */
+/** Documents in a manageable knowledgebase, newest first. */
 export async function listKbDocuments(
   viewer: Viewer,
   kbId: string,
 ): Promise<KbDocumentRow[]> {
-  if (viewer.role !== 'admin') throw new Error('forbidden');
   return getDb()
     .select({
       id: kbDocuments.id,
@@ -1315,10 +1329,20 @@ export async function listKbDocuments(
       ingestedAt: kbDocuments.ingestedAt,
     })
     .from(kbDocuments)
+    .innerJoin(
+      knowledgebases,
+      and(
+        eq(knowledgebases.projectId, kbDocuments.projectId),
+        eq(knowledgebases.id, kbDocuments.kbId),
+      ),
+    )
     .where(
       and(
         eq(kbDocuments.projectId, viewer.projectId),
         eq(kbDocuments.kbId, kbId),
+        viewer.role === 'admin'
+          ? undefined
+          : eq(knowledgebases.ownerUserId, viewer.userId),
       ),
     )
     .orderBy(desc(kbDocuments.createdAt));

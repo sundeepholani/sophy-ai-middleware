@@ -123,7 +123,8 @@ These decisions define the shipped UX:
 | Reassign key ownership or budgets | Yes | No |
 | View all project usage, logs, and evals | Yes | No |
 | View telemetry for their keys | Yes | Yes |
-| Manage project knowledgebases | Yes | No |
+| Manage every project knowledgebase | Yes | No |
+| Create and manage knowledgebases they own | Yes | Yes |
 | Attach a project knowledgebase to an owned key | Yes | Yes |
 
 Platform operations, support tooling, and model-catalog administration should use a separate platform role rather than overloading Project Admin.
@@ -463,7 +464,7 @@ Tenant isolation tests are release blockers. Include cross-project IDs for keys,
 - A user can set any active membership as default.
 - Renaming a project changes no IDs, URLs, keys, memberships, or defaults.
 - Every Sophy key, Gateway credential, owner choice, KB attachment, usage record, log, eval, file, setting, and audit event is tenant-safe.
-- Editors can manage only their own keys and related telemetry; Admins can manage all resources only inside the current project.
+- Editors can manage only their own keys, their own knowledgebases, and related telemetry; Admins can manage all resources only inside the current project.
 - A new project derives `setup_required` from the absence of a current healthy credential and cannot create a Sophy API key or run AI work until a Project Admin connects one.
 - Editors can see generic Gateway health but cannot add, replace, disconnect, decrypt, retrieve, or view Admin-only credential metadata.
 - Two projects with distinct Gateway credentials route Chat Completions, Responses, embeddings, images, KB work, eval work, and structured retries only through the correct project credential.

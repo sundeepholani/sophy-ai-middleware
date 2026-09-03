@@ -1421,10 +1421,15 @@ with open("out.png", "wb") as f:
 
           <Section id="knowledgebases" title="Knowledgebases">
             <P>
-              Project Admins can create project-scoped knowledgebases from PDF, DOCX, Markdown,
-              plain text, CSV, and JSON documents up to 4 MiB each. Sophy extracts, chunks, and
-              embeds sources in the background, then lets keys in that project attach to the same
-              collection.
+              Project Admins can manage every project knowledgebase. Editors can create and manage
+              knowledgebases they own. Both roles can build them from PDF, DOCX, Markdown, plain
+              text, CSV, and JSON documents up to 4 MiB each. Sophy extracts, chunks, and embeds
+              sources in the background.
+            </P>
+            <P>
+              Knowledgebases are shareable inside their project. An Admin can attach one to any
+              project key, while an Editor can attach one only to a key they own. The same
+              collection can ground multiple permitted keys.
             </P>
             <P>
               On Chat or Responses requests with usable user text, Sophy embeds the latest user
@@ -1458,7 +1463,7 @@ with open("out.png", "wb") as f:
                 },
                 {
                   title: 'Sophy keys and knowledge',
-                  body: 'Create, edit, rotate, revoke, bulk-update, assign project-member ownership, and attach project knowledgebases.',
+                  body: 'Create and manage keys and knowledgebases within your role, then attach project knowledgebases to keys you are allowed to manage.',
                 },
                 {
                   title: 'Usage and logs',

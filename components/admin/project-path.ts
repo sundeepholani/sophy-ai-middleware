@@ -1,6 +1,6 @@
 import type { ProjectRole } from '@/components/admin/project-types';
 
-const ADMIN_ONLY_SEGMENTS = new Set(['knowledgebases', 'members', 'settings']);
+const ADMIN_ONLY_SEGMENTS = new Set(['members', 'settings']);
 
 export function projectPath(projectId: string, suffix = ''): string {
   const cleanSuffix = suffix.replace(/^\/+/, '');
