@@ -78,6 +78,7 @@ export interface ProjectGatewaySnapshot {
   readonly source: 'encrypted_api_key' | 'platform_env';
   readonly gateway: GatewayProvider;
   readonly transcriptionGateway: TranscriptionGatewayProvider;
+  readonly evaluator: GatewayEvaluator;
 }
 
 function unavailable(
@@ -97,6 +98,18 @@ function normalizeGatewayApiKey(apiKey: string): string {
   return normalized;
 }
 
+// The gateway's native evaluation endpoint. NOT derivable from the SDK base URL,
+// which defaults to https://ai-gateway.vercel.sh/v1/ai and does not serve this route.
+const GATEWAY_EVALUATE_URL = 'https://ai-gateway.vercel.sh/v1/evaluate';
+
+export interface GatewayEvaluator {
+  /**
+   * POST to the gateway's native /v1/evaluate. Returns the raw Response; the
+   * caller owns status mapping and JSON parsing.
+   */
+  evaluate(body: unknown, signal: AbortSignal): Promise<Response>;
+}
+
 /** Construct the AI 6 provider only after proving the key is present and non-empty. */
 export function createExplicitGateway(apiKey: string): GatewayProvider {
   return createGateway({ apiKey: normalizeGatewayApiKey(apiKey) });
@@ -107,6 +120,33 @@ export function createExplicitTranscriptionGateway(
   apiKey: string,
 ): TranscriptionGatewayProvider {
   return createTranscriptionGateway({ apiKey: normalizeGatewayApiKey(apiKey) });
+}
+
+/**
+ * The one gateway surface with no AI SDK helper at our installed majors:
+ * experimental_evaluate / gateway.evaluationModel() landed in ai@7.0.107 and
+ * @ai-sdk/gateway@4.0.87, while we run ai@6 plus the ai-v7@7.0.41 transcription
+ * bridge. Bumping those to reach it would drag the just-shipped transcription
+ * path through untested SDK drift, so we speak the documented HTTP contract
+ * directly. The closure keeps the plaintext credential inside this module,
+ * exactly like the two provider factories above.
+ */
+export function createExplicitEvaluator(apiKey: string): GatewayEvaluator {
+  // Eager, so a blank key fails inside resolveProjectGateway's try/catch and
+  // surfaces as credential_misconfigured rather than at first call.
+  const bearer = normalizeGatewayApiKey(apiKey);
+  return {
+    evaluate: (body, signal) =>
+      fetch(GATEWAY_EVALUATE_URL, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${bearer}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal,
+      }),
+  };
 }
 
 /**
@@ -228,6 +268,7 @@ export async function resolveProjectGateway(projectId: string): Promise<ProjectG
       source: row.source,
       gateway: createExplicitGateway(apiKey),
       transcriptionGateway: createExplicitTranscriptionGateway(apiKey),
+      evaluator: createExplicitEvaluator(apiKey),
     });
   } catch (cause) {
     if (ProjectGatewayUnavailableError.isInstance(cause)) throw cause;

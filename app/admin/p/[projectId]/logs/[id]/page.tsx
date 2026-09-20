@@ -4,6 +4,7 @@ import { getLogDetail } from '@/lib/admin/queries';
 import { requireProjectViewer } from '@/lib/auth/viewer';
 import { LocalTime } from '@/components/admin/local-time';
 import { projectPath } from '@/components/admin/project-path';
+import { formatUsd } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
@@ -38,7 +39,7 @@ export default async function LogDetailPage({
   // challenger call has no token counts) never leave an orphan separator.
   const meta = [
     event.inputTokens != null ? `${event.inputTokens} in · ${event.outputTokens} out` : null,
-    event.costUsd ? `$${Number(event.costUsd).toFixed(4)}` : null,
+    event.costUsd == null ? null : formatUsd(Number(event.costUsd)),
     event.latencyMs != null ? `${event.latencyMs} ms` : null,
   ]
     .filter(Boolean)

@@ -227,6 +227,47 @@ export interface EmbeddingsResponse {
   usage: { prompt_tokens: number; total_tokens: number };
 }
 
+// ---- Model assessment (POST /v1/evaluate) ----------------------------------
+
+/**
+ * Wire types for the native evaluation surface.
+ *
+ * NOT OpenAI-compatible: the AI Gateway exposes evaluation models through its
+ * own `/v1/evaluate` shape, and no OpenAI client method reaches it. Sophy
+ * mirrors that shape so an existing gateway client only changes its base URL.
+ */
+
+/** A single typed question asked of the shared state. */
+export type AssessmentQuestion =
+  | { type: 'boolean'; instructions: string; criteria?: { true: string; false: string } }
+  | { type: 'choice'; instructions: string; criteria: Record<string, string> }
+  | { type: 'score'; instructions: string; criteria: string[] };
+
+export interface EvaluationRequest {
+  /** Accepted and ignored — the Sophy key owns the model, as on every surface. */
+  model?: string;
+  /** The shared state the questions are asked about: string, object or array. */
+  state?: unknown;
+  questions?: Record<string, AssessmentQuestion>;
+  providerOptions?: Record<string, Record<string, unknown>>;
+}
+
+/** One answer, discriminated by the question type that produced it. */
+export type AssessmentAnswer =
+  | { type: 'boolean'; probability: number }
+  | { type: 'choice'; choice: string; probabilities: Record<string, number> }
+  | { type: 'score'; score: number; probabilities: Record<string, number> };
+
+/**
+ * `providerMetadata` from upstream is deliberately not echoed — it carries
+ * Sophy's own gateway cost and generation id, which are not the client's.
+ */
+export interface EvaluationResponse {
+  model: string;
+  answers: Record<string, AssessmentAnswer>;
+  usage: { inputTokens: number; outputTokens: number; totalTokens: number };
+}
+
 // ---- Audio transcription (POST /v1/audio/transcriptions) ------------------
 
 /**

@@ -1047,6 +1047,10 @@ function KeyForm({
     : models;
   const currentModel = models.find((m) => m.id === model);
   const isTranscriptionModel = currentModel?.type === 'transcription';
+  // An evaluation key (/v1/evaluate) takes only a state and typed questions:
+  // no system prompt, no sampling params, no output schema, no knowledgebase.
+  // Derived from the same lookup, so a catalog outage degrades to the full form.
+  const isAssessmentModel = currentModel?.type === 'evaluation';
   const missingCaps = currentModel
     ? requiredCaps.filter((c) => !currentModel.tags.includes(c))
     : [];
@@ -1147,17 +1151,21 @@ function KeyForm({
     const input: KeyFormInput = {
       name: name.trim(),
       model: model.trim(),
-      systemPrompt: systemPrompt.trim() ? systemPrompt : null,
+      // Hiding a field does not clear it: switching an existing chat key to an
+      // evaluation model must not persist a stale prompt/schema/knowledgebase.
+      // Guarded on currentModel so a catalog outage preserves stored config.
+      systemPrompt:
+        currentModel && isAssessmentModel ? null : systemPrompt.trim() ? systemPrompt : null,
       // Spread the original params so any field we don't surface survives an edit;
       // blank UI fields serialize out of the jsonb as undefined.
       params: keyParams,
-      outputSchema,
+      outputSchema: currentModel && isAssessmentModel ? null : outputSchema,
       monthlyCostCapUsd: costCapV,
       rpmLimit: rpmV,
       logContent,
       // Owner is admin-only; the server forces self-ownership for editors regardless.
       ownerUserId: role === 'admin' ? ownerUserId || null : undefined,
-      knowledgebaseId: knowledgebaseId || null,
+      knowledgebaseId: currentModel && isAssessmentModel ? null : knowledgebaseId || null,
     };
     // A model change invalidates the key's running eval — never stop it without
     // asking. The page-load hint triggers the confirmation here; if the hint is
@@ -1313,7 +1321,7 @@ function KeyForm({
         </div>
       )}
 
-      {knowledgebases.length > 0 && !isTranscriptionModel && (
+      {knowledgebases.length > 0 && !isTranscriptionModel && !isAssessmentModel && (
         <div className="space-y-1">
           <Label htmlFor={`${uid}-kb`} className="text-xs">
             Knowledgebase
@@ -1346,28 +1354,32 @@ function KeyForm({
         </div>
       )}
 
-      <div className="space-y-1">
-        <Label htmlFor={`${uid}-system`} className="text-xs">
-          System prompt
-        </Label>
-        <Textarea
-          id={`${uid}-system`}
-          rows={5}
-          className="text-sm"
-          placeholder={
-            isTranscriptionModel
-              ? 'For example: Summarize the transcript and list action items.'
-              : 'You are a helpful assistant for…'
-          }
-          value={systemPrompt}
-          onChange={(e) => setSystemPrompt(e.target.value)}
-        />
-        {isTranscriptionModel && (
-          <p className="text-xs text-muted-foreground">
-            Applied after speech-to-text by the transcript processor selected above.
-          </p>
-        )}
-      </div>
+      {!isAssessmentModel && (
+        <>
+          <div className="space-y-1">
+            <Label htmlFor={`${uid}-system`} className="text-xs">
+              System prompt
+            </Label>
+            <Textarea
+              id={`${uid}-system`}
+              rows={5}
+              className="text-sm"
+              placeholder={
+                isTranscriptionModel
+                  ? 'For example: Summarize the transcript and list action items.'
+                  : 'You are a helpful assistant for…'
+              }
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+            />
+            {isTranscriptionModel && (
+              <p className="text-xs text-muted-foreground">
+                Applied after speech-to-text by the transcript processor selected above.
+              </p>
+            )}
+          </div>
+        </>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2">
         {/* Monthly spend budget is admin-controlled; editors never see or set it. */}
@@ -1403,114 +1415,120 @@ function KeyForm({
             Log message content
           </Label>
           <p className="text-xs text-muted-foreground">
-            {isTranscriptionModel
-              ? 'Store the filename, language hint, raw transcript, and final text for 30 days. Audio bytes are never stored.'
-              : 'Store text and model replies for 30 days. Complete image input values are discarded after 7 days; the log keeps a placeholder.'}
+            {isAssessmentModel
+              ? 'Store the evaluated state, the questions, and the returned answers for 30 days.'
+              : isTranscriptionModel
+                ? 'Store the filename, language hint, raw transcript, and final text for 30 days. Audio bytes are never stored.'
+                : 'Store text and model replies for 30 days. Complete image input values are discarded after 7 days; the log keeps a placeholder.'}
           </p>
         </div>
         <Switch id={`${uid}-log`} checked={logContent} onCheckedChange={setLogContent} />
       </div>
 
-      <button
-        type="button"
-        className="text-xs text-muted-foreground underline"
-        onClick={() => setShowAdvanced((s) => !s)}
-      >
-        {showAdvanced
-          ? 'Hide advanced'
-          : isTranscriptionModel
-            ? 'Advanced (processor parameters)'
-            : 'Advanced (params, structured output)'}
-      </button>
+      {!isAssessmentModel && (
+        <>
+          <button
+            type="button"
+            className="text-xs text-muted-foreground underline"
+            onClick={() => setShowAdvanced((s) => !s)}
+          >
+            {showAdvanced
+              ? 'Hide advanced'
+              : isTranscriptionModel
+                ? 'Advanced (processor parameters)'
+                : 'Advanced (params, structured output)'}
+          </button>
 
-      {showAdvanced && (
-        <div className="space-y-4 rounded-md border p-3">
-          {isTranscriptionModel && (
-            <p className="text-xs text-muted-foreground">
-              These generation settings apply only to the transcript processor. Agent mode,
-              output schemas, and knowledgebases are not used by the audio transcription endpoint.
-            </p>
-          )}
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-1">
-              <Label htmlFor={`${uid}-temp`} className="text-xs">
-                Temperature
-              </Label>
-              <Input
-                id={`${uid}-temp`}
-                inputMode="decimal"
-                value={temperature}
-                onChange={(e) => setTemperature(e.target.value)}
-                placeholder="0.7"
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor={`${uid}-maxtokens`} className="text-xs">
-                Max output tokens
-              </Label>
-              <Input
-                id={`${uid}-maxtokens`}
-                inputMode="numeric"
-                value={maxTokens}
-                onChange={(e) => setMaxTokens(e.target.value)}
-                placeholder="1024"
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor={`${uid}-topp`} className="text-xs">
-                Top P
-              </Label>
-              <Input
-                id={`${uid}-topp`}
-                inputMode="decimal"
-                value={topP}
-                onChange={(e) => setTopP(e.target.value)}
-                placeholder="1"
-              />
-            </div>
-          </div>
-          {!isTranscriptionModel && (
-            <div className="flex items-center justify-between gap-4 rounded-md border p-3">
-              <div>
-                <Label htmlFor={`${uid}-agent`} className="text-sm">
-                  Agent mode — honor the client&apos;s prompt
-                </Label>
+          {showAdvanced && (
+            <div className="space-y-4 rounded-md border p-3">
+              {isTranscriptionModel && (
                 <p className="text-xs text-muted-foreground">
-                  Appends the client&apos;s own system prompt (leading system/developer messages,
-                  or <code>instructions</code>) after this key&apos;s prompt — for server-side
-                  agentic SDK flows whose instructions change per request. Client prompts run at
-                  operator level: enable only for keys used by server-side apps that build the
-                  message array themselves and never forward end-user-authored system messages.
+                  These generation settings apply only to the transcript processor. Agent mode,
+                  output schemas, and knowledgebases are not used by the audio transcription endpoint.
                 </p>
+              )}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1">
+                  <Label htmlFor={`${uid}-temp`} className="text-xs">
+                    Temperature
+                  </Label>
+                  <Input
+                    id={`${uid}-temp`}
+                    inputMode="decimal"
+                    value={temperature}
+                    onChange={(e) => setTemperature(e.target.value)}
+                    placeholder="0.7"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor={`${uid}-maxtokens`} className="text-xs">
+                    Max output tokens
+                  </Label>
+                  <Input
+                    id={`${uid}-maxtokens`}
+                    inputMode="numeric"
+                    value={maxTokens}
+                    onChange={(e) => setMaxTokens(e.target.value)}
+                    placeholder="1024"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor={`${uid}-topp`} className="text-xs">
+                    Top P
+                  </Label>
+                  <Input
+                    id={`${uid}-topp`}
+                    inputMode="decimal"
+                    value={topP}
+                    onChange={(e) => setTopP(e.target.value)}
+                    placeholder="1"
+                  />
+                </div>
               </div>
-              <Switch
-                id={`${uid}-agent`}
-                checked={allowClientPrompt}
-                onCheckedChange={setAllowClientPrompt}
-              />
+              {!isTranscriptionModel && (
+                <div className="flex items-center justify-between gap-4 rounded-md border p-3">
+                  <div>
+                    <Label htmlFor={`${uid}-agent`} className="text-sm">
+                      Agent mode — honor the client&apos;s prompt
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      Appends the client&apos;s own system prompt (leading system/developer messages,
+                      or <code>instructions</code>) after this key&apos;s prompt — for server-side
+                      agentic SDK flows whose instructions change per request. Client prompts run at
+                      operator level: enable only for keys used by server-side apps that build the
+                      message array themselves and never forward end-user-authored system messages.
+                    </p>
+                  </div>
+                  <Switch
+                    id={`${uid}-agent`}
+                    checked={allowClientPrompt}
+                    onCheckedChange={setAllowClientPrompt}
+                  />
+                </div>
+              )}
+              {!isTranscriptionModel && (
+                <div className="space-y-1">
+                  <Label htmlFor={`${uid}-schema`} className="text-xs">
+                    Output JSON schema (blank = plain text)
+                  </Label>
+                  <Textarea
+                    id={`${uid}-schema`}
+                    className="font-mono text-xs"
+                    rows={6}
+                    placeholder='{ "type": "object", "properties": { ... }, "required": [...] }'
+                    value={schemaText}
+                    onChange={(e) => setSchemaText(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Normalized on save to work on any model: optional fields become nullable and required,
+                    and an OpenAI <code>{'{ name, schema, strict }'}</code> wrapper is unwrapped. Reopen the
+                    key to see the stored form.
+                  </p>
+                </div>
+              )}
             </div>
           )}
-          {!isTranscriptionModel && (
-            <div className="space-y-1">
-              <Label htmlFor={`${uid}-schema`} className="text-xs">
-                Output JSON schema (blank = plain text)
-              </Label>
-              <Textarea
-                id={`${uid}-schema`}
-                className="font-mono text-xs"
-                rows={6}
-                placeholder='{ "type": "object", "properties": { ... }, "required": [...] }'
-                value={schemaText}
-                onChange={(e) => setSchemaText(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground">
-                Normalized on save to work on any model: optional fields become nullable and required,
-                and an OpenAI <code>{'{ name, schema, strict }'}</code> wrapper is unwrapped. Reopen the
-                key to see the stored form.
-              </p>
-            </div>
-          )}
-        </div>
+        </>
       )}
 
       <div className="flex justify-end gap-2 pt-2">

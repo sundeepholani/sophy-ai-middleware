@@ -28,7 +28,7 @@ import { cn } from '@/lib/utils';
 export const metadata: Metadata = {
   title: 'Sophy — one governed API for your AI stack',
   description:
-    'Sophy is a multi-project, OpenAI-compatible AI gateway for language, transcription, image, and embedding models, with project-owned Gateway credentials, governed keys, knowledgebases, evaluations, analytics, and cost controls.',
+    'Sophy is a multi-project, OpenAI-compatible AI gateway for language, transcription, image, and embedding models, plus a native route for evaluation models, with project-owned Gateway credentials, governed keys, knowledgebases, evaluations, analytics, and cost controls.',
 };
 
 const HERO_SAMPLES = [
@@ -102,6 +102,7 @@ const SURFACES = [
   { method: 'POST', path: '/responses', label: 'Responses + tools' },
   { method: 'POST', path: '/audio/transcriptions', label: 'Raw or policy-processed text' },
   { method: 'POST', path: '/embeddings', label: 'Float or base64 vectors' },
+  { method: 'POST', path: '/evaluate', label: 'Scored model judgements' },
   { method: 'POST', path: '/images/generations', label: 'Inline image output' },
   { method: 'POST', path: '/files', label: 'Key-scoped uploads' },
   { method: 'GET', path: '/models', label: 'The key’s bound model' },
@@ -111,7 +112,7 @@ const FEATURES: { icon: typeof Plug; title: string; body: string }[] = [
   {
     icon: Plug,
     title: 'A familiar API surface',
-    body: 'Use supported OpenAI SDK methods for Chat Completions, Responses, audio transcription, embeddings, image generation, models, and files.',
+    body: 'Use supported OpenAI SDK methods for Chat Completions, Responses, audio transcription, embeddings, image generation, models, and files, plus a native route for evaluation models.',
   },
   {
     icon: KeyRound,
@@ -136,7 +137,7 @@ const FEATURES: { icon: typeof Plug; title: string; body: string }[] = [
   {
     icon: Boxes,
     title: 'A searchable model catalog',
-    body: 'Compare supported language, transcription, image, and embedding models by provider, capability, context window, and estimated pricing.',
+    body: 'Compare supported language, transcription, image, embedding, and evaluation models by provider, capability, context window, and estimated pricing.',
   },
   {
     icon: Gauge,
@@ -259,7 +260,8 @@ export default function HomePage() {
         <div className="mx-auto grid w-full max-w-7xl items-center gap-12 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:gap-10 lg:px-8 lg:py-28">
           <div className="space-y-6">
             <Badge variant="secondary" className="rounded-full px-3 py-1 text-xs">
-              Multi-project · OpenAI-compatible · Language, audio, image, and embeddings
+              Multi-project · OpenAI-compatible · Language, audio, image, embedding, and
+              evaluation models
             </Badge>
             <h1 className="font-heading text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-6xl">
               One governed API for your AI stack.
@@ -296,7 +298,7 @@ export default function HomePage() {
         <div className="mx-auto w-full max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <p className="text-sm font-medium text-primary">Seven supported API routes</p>
+              <p className="text-sm font-medium text-primary">Eight supported API routes</p>
               <h2 id="surfaces-title" className="font-heading mt-1 text-2xl font-semibold tracking-tight">
                 One base URL, purpose-built surfaces
               </h2>

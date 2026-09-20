@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { TableSearchBox, useTableFilter } from '@/components/admin/table-search';
 import { projectPath } from '@/components/admin/project-path';
+import { formatUsd } from '@/lib/utils';
 import {
   Table,
   TableBody,
@@ -89,7 +90,7 @@ export function LogsTable({ projectId, logs }: { projectId: string; logs: LogLis
                 <TableCell className="text-right tabular-nums">{l.inputTokens ?? '—'}</TableCell>
                 <TableCell className="text-right tabular-nums">{l.outputTokens ?? '—'}</TableCell>
                 <TableCell className="text-right tabular-nums">
-                  {l.costUsd ? `$${Number(l.costUsd).toFixed(4)}` : '—'}
+                  {formatUsd(l.costUsd == null ? null : Number(l.costUsd))}
                 </TableCell>
                 <TableCell>
                   {l.responseKind ?? '—'}

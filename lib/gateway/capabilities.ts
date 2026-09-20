@@ -31,6 +31,11 @@ export const MODEL_CAPABILITIES = [
   { tag: 'tool-use', label: 'Tool use', hint: 'Function / tool calling' },
   { tag: 'reasoning', label: 'Reasoning', hint: 'Extended step-by-step reasoning' },
   { tag: 'web-search', label: 'Web search', hint: 'Built-in web search' },
+  {
+    tag: 'evaluation',
+    label: 'Evaluation',
+    hint: 'Answers structured questions about a state',
+  },
 ] as const;
 
 /** Friendly label for any tag (falls back to the raw tag, title-cased-ish). */

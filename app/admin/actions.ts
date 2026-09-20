@@ -33,7 +33,11 @@ import { schemaCompileError } from '@/lib/gateway/openai-map';
 import { getSettings } from '@/lib/admin/settings';
 import { transcriptProcessorSelectionError } from '@/lib/admin/keys';
 import { getKeyEvals, type KeyEval } from '@/lib/admin/queries';
-import { listAllModels, modelSupportsBatchTranscription } from '@/lib/gateway/models';
+import {
+  isKeyBindableType,
+  listAllModels,
+  modelSupportsBatchTranscription,
+} from '@/lib/gateway/models';
 import { getProjectGatewaySummary } from '@/lib/projects/repository';
 
 /** The drizzle client, or a transaction executor — both expose the same query API. */
@@ -229,12 +233,14 @@ function validateKeyInput(input: KeyFormInput): void {
 }
 
 /**
- * Enforce the cross-model transcription rule against the current public
- * catalog. A temporary catalog outage preserves Sophy's existing custom/stale
+ * Enforce the served-surface allowlist and the cross-model transcription rule
+ * against the current public catalog, so the client-side model picker is not
+ * the only gate on what a key may be bound to. A temporary catalog outage (or
+ * an id the catalog does not know) preserves Sophy's existing custom/stale
  * model behavior; the runtime route independently fails closed before a paid
  * call if required processor configuration is absent.
  */
-async function validateTranscriptProcessorInput(input: KeyFormInput): Promise<void> {
+async function validateKeyModelInput(input: KeyFormInput): Promise<void> {
   let models;
   try {
     models = await listAllModels();
@@ -242,6 +248,9 @@ async function validateTranscriptProcessorInput(input: KeyFormInput): Promise<vo
     return;
   }
   const primaryModel = models.find((model) => model.id === input.model.trim());
+  if (primaryModel && !isKeyBindableType(primaryModel.type)) {
+    throw new Error('This model type cannot be served by a Sophy key');
+  }
   if (primaryModel?.type === 'transcription' && !modelSupportsBatchTranscription(primaryModel)) {
     throw new Error('Choose a batch transcription model for uploaded audio');
   }
@@ -278,7 +287,7 @@ export async function createKey(
   const gateway = await getProjectGatewaySummary(input.projectId);
   if (!gateway.isReady) throw new Error('gateway_not_ready');
   validateKeyInput(input);
-  await validateTranscriptProcessorInput(input);
+  await validateKeyModelInput(input);
   // Editors always own what they create; admins choose (defaults to unassigned).
   const ownerUserId =
     viewer.role === 'editor'
@@ -345,7 +354,7 @@ export async function updateKey(
   const { viewer, ownerUserId: currentOwner, model: currentModel } =
     await assertCanManageKey(input.projectId, input.id);
   validateKeyInput(input);
-  await validateTranscriptProcessorInput(input);
+  await validateKeyModelInput(input);
 
   // Only admins may reassign ownership; editors' owner is left untouched.
   let newOwner = currentOwner;
@@ -734,6 +743,9 @@ export async function bulkUpdateKeyModel(input: {
     // Preserve the existing custom/stale-model behavior during catalog outages.
   }
   const targetModel = catalogModels.find((candidate) => candidate.id === model);
+  if (targetModel && !isKeyBindableType(targetModel.type)) {
+    throw new Error('This model type cannot be served by a Sophy key');
+  }
   if (targetModel?.type === 'transcription' && !modelSupportsBatchTranscription(targetModel)) {
     throw new Error('Choose a batch transcription model for uploaded audio');
   }

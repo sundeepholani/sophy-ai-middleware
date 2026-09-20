@@ -17,6 +17,7 @@ const COLUMNS: { title: string; links: { label: string; href: string }[] }[] = [
       { label: 'Quickstart', href: '/docs#quickstart' },
       { label: 'Audio transcription', href: '/docs#audio-transcriptions' },
       { label: 'Embeddings', href: '/docs#embeddings' },
+      { label: 'Evaluate API', href: '/docs#evaluate' },
     ],
   },
   {
@@ -36,8 +37,8 @@ export function SiteFooter() {
             <BrandMark href="/" />
             <p className="text-sm text-muted-foreground">
               A governed, OpenAI-compatible gateway for language, transcription, image, and
-              embedding workloads. Each key pins its primary model and carries its policy
-              server-side.
+              embedding workloads, plus a native route for evaluation models. Each key pins its
+              primary model and carries its policy server-side.
             </p>
           </div>
           <div className="grid grid-cols-2 gap-8 sm:grid-cols-3 sm:gap-12">

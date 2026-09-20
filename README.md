@@ -10,8 +10,10 @@ configuration without changing or redeploying the client.
 
 Sophy exposes a practical OpenAI-compatible surface for Chat Completions,
 Responses, audio transcription, embeddings, image generation, model discovery,
-and temporary file uploads. Outbound calls use Vercel AI Gateway; Sophy owns
-client keys, policy, usage accounting, evaluations, and the admin console.
+and temporary file uploads, plus a native `POST /v1/evaluate` route for
+evaluation models, which no OpenAI client method can reach. Outbound calls use
+Vercel AI Gateway; Sophy owns client keys, policy, usage accounting,
+evaluations, and the admin console.
 
 > Migrating an application? Give its developers
 > [AI API Migration.md](AI%20API%20Migration.md).
@@ -43,9 +45,10 @@ client (OpenAI SDK, baseURL=<sophy>/v1, apiKey=mw_live_...)
   Responses. Sophy returns model tool calls but never executes them; the client
   runs each tool and sends its result in the next request.
 - **One key selects one primary model.** Bind separate keys to language,
-  transcription, image, or embedding models as needed. A transcription key can
-  optionally select a language model only for post-processing. `GET /v1/models`
-  returns the primary model configured for the presented key.
+  transcription, image, embedding, or evaluation models as needed. A
+  transcription key can optionally select a language model only for
+  post-processing. `GET /v1/models` returns the primary model configured for the
+  presented key.
 - **Configuration is live.** Edits and revocation are read from Postgres on each
   request, so they apply immediately without a config cache.
 
@@ -57,6 +60,7 @@ client (OpenAI SDK, baseURL=<sophy>/v1, apiKey=mw_live_...)
 | `POST /v1/responses` | Buffered or streaming text, multimodal input, function tools, tool-result turns, and key-configured structured output. It is stateless: `previous_response_id` is rejected, so send the full input each time. |
 | `POST /v1/audio/transcriptions` | Multipart audio transcription for MP3/MPEG/MPGA, MP4/M4A, WAV, WebM, FLAC, or OGG files up to 4 MiB. Returns raw text when no processing policy is set, or only the policy-processed text when the key has a system prompt plus a language processor model. |
 | `POST /v1/embeddings` | A string or up to 2,048 strings; `float` and `base64` encodings. Token-array inputs are not supported. `dimensions` is supported only for `openai/*` embedding models. |
+| `POST /v1/evaluate` | Native, not OpenAI-compatible: no OpenAI client method reaches evaluation models. Send a `state` (string, object, or array) plus 1-32 named `boolean`, `choice`, or `score` questions and receive one typed answer each with token usage. `state` is capped at 200,000 serialized characters; the call is buffered, never streamed. |
 | `POST /v1/images/generations` | Uses the key's image model and returns `b64_json` only. Supports 1-10 images and validates `WIDTHxHEIGHT` size strings; provider-specific options still depend on the selected model. Generated images are not stored by Sophy. |
 | `POST /v1/files` | Multipart `file` upload, at most 4 MiB (4,194,304 bytes). Allowed types: PDF, PNG, JPEG, WebP, GIF, plain text, CSV, and JSON. Uploads become eligible for cleanup after 24 hours. |
 | `GET /v1/models` | Returns the model configured on the authenticated key, not the full operator catalog. |
@@ -108,7 +112,8 @@ and evaluations.
 - **Logs** — recent client requests plus transcript-processor, evaluation, and
   knowledgebase component calls, with model, tokens, cost, kind, streaming
   status, and errors. Per-key content logging captures Chat and Responses
-  messages/replies, embedding inputs, and transcription text for 30 days.
+  messages/replies, embedding inputs, transcription text, and evaluation
+  state/questions/answers for 30 days.
   Complete Chat/Responses image input values use a shorter seven-day window and
   are then replaced by placeholders; inline data URLs include their bytes, while
   an external URL remains only a reference to externally owned content.
@@ -206,7 +211,7 @@ const response = await client.chat.completions.create({
 
 See [AI API Migration.md](AI%20API%20Migration.md) for tools, agent mode,
 multimodal input, files, audio transcription, embeddings, image generation,
-limits, and error handling.
+evaluation models, limits, and error handling.
 
 ## Verify end to end
 
@@ -215,8 +220,8 @@ limits, and error handling.
 3. Test buffered and streaming Chat/Responses calls.
 4. Pass function tools, execute the returned calls client-side, and send results.
 5. If a schema is configured, verify a non-streaming reply is valid JSON.
-6. Exercise audio transcription, embeddings, or image generation with a matching
-   key.
+6. Exercise audio transcription, embeddings, image generation, or `/v1/evaluate`
+   with a matching key.
 7. For a transcription key, verify a blank system prompt returns the raw
    transcript unchanged, then configure a system prompt and language processor
    model and verify the client receives only the processed `text`.

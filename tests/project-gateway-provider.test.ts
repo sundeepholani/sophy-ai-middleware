@@ -5,6 +5,7 @@ import { transcribe } from 'ai-v7';
 import { GatewayInvalidRequestError as TranscriptionGatewayInvalidRequestError } from 'ai-gateway-v4';
 import {
   createExplicitGateway,
+  createExplicitEvaluator,
   createExplicitTranscriptionGateway,
   projectCredentialFailure,
   projectGatewayUnavailableResponse,
@@ -100,6 +101,7 @@ describe('project gateway provider invariants', () => {
       source: 'encrypted_api_key' as const,
       gateway,
       transcriptionGateway: createExplicitTranscriptionGateway('explicit-test-key'),
+      evaluator: createExplicitEvaluator('explicit-test-key'),
     });
     const ctx: CallContext = {
       gateway: snapshot,

@@ -5,7 +5,7 @@ import { CodeTabs, CodeBlock } from '@/components/marketing/code-tabs';
 export const metadata: Metadata = {
   title: 'Docs — Sophy',
   description:
-    'Sophy documentation for its multi-project console, project-owned Vercel Gateway credentials, Chat Completions, Responses, audio transcription, embeddings, images, tools, files, key policy, knowledgebases, evaluations, errors, and limits.',
+    'Sophy documentation for its multi-project console, project-owned Vercel Gateway credentials, Chat Completions, Responses, audio transcription, embeddings, images, evaluation models, tools, files, key policy, knowledgebases, model evaluations, errors, and limits.',
 };
 
 const BASE_URL = 'https://sophy.in/v1';
@@ -35,6 +35,7 @@ const NAV_GROUPS = [
     items: [
       { id: 'audio-transcriptions', label: 'Audio transcription' },
       { id: 'embeddings', label: 'Embeddings' },
+      { id: 'evaluate', label: 'Evaluation models' },
       { id: 'images', label: 'Image generation' },
       { id: 'files', label: 'Files' },
       { id: 'models', label: 'Models' },
@@ -295,6 +296,78 @@ const ERROR_ROWS: { status: string; type: string; code: string; when: string }[]
   {
     status: '400',
     type: 'invalid_request_error',
+    code: 'model_not_evaluation',
+    when: 'Evaluation was requested with a known non-evaluation key model.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'missing_state',
+    when: '`/evaluate` was called without a `state` to judge.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'state_too_large',
+    when: 'The evaluated `state` exceeds 200,000 characters once serialized.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'missing_questions',
+    when: '`/evaluate` was called without a `questions` object.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'invalid_questions',
+    when: 'Evaluate `questions` was sent as something other than an object.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'questions_empty',
+    when: 'Evaluate `questions` contained no entries.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'too_many_questions',
+    when: 'Evaluate `questions` contained more than 32 entries.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'invalid_question',
+    when: 'An entry in evaluate `questions` is not an object.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'missing_instructions',
+    when: 'An evaluate question has no non-empty `instructions` string.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'unsupported_question_type',
+    when: 'An evaluate question `type` is not `boolean`, `choice`, or `score`.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'invalid_criteria',
+    when: 'An evaluate question’s `criteria` does not match the shape its type requires.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'unsupported_provider_options',
+    when: 'Evaluate `providerOptions` is not an object, or addresses a namespace other than the key model’s provider.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
     code: 'unsupported_file_type',
     when: 'The uploaded file content type is outside the allowlist.',
   },
@@ -484,8 +557,9 @@ export default function DocsPage() {
               Compatibility is intentionally scoped. Chat Completions and Responses cover text,
               streaming, multimodal input, and function-tool loops. Dedicated routes cover
               audio transcription, embeddings, image generation, short-lived file uploads, and the
-              primary model bound to a key. The sections below call out differences from the full
-              OpenAI platform.
+              primary model bound to a key. Evaluation models are reached through a native Sophy
+              route rather than an OpenAI client method. The sections below call out differences
+              from the full OpenAI platform.
             </P>
             <Method method="BASE URL" path={BASE_URL} />
           </Section>
@@ -516,6 +590,7 @@ export default function DocsPage() {
                     ['POST', '/responses', 'Language generation', 'Stateless; full input required on every call'],
                     ['POST', '/audio/transcriptions', 'Transcription', 'Multipart audio; JSON with raw or policy-processed text'],
                     ['POST', '/embeddings', 'Embedding', 'String input; float or base64 vectors'],
+                    ['POST', '/evaluate', 'Evaluation', 'Native route; no OpenAI client method reaches it'],
                     ['POST', '/images/generations', 'Image generation', 'Base64 image output only'],
                     ['POST', '/files', 'Any', '201 response; 4 MiB; cleanup-eligible after 24 hours'],
                     ['GET', '/models', 'Any', 'Returns only the primary model bound to this key'],
@@ -1171,6 +1246,178 @@ print(resp.data[0].embedding)`,
             />
           </Section>
 
+          <Section id="evaluate" title="Evaluation models">
+            <Method method="POST" path={`${BASE_URL}/evaluate`} />
+            <P>
+              Evaluation models are not exposed through the OpenAI-compatible client methods, so
+              call this native Sophy route directly with an HTTP client. Bind the key to an
+              evaluation model, send the <Code>state</Code> to judge together with a named set of
+              typed questions, and Sophy returns one answer per question plus token usage.
+            </P>
+            <P>
+              Questions are judged against the same shared state, so keep each one self-contained.
+              The call is a single buffered round trip; there is no streaming.
+            </P>
+            <FieldTable
+              caption="Evaluate request fields"
+              rows={[
+                {
+                  name: 'state',
+                  type: 'string | object | array',
+                  note: 'Required. The shared material every question is asked about. At most 200,000 characters once serialized as JSON.',
+                },
+                {
+                  name: 'questions',
+                  type: 'object',
+                  note: 'Required. Maps your own question names to question objects, 1–32 entries. Every question needs a non-empty instructions string and a type of boolean, choice, or score.',
+                },
+                {
+                  name: 'providerOptions',
+                  type: 'object',
+                  note: 'Optional provider-specific knobs, namespaced by provider. Only the namespace matching the key model’s provider is accepted.',
+                },
+                {
+                  name: 'model',
+                  type: 'string',
+                  note: 'Ignored. The evaluation model bound to the key wins and is echoed in the response.',
+                },
+              ]}
+            />
+            <h3 className="font-heading pt-2 text-lg font-medium">Question types and answers</h3>
+            <FieldTable
+              caption="Evaluate answer shapes"
+              rows={[
+                {
+                  name: 'boolean',
+                  type: 'probability',
+                  note: 'criteria is optional; when present it must supply string true and false descriptions. Answers as { "type": "boolean", "probability" }.',
+                },
+                {
+                  name: 'choice',
+                  type: 'choice, probabilities',
+                  note: 'criteria is an object mapping at least two option names to descriptions. Answers as { "type": "choice", "choice", "probabilities" }, one probability per option.',
+                },
+                {
+                  name: 'score',
+                  type: 'score, probabilities',
+                  note: 'criteria is an array of at least two string labels ordered lowest to highest. Answers as { "type": "score", "score", "probabilities" }.',
+                },
+              ]}
+            />
+            <P>
+              Requests are validated before any paid call. Missing or oversized state returns{' '}
+              <Code>400 missing_state</Code> or <Code>400 state_too_large</Code>; a bad question
+              set returns <Code>400 missing_questions</Code>, <Code>400 invalid_questions</Code>,{' '}
+              <Code>400 questions_empty</Code>, <Code>400 too_many_questions</Code>,{' '}
+              <Code>400 invalid_question</Code>, <Code>400 missing_instructions</Code>,{' '}
+              <Code>400 unsupported_question_type</Code>, or <Code>400 invalid_criteria</Code>.
+              Out-of-namespace knobs return <Code>400 unsupported_provider_options</Code>, and a
+              key whose model is known to be something other than an evaluation model returns{' '}
+              <Code>400 model_not_evaluation</Code>.
+            </P>
+            <CodeTabs
+              samples={[
+                {
+                  label: 'python',
+                  code: `import httpx
+
+resp = httpx.post(
+    "${BASE_URL}/evaluate",
+    headers={"Authorization": "Bearer mw_live_…"},
+    json={
+        "state": {
+            "question": "How do I reset my password?",
+            "answer": "Open Settings and use the reset link we email you.",
+        },
+        "questions": {
+            "grounded": {
+                "type": "boolean",
+                "instructions": "Is the answer supported by the question?",
+            },
+            "tone": {
+                "type": "choice",
+                "instructions": "Classify the tone of the answer.",
+                "criteria": {
+                    "formal": "Professional and impersonal.",
+                    "casual": "Friendly and conversational.",
+                },
+            },
+            "helpfulness": {
+                "type": "score",
+                "instructions": "Rate how helpful the answer is.",
+                "criteria": ["useless", "partial", "complete"],
+            },
+        },
+    },
+    timeout=120,
+)
+print(resp.json()["answers"])`,
+                },
+                {
+                  label: 'curl',
+                  code: `curl ${BASE_URL}/evaluate \\
+  -H "Authorization: Bearer mw_live_…" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "state": "Q: How do I reset my password? A: Open Settings and use the reset link.",
+    "questions": {
+      "grounded": {
+        "type": "boolean",
+        "instructions": "Is the answer supported by the question?"
+      },
+      "tone": {
+        "type": "choice",
+        "instructions": "Classify the tone of the answer.",
+        "criteria": {
+          "formal": "Professional and impersonal.",
+          "casual": "Friendly and conversational."
+        }
+      },
+      "helpfulness": {
+        "type": "score",
+        "instructions": "Rate how helpful the answer is.",
+        "criteria": ["useless", "partial", "complete"]
+      }
+    }
+  }'`,
+                },
+              ]}
+            />
+            <CodeBlock
+              label="json"
+              code={`{
+  "model": "typesafe-ai/jev",
+  "answers": {
+    "grounded": { "type": "boolean", "probability": 0.93 },
+    "tone": {
+      "type": "choice",
+      "choice": "casual",
+      "probabilities": { "formal": 0.18, "casual": 0.82 }
+    },
+    "helpfulness": {
+      "type": "score",
+      "score": 2,
+      "probabilities": { "useless": 0.04, "partial": 0.21, "complete": 0.75 }
+    }
+  },
+  "usage": { "inputTokens": 412, "outputTokens": 36, "totalTokens": 448 }
+}`}
+            />
+            <P>
+              One evaluate call consumes one RPM slot and is checked against the key’s monthly cost
+              cap before the paid model call. When content logging is enabled on the key, Sophy
+              stores the evaluated state, the questions, and the returned answers.
+            </P>
+            <Note title="Compatibility boundary">
+              <p>
+                This is a native Sophy route, not an OpenAI-compatible one: no OpenAI SDK method
+                reaches evaluation models, so send plain HTTP. The client-sent <Code>model</Code>{' '}
+                is accepted and ignored — the evaluation model bound to the key wins. Responses are
+                buffered only, and upstream <Code>providerMetadata</Code> is not echoed back.
+              </p>
+            </Note>
+          </Section>
+
           <Section id="images" title="Image generation">
             <Method method="POST" path={`${BASE_URL}/images/generations`} />
             <P>
@@ -1480,7 +1727,7 @@ with open("out.png", "wb") as f:
                 </div>
               ))}
             </div>
-            <Note title="Evaluation behavior and privacy">
+            <Note title="Champion/challenger run behavior and privacy">
               <p>
                 Evals observe eligible successful text requests only; requests containing
                 media/file content or supplying tools are skipped. While a run is active,
@@ -1566,9 +1813,9 @@ with open("out.png", "wb") as f:
 
           <Section id="rate-limits" title="Rate limits and monthly quota">
             <P>
-              Chat, Responses, audio transcription, embeddings, and image generation enforce the
-              key’s optional requests-per-minute limit and monthly cost cap before the paid model
-              call. <Code>/files</Code> and <Code>/models</Code> do not consume those request
+              Chat, Responses, audio transcription, embeddings, image generation, and model
+              evaluation enforce the key’s optional requests-per-minute limit and monthly cost
+              cap before the paid model call. <Code>/files</Code> and <Code>/models</Code> do not consume those request
               counters.
             </P>
             <ul className="list-disc space-y-2 pl-5 text-[15px] leading-relaxed text-muted-foreground">
@@ -1582,8 +1829,8 @@ with open("out.png", "wb") as f:
                 <Code>402 quota_exceeded</Code>.
               </li>
               <li>
-                Evaluation and knowledgebase spend is recorded under separate sources for
-                visibility and does not consume a key’s proxy-traffic cap.
+                Champion-versus-challenger evaluation and knowledgebase spend is recorded under
+                separate sources for visibility and does not consume a key’s proxy-traffic cap.
               </li>
             </ul>
             <P>

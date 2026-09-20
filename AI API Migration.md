@@ -10,7 +10,9 @@ speech-to-text.
 
 Sophy provides an OpenAI-compatible subset for Chat Completions, Responses,
 audio transcription, embeddings, image generation, model discovery, and
-temporary file uploads.
+temporary file uploads. Evaluation models are served by a native
+`POST /v1/evaluate` route instead, because no OpenAI client method reaches
+them.
 
 ## TL;DR
 
@@ -20,6 +22,7 @@ temporary file uploads.
 | OpenAI SDK: Responses | Change `base_url` and `api_key`; keep using `responses.create`, but send full history because Sophy is stateless. |
 | OpenAI SDK: audio transcription | Change `base_url` and `api_key`; keep using `audio.transcriptions.create` with a Sophy key bound to a transcription model. |
 | OpenAI SDK: embeddings or images | Change `base_url` and `api_key`; use a Sophy key bound to the matching model type. |
+| Vercel AI Gateway: evaluation | Change the base URL to `https://sophy.in/v1` and the bearer token to your Sophy key; `POST /v1/evaluate` keeps the same body. There is no OpenAI SDK method for it. |
 | Anthropic/Claude SDK | Switch to the OpenAI SDK pointed at Sophy. The key can still select a Claude model. |
 
 - **Base URL:** `https://sophy.in/v1`
@@ -36,8 +39,9 @@ Ask the operator for a key suited to your endpoint:
 
 - a language model for `/chat/completions` or `/responses`,
 - a transcription model for `/audio/transcriptions`,
-- an embedding model for `/embeddings`, or
-- an image model for `/images/generations`.
+- an embedding model for `/embeddings`,
+- an image model for `/images/generations`, or
+- an evaluation model for `/evaluate`.
 
 The operator can also configure a system prompt, temperature, top-p, maximum
 output tokens, structured-output schema, knowledgebase, RPM limit, monthly USD
@@ -329,7 +333,127 @@ curl https://sophy.in/v1/audio/transcriptions \
   -F "response_format=json"
 ```
 
-## 9. Structured output
+## 9. Evaluation models
+
+Evaluation models are **not** reachable through the OpenAI SDK. Vercel documents
+them as unavailable on the OpenAI-, Anthropic- and Cohere-compatible endpoints,
+so Sophy mirrors the AI Gateway's own `POST /v1/evaluate` shape. Use a plain HTTP
+client and a key bound to an evaluation model:
+
+```bash
+curl https://sophy.in/v1/evaluate \
+  -H "Authorization: Bearer $SOPHY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "state": "Q: How do I reset my password? A: Open Settings and use the reset link.",
+    "questions": {
+      "grounded": {
+        "type": "boolean",
+        "instructions": "Is the answer supported by the question?"
+      },
+      "tone": {
+        "type": "choice",
+        "instructions": "Classify the tone of the answer.",
+        "criteria": {
+          "formal": "Professional and impersonal.",
+          "casual": "Friendly and conversational."
+        }
+      },
+      "helpfulness": {
+        "type": "score",
+        "instructions": "Rate how helpful the answer is.",
+        "criteria": ["useless", "partial", "complete"]
+      }
+    }
+  }'
+```
+
+The same request from Python, using `httpx` rather than the OpenAI SDK:
+
+```python
+import os
+import httpx
+
+response = httpx.post(
+    "https://sophy.in/v1/evaluate",
+    headers={"Authorization": f"Bearer {os.environ['SOPHY_API_KEY']}"},
+    json={
+        "state": {
+            "question": "How do I reset my password?",
+            "answer": "Open Settings and use the reset link we email you.",
+        },
+        "questions": {
+            "grounded": {
+                "type": "boolean",
+                "instructions": "Is the answer supported by the question?",
+            },
+            "helpfulness": {
+                "type": "score",
+                "instructions": "Rate how helpful the answer is.",
+                "criteria": ["useless", "partial", "complete"],
+            },
+        },
+    },
+    timeout=120,
+)
+print(response.json()["answers"])
+```
+
+Request fields:
+
+- `state` is required and may be a string, object, or array. It is the shared
+  material every question is asked about, and must not exceed 200,000 characters
+  once serialized as JSON.
+- `questions` is required and maps your own question names to question objects.
+  Send 1-32 of them. Every question needs a non-empty `instructions` string and a
+  `type` of `"boolean"`, `"choice"`, or `"score"`.
+  - `boolean` takes an optional `criteria` object with string `true` and `false`
+    descriptions, and answers with a `probability`.
+  - `choice` requires a `criteria` object mapping at least two option names to
+    descriptions, and answers with the chosen option plus a probability per
+    option.
+  - `score` requires a `criteria` array of at least two string labels ordered
+    lowest to highest, and answers with a numeric `score` plus probabilities.
+- `providerOptions` is optional and may only address the namespace belonging to
+  the key model's provider.
+- `model` is accepted and ignored, exactly as on every other surface; the
+  evaluation model configured on the key wins and is echoed back.
+
+The response contains the key's model, one answer per question, and token usage:
+
+```json
+{
+  "model": "typesafe-ai/jev",
+  "answers": {
+    "grounded": { "type": "boolean", "probability": 0.93 },
+    "tone": {
+      "type": "choice",
+      "choice": "casual",
+      "probabilities": { "formal": 0.18, "casual": 0.82 }
+    },
+    "helpfulness": {
+      "type": "score",
+      "score": 2,
+      "probabilities": { "useless": 0.04, "partial": 0.21, "complete": 0.75 }
+    }
+  },
+  "usage": { "inputTokens": 412, "outputTokens": 36, "totalTokens": 448 }
+}
+```
+
+The call is buffered; there is no streaming, and upstream `providerMetadata` is
+not echoed. One evaluate call consumes one RPM slot and is checked against the
+key's monthly budget before the paid model call. When content logging is enabled
+on the key, Sophy stores the evaluated state, the questions, and the answers.
+
+Validation failures arrive as `400` with a specific `code`: `missing_state`,
+`state_too_large`, `missing_questions`, `invalid_questions`, `questions_empty`,
+`too_many_questions`, `invalid_question`, `missing_instructions`,
+`unsupported_question_type`, `invalid_criteria`, or
+`unsupported_provider_options`. A key whose model is known to be something other
+than an evaluation model returns `400 model_not_evaluation`.
+
+## 10. Structured output
 
 Structured output is configured on the key, not per request. Client
 `response_format` or Responses `text.format` does not replace the stored schema.
@@ -341,7 +465,7 @@ JSON. For a streaming call, validation is recorded after completion; bytes that
 were already sent cannot be recalled, so validate streamed JSON in your client
 before using it.
 
-## 10. Moving from the Anthropic SDK
+## 11. Moving from the Anthropic SDK
 
 The Anthropic SDK cannot call Sophy's OpenAI-compatible endpoints directly.
 Switch to the OpenAI SDK and point it at Sophy; the operator can bind the key to
@@ -357,7 +481,7 @@ a Claude model.
 | `msg.content[0].text` | `response.choices[0].message.content` |
 | Anthropic tool use | Convert definitions/results to OpenAI function-tool shapes; tools are supported but execute in your application. |
 
-## 11. Errors and limits
+## 12. Errors and limits
 
 Validation and buffered failures use the OpenAI body shape:
 
@@ -374,7 +498,7 @@ Validation and buffered failures use the OpenAI body shape:
 
 | Status | Typical meaning |
 |---|---|
-| `400` | Invalid input, unsupported field or feature, a model that does not match the endpoint, invalid audio/multipart data, missing transcription processor configuration, malformed media URL, or upstream input rejection. |
+| `400` | Invalid input, unsupported field or feature, a model that does not match the endpoint, invalid audio/multipart data, missing transcription processor configuration, malformed media URL, an invalid `/v1/evaluate` state or question set, or upstream input rejection. |
 | `401` | Missing, invalid, expired, or revoked Sophy key, or a key whose project is inactive. |
 | `402` | The Sophy key's monthly USD budget is exhausted. |
 | `403` | A Sophy-hosted file belongs to another key. |
@@ -389,6 +513,13 @@ the remaining budget can still add its final cost. If an upstream failure occurs
 after SSE streaming begins, the stream ends instead of changing into a JSON
 error response; clients should treat an incomplete stream as failed.
 
+For evaluation-specific failures, check the error `code`: `model_not_evaluation`
+means the key's primary model is not an evaluation model, while `missing_state`,
+`state_too_large`, `missing_questions`, `invalid_questions`, `questions_empty`,
+`too_many_questions`, `invalid_question`, `missing_instructions`,
+`unsupported_question_type`, `invalid_criteria`, and
+`unsupported_provider_options` describe a malformed request body.
+
 For transcription-specific setup failures, check the error `code`:
 `model_not_transcription` means the key's primary model cannot transcribe;
 `transcript_processor_required` means the key has processing instructions but no
@@ -397,7 +528,7 @@ language model. Invalid multipart/audio requests use codes such as
 `missing_file`, `empty_file`, `unsupported_audio_format`, or
 `unsupported_transcription_option`.
 
-## 12. Smoke test
+## 13. Smoke test
 
 ```bash
 curl https://sophy.in/v1/chat/completions \
@@ -425,6 +556,7 @@ shape; your application validates, authorizes, executes, and returns results.
 **Can I use `previous_response_id`?** No. Sophy's Responses endpoint is stateless;
 send the complete input and tool history every time.
 
-**Do Chat, Responses, audio transcription, embeddings, and images use different
-base URLs?** No. They share `https://sophy.in/v1`; choose the SDK method and a key
-whose configured primary model matches that endpoint.
+**Do Chat, Responses, audio transcription, embeddings, images, and evaluation use
+different base URLs?** No. They share `https://sophy.in/v1`; choose the SDK method
+— or, for `/evaluate`, a plain HTTP request — and a key whose configured primary
+model matches that endpoint.
