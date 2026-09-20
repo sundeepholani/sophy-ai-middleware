@@ -7,7 +7,7 @@
  * we need for the Models screen and the capability filter. Never hardcode model
  * slugs; versions use dots (e.g. "anthropic/claude-sonnet-4.6").
  */
-import type { AvailableModel } from '@/lib/gateway/capabilities';
+import { modelSupportsLanguage, type AvailableModel } from '@/lib/gateway/capabilities';
 
 export type { AvailableModel } from '@/lib/gateway/capabilities';
 
@@ -71,17 +71,36 @@ async function fetchFresh(): Promise<AvailableModel[]> {
 // which disables Next's fetch Data Cache — so we memoize here instead. The
 // catalog changes infrequently; a warm instance reuses it for an hour, and a
 // transient gateway failure falls back to the last good copy rather than throwing.
+//
+// The chat and responses surfaces now consult this on every request (see
+// languageCapability), so a cold or degraded instance must not multiply the
+// load: `inflight` collapses concurrent callers onto one fetch, and a failure
+// with a stale copy re-stamps the memo so a broken endpoint is retried on a
+// timer rather than by every request that arrives behind the 10s timeout.
 const CATALOG_TTL_MS = 60 * 60 * 1000;
+const RETRY_AFTER_FAILURE_MS = 30 * 1000;
 let catalog: { at: number; data: AvailableModel[] } | null = null;
+let inflight: Promise<AvailableModel[]> | null = null;
 
 async function fetchCatalog(): Promise<AvailableModel[]> {
   if (catalog && Date.now() - catalog.at < CATALOG_TTL_MS) return catalog.data;
+  inflight ??= fetchFresh()
+    .then((data) => {
+      catalog = { at: Date.now(), data };
+      return data;
+    })
+    .finally(() => {
+      inflight = null;
+    });
   try {
-    const data = await fetchFresh();
-    catalog = { at: Date.now(), data };
-    return data;
+    return await inflight;
   } catch (err) {
-    if (catalog) return catalog.data; // serve stale on a transient gateway blip
+    if (catalog) {
+      // Serve stale on a transient gateway blip, but back off: without this the
+      // memo stays expired and every subsequent request re-attempts the fetch.
+      catalog.at = Date.now() - CATALOG_TTL_MS + RETRY_AFTER_FAILURE_MS;
+      return catalog.data;
+    }
     throw err;
   }
 }
@@ -89,6 +108,48 @@ async function fetchCatalog(): Promise<AvailableModel[]> {
 /** Every model in the catalog (all types), for the Models reference screen. */
 export async function listAllModels(): Promise<AvailableModel[]> {
   return fetchCatalog();
+}
+
+/**
+ * The catalog lookup behind every surface's capability guard. Fail-open by
+ * construction: an unreachable catalog or an id the catalog does not list both
+ * return 'unknown', so a guard never blocks a request it cannot classify.
+ *
+ * The lookup races a short timer because the language surfaces call this on the
+ * hot path — fetchFresh allows itself 10s, which must never become chat's TTFB.
+ * A fetch that loses the race still populates the memo for the next request.
+ */
+const CAPABILITY_LOOKUP_MS = 1_500;
+
+export async function catalogCapability(
+  model: string,
+  supports: (candidate: AvailableModel) => boolean,
+): Promise<'supported' | 'unsupported' | 'unknown'> {
+  let all: AvailableModel[] | null;
+  try {
+    all = await Promise.race([
+      listAllModels(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), CAPABILITY_LOOKUP_MS)),
+    ]);
+  } catch {
+    return 'unknown';
+  }
+  if (!all) return 'unknown';
+  const candidate = all.find((item) => item.id === model);
+  if (!candidate) return 'unknown';
+  return supports(candidate) ? 'supported' : 'unsupported';
+}
+
+/**
+ * Classify a key's model for the chat/responses surfaces. The embeddings, image
+ * and assessment modules still carry their own copies of this shape; folding
+ * them onto catalogCapability is a separate mechanical change.
+ */
+export async function languageCapability(
+  model: string,
+): Promise<'language' | 'not_language' | 'unknown'> {
+  const result = await catalogCapability(model, modelSupportsLanguage);
+  return result === 'supported' ? 'language' : result === 'unsupported' ? 'not_language' : 'unknown';
 }
 
 /**

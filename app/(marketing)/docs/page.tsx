@@ -278,6 +278,12 @@ const ERROR_ROWS: { status: string; type: string; code: string; when: string }[]
   {
     status: '400',
     type: 'invalid_request_error',
+    code: 'model_not_language',
+    when: 'Chat Completions or Responses was called with a known non-language key model.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
     code: 'token_input_unsupported',
     when: 'Pre-tokenized embedding input was sent; use strings.',
   },
