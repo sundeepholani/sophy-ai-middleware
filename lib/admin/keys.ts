@@ -36,3 +36,18 @@ export function transcriptProcessorSelectionError({
   }
   return null;
 }
+
+/**
+ * Champion-vs-challenger eval compares TEXT outputs — lib/eval/model.ts builds
+ * a `languageModel` and lib/eval/process.ts calls `generateText` — so only a
+ * language key can be evaluated. Unknown / uncatalogued ids stay allowed,
+ * matching Sophy's stale-model behavior and the sibling rule above.
+ *
+ * An allowlist on `language`, not a denylist of the other types: the set of
+ * key-bindable types grows (evaluation was added when /v1/evaluate shipped),
+ * and a denylist would silently admit each new one.
+ */
+export function evalChampionBlocked(model: string, models: AvailableModel[]): boolean {
+  const known = models.find((candidate) => candidate.id === model);
+  return !!known && known.type !== 'language';
+}
