@@ -12,6 +12,7 @@
 import type { ModelMessage } from 'ai';
 import { verifyKey, bearerFromHeader } from '@/lib/auth/api-key';
 import { checkRateLimit, costUsedThisMonth } from '@/lib/counters';
+import { languageCapability } from '@/lib/gateway/models';
 import { resolveParams, responsesToAiToolSet, composeSystemPrompt } from '@/lib/gateway/openai-map';
 import { type CallContext } from '@/lib/gateway/call';
 import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
@@ -94,7 +95,23 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  // 4) Rate limit + quota pre-check (limits come from the key).
+  // 4) Capability guard: this surface only works for language models. A model
+  // positively known to the catalog as something else (transcription,
+  // embedding, image, evaluation) → clean 400. Unknown / uncatalogued ids fall
+  // through and, if truly invalid, fail at the provider.
+  //
+  // This sits before the rate limiter deliberately: checkRateLimit is a write
+  // (lib/counters.ts bumpWindow INSERTs and increments), so guarding after it
+  // would spend an RPM token on every rejected request and turn a client retry
+  // loop into 429s instead of this diagnostic 400. It also precedes the blob
+  // retention write and the paid knowledgebase embed further down.
+  if ((await languageCapability(key.model)) === 'not_language') {
+    return openAiError(400, 'invalid_request_error', "This key's model is not a language model.", {
+      code: 'model_not_language',
+    });
+  }
+
+  // 5) Rate limit + quota pre-check (limits come from the key).
   const rl = await checkRateLimit(key.id, key.rpmLimit);
   if (!rl.ok) {
     const retryAfter = rl.reset ? Math.max(1, Math.ceil((rl.reset - Date.now()) / 1000)) : 60;
@@ -112,7 +129,7 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  // 5) Map input -> messages (client system/developer items dropped; key owns the prompt).
+  // 6) Map input -> messages (client system/developer items dropped; key owns the prompt).
   // Mapping is pure; its only failure mode is a malformed image/file URL (new URL throws),
   // a client error — surface it as a clean 400 rather than an unhandled 500.
   let messages: ModelMessage[];
@@ -149,7 +166,7 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  // 6) Assemble the call from the key's config (structured iff the key has a
+  // 7) Assemble the call from the key's config (structured iff the key has a
   // schema). Agent-mode keys (params.allowClientPrompt) additionally honor the
   // client's `instructions` + system/developer input items, appended AFTER the
   // key's own prompt (key stays authoritative-first; the security preamble still
@@ -189,7 +206,7 @@ export async function POST(req: Request): Promise<Response> {
     toolChoice: aiTools?.toolChoice,
   };
 
-  // 7) Stream or buffer.
+  // 8) Stream or buffer.
   return body.stream === true
     ? handleResponsesStreaming(ctx, messages)
     : handleResponsesNonStreaming(ctx, messages);

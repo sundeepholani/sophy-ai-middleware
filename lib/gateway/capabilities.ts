@@ -46,6 +46,11 @@ export function capabilityLabel(tag: string): string {
   return tag.replace(/-/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
+/** Pure: is this catalog model a chat/completion model? */
+export function modelSupportsLanguage(model: AvailableModel): boolean {
+  return model.type === 'language';
+}
+
 /** True if the model carries every one of the given tags. */
 export function modelHasAllTags(model: AvailableModel, tags: string[]): boolean {
   return tags.every((t) => model.tags.includes(t));

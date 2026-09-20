@@ -25,8 +25,11 @@ import {
   type RecordUsageInput,
 } from '@/lib/usage/record';
 import { buildSystem, providerOf } from '@/lib/gateway/call';
-import { listAllModels, modelSupportsBatchTranscription } from '@/lib/gateway/models';
-import type { AvailableModel } from '@/lib/gateway/capabilities';
+import {
+  catalogCapability,
+  languageCapability,
+  modelSupportsBatchTranscription,
+} from '@/lib/gateway/models';
 import {
   normalizeProjectGatewayError,
   type ProjectGatewaySnapshot,
@@ -281,21 +284,6 @@ export async function parseTranscriptionForm(
 
 export { modelSupportsBatchTranscription };
 
-async function catalogCapability(
-  model: string,
-  supports: (candidate: AvailableModel) => boolean,
-): Promise<'supported' | 'unsupported' | 'unknown'> {
-  let all: AvailableModel[];
-  try {
-    all = await listAllModels();
-  } catch {
-    return 'unknown';
-  }
-  const candidate = all.find((item) => item.id === model);
-  if (!candidate) return 'unknown';
-  return supports(candidate) ? 'supported' : 'unsupported';
-}
-
 export async function transcriptionCapability(
   model: string,
 ): Promise<'transcription' | 'not_transcription' | 'unknown'> {
@@ -307,16 +295,12 @@ export async function transcriptionCapability(
       : 'unknown';
 }
 
-export async function processorCapability(
-  model: string,
-): Promise<'language' | 'not_language' | 'unknown'> {
-  const result = await catalogCapability(model, (candidate) => candidate.type === 'language');
-  return result === 'supported'
-    ? 'language'
-    : result === 'unsupported'
-      ? 'not_language'
-      : 'unknown';
-}
+/**
+ * The transcript processor is a language model, so this is languageCapability
+ * under the name this surface uses for it. Kept as a named export: the route
+ * imports it by this name, and so does its test's mock.
+ */
+export { languageCapability as processorCapability };
 
 export function shouldProcessTranscript(systemPrompt: string | null): boolean {
   return !!systemPrompt?.trim();
