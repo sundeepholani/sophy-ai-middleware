@@ -34,7 +34,16 @@ import {
 // ---- Shared TS types --------------------------------------------------------
 
 export type UsageStatus = 'ok' | 'validation_failed' | 'error';
-export type ResponseKind = 'text' | 'structured' | 'image' | 'embedding' | 'transcription';
+// 'assessment' is the /v1/evaluate surface. The internal word differs from the
+// wire word on purpose: 'eval'/'evaluation' already names champion-vs-challenger
+// model comparison (eval_runs / eval_samples / UsageSource eval_*).
+export type ResponseKind =
+  | 'text'
+  | 'structured'
+  | 'image'
+  | 'embedding'
+  | 'transcription'
+  | 'assessment';
 export type KeyStatus = 'active' | 'revoked';
 /**
  * What kind of gateway call a usage_event records. 'proxy' = the one
@@ -571,7 +580,7 @@ export const requestLogs = pgTable(
     id: uuid('id').primaryKey(), // == usage_events.id (app-generated, shared)
     projectId: uuid('project_id').notNull(),
     apiKeyId: uuid('api_key_id').notNull(),
-    surface: text('surface'), // 'chat' | 'responses' | 'embedding' | 'transcription'
+    surface: text('surface'), // 'chat' | 'responses' | 'embedding' | 'transcription' | 'assessment'
     systemPrompt: text('system_prompt'),
     request: jsonb('request'), // inbound messages sent to the model (embedding: the input strings)
     requestAfterImageExpiry: jsonb('request_after_image_expiry'),

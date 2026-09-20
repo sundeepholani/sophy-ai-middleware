@@ -427,3 +427,61 @@ export async function recordTranscriptionLog(
     console.error('[request-log] failed to insert transcription request_log', err);
   }
 }
+
+// ---- Model assessment (POST /v1/evaluate) -----------------------------------
+
+export interface RecordAssessmentLogInput {
+  /** Shared with the usage_events row id. */
+  id: string;
+  projectId: string;
+  keyId: string;
+  state: unknown;
+  questions: Record<string, unknown>;
+  answers: unknown;
+  status: UsageStatus;
+}
+
+/**
+ * Shape the evaluated state and the typed questions for the request log.
+ * Pure — exported for unit testing.
+ *
+ * `state` always reaches this via `req.json()`, so it is structurally acyclic
+ * by construction and JSON.stringify cannot throw here.
+ */
+export function toAssessmentLogRequest(input: {
+  state: unknown;
+  questions: Record<string, unknown>;
+}): object {
+  const request = { state: input.state, questions: input.questions };
+  const serialized = JSON.stringify(request);
+  return serialized.length > MAX_LOG_CHARS
+    ? { truncated: true, preview: serialized.slice(0, MAX_LOG_CHARS) }
+    : request;
+}
+
+/**
+ * Persist the evaluated state, the typed questions and the returned answers
+ * when the key opted into content logging.
+ */
+export async function recordAssessmentLog(
+  input: RecordAssessmentLogInput,
+): Promise<void> {
+  try {
+    await getDb()
+      .insert(requestLogs)
+      .values({
+        id: input.id,
+        projectId: input.projectId,
+        apiKeyId: input.keyId,
+        surface: 'assessment',
+        systemPrompt: null,
+        request: toAssessmentLogRequest(input),
+        response: input.answers != null ? cap(JSON.stringify(input.answers, null, 2)) : null,
+        streamed: false,
+        status: input.status,
+      })
+      .onConflictDoNothing();
+  } catch (err) {
+    console.error('[request-log] failed to insert assessment request_log', err);
+  }
+}

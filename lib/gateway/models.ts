@@ -47,6 +47,10 @@ async function fetchFresh(): Promise<AvailableModel[]> {
       // `image-generation` capability so the capability filter and Models screen
       // treat it like any other capability.
       if (type === 'image' && !tags.includes('image-generation')) tags.push('image-generation');
+      // Same for evaluation models: the gateway flags them via `type` and ships
+      // them with no tags at all, which would otherwise render them as '—' and
+      // make them invisible to the capability filter.
+      if (type === 'evaluation' && !tags.includes('evaluation')) tags.push('evaluation');
       return {
         id: m.id,
         name: m.name ?? m.id,
@@ -99,16 +103,24 @@ export async function listGatewayModels(): Promise<AvailableModel[]> {
 /**
  * Models a Sophy key can be bound to: language (chat/`/v1/chat/completions` +
  * `/v1/responses`), transcription (`/v1/audio/transcriptions`), image
- * (`/v1/images/generations`), and embedding (`/v1/embeddings`).
- * Reranking/video/realtime models aren't served by a key. Language models sort
- * first so creating a new key still defaults to a chat model.
+ * (`/v1/images/generations`), embedding (`/v1/embeddings`), and evaluation
+ * (`/v1/evaluate`). Reranking/speech/video/realtime models aren't served by a
+ * key — there is no route for them, so offering one would create a binding the
+ * proxy cannot honor. Keep this map and the route set in step. Language models
+ * sort first so creating a new key still defaults to a chat model.
  */
 const KEY_MODEL_TYPE_ORDER: Record<string, number> = {
   language: 0,
   transcription: 1,
   embedding: 2,
   image: 3,
+  evaluation: 4,
 };
+
+/** Pure: can a Sophy key be bound to this catalog type at all? */
+export function isKeyBindableType(type: string): boolean {
+  return type in KEY_MODEL_TYPE_ORDER;
+}
 
 /**
  * The file-upload transcription route is a buffered/batch surface. Gateway

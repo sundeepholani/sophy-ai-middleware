@@ -6,7 +6,12 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/db/client', () => ({ getDb: mocks.getDb }));
 
-import { recordUsage, recordUsageBatch, ZERO_USAGE } from '@/lib/usage/record';
+import {
+  recordUsage,
+  recordUsageBatch,
+  toAssessmentLogRequest,
+  ZERO_USAGE,
+} from '@/lib/usage/record';
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -97,5 +102,49 @@ describe('recordUsage cache-write telemetry', () => {
         outputTokens: 5,
       }),
     ]);
+  });
+});
+
+describe('assessment usage and logging', () => {
+  it("records an evaluation call under the 'assessment' response kind", async () => {
+    const values = vi.fn().mockResolvedValue(undefined);
+    mocks.getDb.mockReturnValue({ insert: vi.fn(() => ({ values })) });
+
+    await recordUsage({
+      projectId: '00000000-0000-4000-8000-000000000001',
+      gatewayCredentialId: '00000000-0000-4000-8000-000000000002',
+      keyId: '00000000-0000-4000-8000-000000000003',
+      provider: 'typesafe-ai',
+      model: 'typesafe-ai/jev',
+      usage: { ...ZERO_USAGE, inputTokens: 275, outputTokens: 20, totalTokens: 295 },
+      costUsd: 0.00001155,
+      status: 'ok',
+      responseKind: 'assessment',
+    });
+
+    expect(values).toHaveBeenCalledWith(
+      expect.objectContaining({
+        responseKind: 'assessment',
+        model: 'typesafe-ai/jev',
+        inputTokens: 275,
+        outputTokens: 20,
+      }),
+    );
+  });
+
+  it('shapes the state and questions for the request log', () => {
+    const state = { order: { id: 'A-1' } };
+    const questions = { refund: { type: 'boolean', instructions: 'Refund asked?' } };
+    expect(toAssessmentLogRequest({ state, questions })).toEqual({ state, questions });
+  });
+
+  it('truncates an oversized state instead of storing it whole', () => {
+    const shaped = toAssessmentLogRequest({
+      state: 'x'.repeat(150_000),
+      questions: { a: { type: 'boolean', instructions: 'ok?' } },
+    }) as { truncated?: boolean; preview?: string };
+
+    expect(shaped.truncated).toBe(true);
+    expect(shaped.preview).toHaveLength(100_000);
   });
 });
