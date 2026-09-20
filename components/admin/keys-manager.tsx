@@ -14,7 +14,8 @@ import {
   type KeyFormInput,
   type BulkActionResult,
 } from '@/app/admin/actions';
-import { transcriptProcessorSelectionError } from '@/lib/admin/keys';
+import { evalChampionBlocked, transcriptProcessorSelectionError } from '@/lib/admin/keys';
+import { cn } from '@/lib/utils';
 import type { KeyRow } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
 import type { ProjectRole } from '@/components/admin/project-types';
@@ -383,13 +384,27 @@ export function KeysManager({
                     <Pencil className="h-3.5 w-3.5" />
                   </Button>
                   {k.status === 'active' && (
+                    // Disabled rather than hidden: a vanishing icon in one row
+                    // and not the next reads as a glitch. Degrades to ENABLED
+                    // when the catalog is unavailable (evalChampionBlocked is
+                    // fail-open); the server guard is the real backstop.
                     <Button
                       size="icon-sm"
                       variant="ghost"
                       aria-label="Run eval"
-                      title="Eval"
-                      className="relative"
+                      aria-disabled={evalChampionBlocked(k.model, models)}
+                      title={
+                        evalChampionBlocked(k.model, models)
+                          ? "Evals compare text output — this key isn't on a language model"
+                          : 'Eval'
+                      }
+                      className={cn(
+                        'relative',
+                        evalChampionBlocked(k.model, models) &&
+                          'cursor-not-allowed opacity-40',
+                      )}
                       onClick={() => {
+                        if (evalChampionBlocked(k.model, models)) return;
                         setEvalShown(k);
                         setEvalKey(k);
                       }}
@@ -721,7 +736,15 @@ function BulkEvalDialog({
   // startable: their current run is stopped and replaced, behind an explicit
   // confirmation. The server re-checks every invariant live either way.
   const sameModel = keys.filter((k) => k.model === challenger.trim());
-  const startableKeys = keys.filter((k) => k.model !== challenger.trim());
+  // The champion set was previously split on model-id inequality alone, so a
+  // transcription/embedding/image/evaluation key — which can never equal a
+  // language challenger — always landed in startableKeys and was submitted.
+  const notLanguage = keys.filter(
+    (k) => k.model !== challenger.trim() && evalChampionBlocked(k.model, models),
+  );
+  const startableKeys = keys.filter(
+    (k) => k.model !== challenger.trim() && !evalChampionBlocked(k.model, models),
+  );
   const startable = startableKeys.length;
   const replaceEvalKeys = startableKeys.filter((k) => evalStatuses[k.id] === 'running');
 
@@ -818,6 +841,12 @@ function BulkEvalDialog({
             <p className="text-xs text-amber-600 dark:text-amber-500">
               Skipped ({sameModel.length}) — already on the challenger model:{' '}
               {sameModel.map((k) => k.name).join(', ')}.
+            </p>
+          )}
+          {notLanguage.length > 0 && (
+            <p className="text-xs text-amber-600 dark:text-amber-500">
+              Skipped ({notLanguage.length}) — evals compare text output, so these keys
+              aren’t on a language model: {notLanguage.map((k) => k.name).join(', ')}.
             </p>
           )}
 

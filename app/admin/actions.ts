@@ -31,7 +31,7 @@ import { recordedEvalSpendUsd } from '@/lib/eval/spend';
 import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
 import { schemaCompileError } from '@/lib/gateway/openai-map';
 import { getSettings } from '@/lib/admin/settings';
-import { transcriptProcessorSelectionError } from '@/lib/admin/keys';
+import { evalChampionBlocked, transcriptProcessorSelectionError } from '@/lib/admin/keys';
 import { getKeyEvals, type KeyEval } from '@/lib/admin/queries';
 import {
   isKeyBindableType,
@@ -597,11 +597,19 @@ async function cancelRunningEvalsForKey(
   return cancelled.length;
 }
 
+/** Shared by the throw, the skip-reason allowlist and the bulk report. */
+const EVAL_LANGUAGE_ONLY = 'Eval is only available for language models';
+
 /**
  * Create a running eval for one already-authorized key, enforcing the run
- * invariants: active key, challenger differs from the champion, and at most one
- * running eval per key (checked, then backstopped by the partial unique index).
+ * invariants: active key, champion is a language model, challenger differs from
+ * the champion, and at most one running eval per key (checked, then backstopped
+ * by the partial unique index).
  * Throws with a human-readable reason; shared by the single and bulk actions.
+ *
+ * `championBlocked` is a precomputed verdict, not an await: this runs inside a
+ * transaction on the bulk path, and a catalog fetch there would hold a Postgres
+ * connection open for the length of an HTTP request. Callers classify first.
  */
 async function insertEvalRun(
   db: Db | DbTx,
@@ -609,8 +617,10 @@ async function insertEvalRun(
   challengerModel: string,
   judgeModel: string,
   targetN: number,
+  championBlocked: boolean,
 ): Promise<void> {
   if (key.status !== 'active') throw new Error('Key is not active');
+  if (championBlocked) throw new Error(EVAL_LANGUAGE_ONLY);
   if (challengerModel === key.model) {
     throw new Error('Challenger must differ from the current model');
   }
@@ -657,12 +667,19 @@ export async function startEvalRun(input: StartEvalInput): Promise<void> {
   const targetN = clampTargetN(input.targetN);
 
   const settings = await getSettings(viewer);
+  let catalogModels: Awaited<ReturnType<typeof listAllModels>> = [];
+  try {
+    catalogModels = await listAllModels();
+  } catch {
+    // Preserve the existing custom/stale-model behavior during catalog outages.
+  }
   await insertEvalRun(
     getDb(),
     { projectId: input.projectId, id: input.apiKeyId, model, status },
     challengerModel,
     settings.judgeModel,
     targetN,
+    evalChampionBlocked(model, catalogModels),
   );
   await audit(input.projectId, viewer.email, 'eval.start', input.apiKeyId, {
     championModel: model,
@@ -707,6 +724,7 @@ function normalizeBulkIds(ids: string[]): string[] {
  */
 const KNOWN_SKIP_REASONS = new Set([
   'Key is not active',
+  EVAL_LANGUAGE_ONLY,
   'Challenger must differ from the current model',
   'An eval is already running for this key',
 ]);
@@ -865,6 +883,15 @@ export async function bulkStartEvalRuns(input: {
   const confirmedStops = new Set(input.stopEvalIds ?? []);
   const settingsViewer = await requireProjectViewer(input.projectId);
   const settings = await getSettings(settingsViewer);
+  // Once for the batch, and outside the transaction below: a per-key lookup
+  // would mean one catalog fetch per selected key, and a fetch inside the
+  // transaction would hold a Postgres connection for an HTTP round trip.
+  let catalogModels: Awaited<ReturnType<typeof listAllModels>> = [];
+  try {
+    catalogModels = await listAllModels();
+  } catch {
+    // Preserve the existing custom/stale-model behavior during catalog outages.
+  }
 
   let done = 0;
   let stoppedEvals = 0;
@@ -883,12 +910,18 @@ export async function bulkStartEvalRuns(input: {
         model: key.model,
         status: key.status,
       };
+      const championBlocked = evalChampionBlocked(key.model, catalogModels);
       // With per-key confirmation, replace the current running eval — cancel +
       // insert atomically, so losing the one-running-run race (23505) rolls the
       // cancel back and reports a skip instead of destroying the eval. The
       // cancel only happens when the new run could actually start (active key,
       // challenger differs); otherwise insertEvalRun's checks throw first.
-      if (confirmedStops.has(id) && key.status === 'active' && challengerModel !== key.model) {
+      if (
+        confirmedStops.has(id) &&
+        key.status === 'active' &&
+        !championBlocked &&
+        challengerModel !== key.model
+      ) {
         let stoppedHere = 0;
         await getDb().transaction(async (tx) => {
           stoppedHere = await cancelRunningEvalsForKey(
@@ -898,11 +931,25 @@ export async function bulkStartEvalRuns(input: {
             key.viewer.email,
             'superseded by a new eval',
           );
-          await insertEvalRun(tx, keyArg, challengerModel, settings.judgeModel, targetN);
+          await insertEvalRun(
+            tx,
+            keyArg,
+            challengerModel,
+            settings.judgeModel,
+            targetN,
+            championBlocked,
+          );
         });
         stoppedEvals += stoppedHere;
       } else {
-        await insertEvalRun(getDb(), keyArg, challengerModel, settings.judgeModel, targetN);
+        await insertEvalRun(
+          getDb(),
+          keyArg,
+          challengerModel,
+          settings.judgeModel,
+          targetN,
+          championBlocked,
+        );
       }
       started = true;
       done++;
