@@ -20,7 +20,12 @@ vi.mock('@/lib/gateway/project-provider', async (importOriginal) => ({
   normalizeProjectGatewayError: mocks.normalizeProjectGatewayError,
 }));
 
-import { handleAssessment, type ParsedAssessmentRequest } from '@/lib/gateway/assessments';
+import { APICallError, RetryError } from 'ai';
+import {
+  handleAssessment,
+  withRetries,
+  type ParsedAssessmentRequest,
+} from '@/lib/gateway/assessments';
 
 const MODEL = 'typesafe-ai/jev';
 
@@ -61,7 +66,21 @@ beforeEach(() => {
   mocks.recordAssessmentLog.mockClear();
   mocks.normalizeProjectGatewayError.mockClear();
 });
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.clearAllMocks();
+  vi.useRealTimers();
+});
+
+/** A fresh Response per call — a body can only be read once, and retries re-read. */
+function respond(status: number, body: unknown, headers: Record<string, string> = {}) {
+  return async () =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json', ...headers },
+    });
+}
+
+const CTX = { keyId: 'key-1', gateway, model: MODEL, logContent: false };
 
 describe('handleAssessment — happy path', () => {
   it('posts the key model plus state and questions, and returns only the mapped payload', async () => {
@@ -178,13 +197,14 @@ describe('handleAssessment — upstream failures', () => {
     expect(res.status).toBe(400);
   });
 
-  it('maps a 429 with its retry hint', async () => {
-    evaluate.mockResolvedValue(upstreamOk({ error: { message: 'slow down' } }, 429));
-    const res = await handleAssessment(
-      { keyId: 'key-1', gateway, model: MODEL, logContent: false },
-      parsed,
-    );
+  it('maps a 429 with its retry hint, after retrying it', async () => {
+    vi.useFakeTimers();
+    evaluate.mockImplementation(respond(429, { error: { message: 'slow down' } }));
+    const pending = handleAssessment(CTX, parsed);
+    await vi.advanceTimersByTimeAsync(6_000); // 2s + 4s of backoff
+    const res = await pending;
     expect(res.status).toBe(429);
+    expect(evaluate).toHaveBeenCalledTimes(3);
   });
 
   it('turns an unusable 200 body into a failure rather than a partial success', async () => {
@@ -238,5 +258,156 @@ describe('handleAssessment — upstream failures', () => {
     const text = await res.text();
     expect(text).not.toContain('charged twice');
     expect(text).not.toContain('Is a refund requested?');
+  });
+});
+
+describe('handleAssessment — retries, mirroring the AI SDK', () => {
+  it('absorbs a transient 503: one client 200, one ok usage row', async () => {
+    vi.useFakeTimers();
+    evaluate
+      .mockImplementationOnce(respond(503, { error: { message: 'busy' } }))
+      .mockImplementationOnce(respond(200, HAPPY));
+    const pending = handleAssessment(CTX, parsed);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const res = await pending;
+
+    expect(res.status).toBe(200);
+    expect(evaluate).toHaveBeenCalledTimes(2);
+    expect(mocks.recordUsage).toHaveBeenCalledOnce();
+    expect(mocks.recordUsage.mock.calls[0][0]).toMatchObject({ status: 'ok' });
+  });
+
+  it('gives up after 1 + 2 attempts and records one error row with the last status', async () => {
+    vi.useFakeTimers();
+    evaluate.mockImplementation(respond(503, { error: { message: 'busy' } }));
+    const pending = handleAssessment(CTX, parsed);
+    await vi.advanceTimersByTimeAsync(6_000);
+    const res = await pending;
+
+    expect(evaluate).toHaveBeenCalledTimes(3);
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(mocks.recordUsage).toHaveBeenCalledOnce();
+    expect(mocks.recordUsage.mock.calls[0][0]).toMatchObject({
+      status: 'error',
+      errorMessage: 'upstream_http_503',
+    });
+  });
+
+  it('backs off 2s, then 4s', async () => {
+    vi.useFakeTimers();
+    evaluate.mockImplementation(respond(503, {}));
+    const pending = handleAssessment(CTX, parsed);
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(evaluate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(evaluate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(evaluate).toHaveBeenCalledTimes(3);
+    await pending;
+  });
+
+  it("honors a provider's retry-after when it is under a minute", async () => {
+    vi.useFakeTimers();
+    evaluate
+      .mockImplementationOnce(respond(429, {}, { 'retry-after': '1' }))
+      .mockImplementationOnce(respond(200, HAPPY));
+    const pending = handleAssessment(CTX, parsed);
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1); // 1s, not the 2s backoff
+    expect(evaluate).toHaveBeenCalledTimes(2);
+    expect((await pending).status).toBe(200);
+  });
+
+  it.each([408, 409])('retries %i, which the SDK also treats as retryable', async (status) => {
+    vi.useFakeTimers();
+    evaluate.mockImplementationOnce(respond(status, {})).mockImplementationOnce(respond(200, HAPPY));
+    const pending = handleAssessment(CTX, parsed);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect((await pending).status).toBe(200);
+    expect(evaluate).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([400, 401, 402, 422])('does not retry %i', async (status) => {
+    evaluate.mockImplementation(respond(status, { error: { message: 'no' } }));
+    await handleAssessment(CTX, parsed);
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+
+  it('hands a 401 to credential-health handling as the bare error, not a RetryError', async () => {
+    evaluate.mockImplementation(respond(401, { error: { message: 'bad key' } }));
+    await handleAssessment(CTX, parsed);
+    const seen = mocks.normalizeProjectGatewayError.mock.calls[0][1];
+    expect(APICallError.isInstance(seen)).toBe(true);
+    expect(RetryError.isInstance(seen)).toBe(false);
+  });
+
+  it('retries a dropped connection (Node\'s "fetch failed" with a cause)', async () => {
+    vi.useFakeTimers();
+    evaluate
+      .mockRejectedValueOnce(Object.assign(new TypeError('fetch failed'), { cause: new Error('ECONNRESET') }))
+      .mockImplementationOnce(respond(200, HAPPY));
+    const pending = handleAssessment(CTX, parsed);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect((await pending).status).toBe(200);
+    expect(evaluate).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry an arbitrary thrown error, matching the SDK', async () => {
+    evaluate.mockRejectedValue(new Error('socket hang up'));
+    await handleAssessment(CTX, parsed);
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+
+  it('does not retry the deadline firing', async () => {
+    evaluate.mockRejectedValue(new DOMException('The operation timed out.', 'TimeoutError'));
+    await handleAssessment(CTX, parsed);
+    expect(evaluate).toHaveBeenCalledOnce();
+    expect(mocks.recordUsage.mock.calls[0][0]).toMatchObject({ errorMessage: 'upstream_timeout' });
+  });
+
+  it('does not retry an unusable 200 body — that is not transient', async () => {
+    evaluate.mockImplementation(respond(200, { answers: { refund: { type: 'histogram' } } }));
+    const res = await handleAssessment(CTX, parsed);
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+
+  it('leaves no timer behind after a retried success', async () => {
+    vi.useFakeTimers();
+    evaluate.mockImplementationOnce(respond(503, {})).mockImplementationOnce(respond(200, HAPPY));
+    const pending = handleAssessment(CTX, parsed);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await pending;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('withRetries', () => {
+  it('stops waiting, releases its timer and rethrows when the deadline fires mid-backoff', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const attempt = vi.fn(async () => {
+      throw new APICallError({
+        message: 'busy',
+        url: 'https://example.test',
+        requestBodyValues: {},
+        statusCode: 503,
+      });
+    });
+    const run = withRetries(attempt, controller.signal);
+    const settled = run.catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(1_000); // inside the first 2s backoff
+    controller.abort(new DOMException('The operation timed out.', 'TimeoutError'));
+    const error = (await settled) as Error;
+
+    expect(error.name).toBe('TimeoutError');
+    expect(attempt).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

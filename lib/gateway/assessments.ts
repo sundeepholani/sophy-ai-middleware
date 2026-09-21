@@ -19,9 +19,11 @@
  * `ctx.gateway.evaluator`: `experimental_evaluate` / `gateway.evaluationModel()`
  * only exist in ai@7.0.107 and @ai-sdk/gateway@4.0.87, well past our installed
  * majors. The credential itself never leaves lib/gateway/project-provider.ts.
+ * Because it bypasses the SDK, it also has to supply the retries the SDK would
+ * have given it — see withRetries.
  */
 import { randomUUID } from 'node:crypto';
-import { APICallError } from 'ai';
+import { APICallError, RetryError } from 'ai';
 import {
   recordUsage,
   recordAssessmentLog,
@@ -45,7 +47,10 @@ import {
   type ProjectGatewaySnapshot,
 } from '@/lib/gateway/project-provider';
 
-/** The evaluate surface is a single buffered round trip, never a stream. */
+/**
+ * One deadline for the whole upstream call — every attempt and every retry wait
+ * — so retrying never raises the worst-case latency. Buffered, never a stream.
+ */
 const UPSTREAM_TIMEOUT_MS = 120_000;
 /** Questions are answered in parallel upstream; bound the fan-out we pay for. */
 const MAX_QUESTIONS = 32;
@@ -354,12 +359,177 @@ function liftUpstreamMessage(bodyText: string): string | null {
   }
 }
 
+// ---- Upstream call, retried like the AI SDK ---------------------------------
+
+/**
+ * Every other surface calls the gateway through the AI SDK, which retries
+ * transient failures by default (ai@6 retryWithExponentialBackoffRespectingRetryHeaders:
+ * two retries, 2s then 4s, a provider's retry-after honored when under a minute).
+ * That helper isn't exported and this surface calls the gateway by hand, so the
+ * policy is mirrored here. Without it a transient upstream 503 reached the client
+ * on the first failure, while the same blip on chat was absorbed.
+ */
+const MAX_RETRIES = 2;
+const INITIAL_RETRY_DELAY_MS = 2_000;
+const RETRY_BACKOFF_FACTOR = 2;
+const MAX_RETRY_AFTER_MS = 60_000;
+
+/** Mirrors @ai-sdk/provider-utils isAbortError: a cancelled call is never retried. */
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof Error ||
+      (typeof DOMException !== 'undefined' && error instanceof DOMException)) &&
+    (error.name === 'AbortError' || error.name === 'ResponseAborted' || error.name === 'TimeoutError')
+  );
+}
+
+/**
+ * Mirrors the AI SDK's getRetryDelayInMs: prefer retry-after-ms, then retry-after
+ * (seconds or an HTTP date), when it is non-negative and either under a minute or
+ * shorter than the backoff; otherwise fall back to the exponential delay.
+ */
+function retryDelayMs(error: unknown, exponentialDelayMs: number): number {
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  const headers = APICallError.isInstance(error)
+    ? error.responseHeaders
+    : APICallError.isInstance(cause)
+      ? cause.responseHeaders
+      : undefined;
+  if (!headers) return exponentialDelayMs;
+  let ms: number | undefined;
+  const retryAfterMs = headers['retry-after-ms'];
+  if (retryAfterMs) {
+    const n = parseFloat(retryAfterMs);
+    if (!Number.isNaN(n)) ms = n;
+  }
+  const retryAfter = headers['retry-after'];
+  if (retryAfter && ms === undefined) {
+    const seconds = parseFloat(retryAfter);
+    ms = Number.isNaN(seconds) ? Date.parse(retryAfter) - Date.now() : seconds * 1000;
+  }
+  if (
+    ms != null &&
+    !Number.isNaN(ms) &&
+    ms >= 0 &&
+    (ms < MAX_RETRY_AFTER_MS || ms < exponentialDelayMs)
+  ) {
+    return ms;
+  }
+  return exponentialDelayMs;
+}
+
+/** A wait that ends early, and releases its timer, if the call's deadline fires. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * Run `attempt`, retrying exactly as the AI SDK does. Cancellation rethrows at
+ * once. A non-retryable failure on the first try rethrows as-is, so credential
+ * health handling still sees a bare 401/402. Otherwise the attempts are collected
+ * into a RetryError, whose lastError carries the final status — the same shape
+ * chat, embeddings and images produce, which upstream-error.ts already unwraps.
+ * Exported for unit testing.
+ */
+export async function withRetries<T>(attempt: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  const errors: unknown[] = [];
+  let delayMs = INITIAL_RETRY_DELAY_MS;
+  for (;;) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      errors.push(error);
+      const tries = errors.length;
+      const message = error instanceof Error ? error.message : String(error);
+      if (tries > MAX_RETRIES) {
+        throw new RetryError({
+          message: `Failed after ${tries} attempts. Last error: ${message}`,
+          reason: 'maxRetriesExceeded',
+          errors,
+        });
+      }
+      if (APICallError.isInstance(error) && error.isRetryable) {
+        await sleep(retryDelayMs(error, delayMs), signal);
+        delayMs *= RETRY_BACKOFF_FACTOR;
+        continue;
+      }
+      if (tries === 1) throw error;
+      throw new RetryError({
+        message: `Failed after ${tries} attempts with non-retryable error: '${message}'`,
+        reason: 'errorNotRetryable',
+        errors,
+      });
+    }
+  }
+}
+
+/**
+ * One authenticated POST. A non-2xx becomes an APICallError whose isRetryable is
+ * APICallError's own default — 408, 409, 429 and 5xx, the rule the SDK applies —
+ * and a dropped connection becomes a retryable one, as @ai-sdk/provider-utils
+ * does for Node's "fetch failed". Neither ever carries state or questions.
+ */
+async function postEvaluate(
+  ctx: AssessmentCallContext,
+  body: unknown,
+  signal: AbortSignal,
+): Promise<Response> {
+  let res: Response;
+  try {
+    res = await ctx.gateway.evaluator.evaluate(body, signal);
+  } catch (error) {
+    if (
+      error instanceof TypeError &&
+      ['fetch failed', 'failed to fetch'].includes(error.message.toLowerCase()) &&
+      error.cause != null
+    ) {
+      const causeMessage = (error.cause as { message?: unknown }).message;
+      throw new APICallError({
+        message: `Cannot connect to API: ${typeof causeMessage === 'string' ? causeMessage : 'network error'}`,
+        cause: error.cause,
+        url: EVALUATE_URL,
+        requestBodyValues: { model: ctx.model },
+        isRetryable: true,
+      });
+    }
+    throw error;
+  }
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => '');
+    throw new APICallError({
+      message: liftUpstreamMessage(bodyText) ?? `gateway evaluate request failed: ${res.status}`,
+      url: EVALUATE_URL,
+      requestBodyValues: { model: ctx.model },
+      statusCode: res.status,
+      responseHeaders: Object.fromEntries(res.headers),
+      responseBody: bodyText.slice(0, 2000),
+    });
+  }
+  return res;
+}
+
 /**
  * Run one evaluation and record it. Mirrors the embeddings handler: usage is
  * always written (ok or error) under an id shared with the request log, and the
  * usage row goes in BEFORE the log — request_logs carries a foreign key onto
  * usage_events, and recordUsage swallows its own failures, so the reverse order
- * would silently drop the log row.
+ * would silently drop the log row. Retries happen inside withRetries, so a call
+ * that succeeds on a retry still records exactly one usage row.
  */
 export async function handleAssessment(
   ctx: AssessmentCallContext,
@@ -382,32 +552,16 @@ export async function handleAssessment(
       : Promise.resolve();
 
   try {
-    const res = await ctx.gateway.evaluator.evaluate(
-      {
-        model: ctx.model,
-        state: parsed.state,
-        questions: parsed.questions,
-        ...(Object.keys(parsed.providerOptions).length > 0
-          ? { providerOptions: parsed.providerOptions }
-          : {}),
-      },
-      AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-    );
-
-    if (!res.ok) {
-      const bodyText = await res.text().catch(() => '');
-      // Never echo state/questions into the error — they are client content.
-      throw new APICallError({
-        message:
-          liftUpstreamMessage(bodyText) ?? `gateway evaluate request failed: ${res.status}`,
-        url: EVALUATE_URL,
-        requestBodyValues: { model: ctx.model },
-        statusCode: res.status,
-        responseHeaders: Object.fromEntries(res.headers),
-        responseBody: bodyText.slice(0, 2000),
-        isRetryable: res.status === 429 || res.status >= 500,
-      });
-    }
+    const upstreamBody = {
+      model: ctx.model,
+      state: parsed.state,
+      questions: parsed.questions,
+      ...(Object.keys(parsed.providerOptions).length > 0
+        ? { providerOptions: parsed.providerOptions }
+        : {}),
+    };
+    const signal = AbortSignal.timeout(UPSTREAM_TIMEOUT_MS);
+    const res = await withRetries(() => postEvaluate(ctx, upstreamBody, signal), signal);
 
     let raw: RawAssessmentResponse;
     try {
