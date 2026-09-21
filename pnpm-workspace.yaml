@@ -1,7 +1,7 @@
 # Dependency install scripts. pnpm 11 honors only `allowBuilds`; it dropped
 # `ignoredBuiltDependencies`, and with `strictDepBuilds` (default true) any
 # unreviewed script makes `pnpm install` exit non-zero — on a fresh clone it
-# also writes `set this to true or false` placeholders into this file.
+# also writes placeholder values into this file for each undecided package.
 # `verifyDepsBeforeRun` (default `install`) re-runs that install before
 # `pnpm <script>` whenever dependencies change, so without a decision here
 # `pnpm test` and `pnpm build` break after any pull that touches the lockfile.
@@ -16,9 +16,10 @@ allowBuilds:
   sharp: false
   unrs-resolver: false
 
-# Kept for pnpm < 11, which reads this list instead of `allowBuilds`. Vercel
-# picks its own pnpm version (nothing in package.json pins one), so removing
-# it could change behavior there.
+# Kept for pnpm < 10.26, which predates `allowBuilds` and reads only this list.
+# pnpm 10.26–10.x reads both keys; pnpm 11 reads only `allowBuilds`. Nothing in
+# package.json pins a version: Vercel picks pnpm 10.x by project creation date
+# (10.28.0 at the time of writing — `vercel inspect <deployment> --logs`).
 ignoredBuiltDependencies:
   - esbuild
   - sharp
