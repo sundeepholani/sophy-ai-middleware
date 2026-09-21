@@ -126,13 +126,21 @@ export async function catalogCapability(
   supports: (candidate: AvailableModel) => boolean,
 ): Promise<'supported' | 'unsupported' | 'unknown'> {
   let all: AvailableModel[] | null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     all = await Promise.race([
       listAllModels(),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), CAPABILITY_LOOKUP_MS)),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), CAPABILITY_LOOKUP_MS);
+      }),
     ]);
   } catch {
     return 'unknown';
+  } finally {
+    // The race settles on whichever side wins but stops neither. With a warm
+    // memo the catalog wins at once on nearly every request, so without this
+    // each guarded request would leave a live 1.5s timer behind.
+    clearTimeout(timer);
   }
   if (!all) return 'unknown';
   const candidate = all.find((item) => item.id === model);
