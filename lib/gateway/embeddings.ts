@@ -24,7 +24,7 @@ import {
 import type { EmbeddingsRequest, EmbeddingsResponse } from '@/lib/http/openai';
 import { safeGatewayErrorMessage, upstreamErrorResponse } from '@/lib/gateway/upstream-error';
 import { providerOf } from '@/lib/gateway/call';
-import { listAllModels } from '@/lib/gateway/models';
+import { catalogCapability } from '@/lib/gateway/models';
 import { type AvailableModel } from '@/lib/gateway/capabilities';
 import {
   normalizeProjectGatewayError,
@@ -52,20 +52,15 @@ export function modelSupportsEmbeddings(m: AvailableModel): boolean {
  * `'not_embedding'` only when the model is positively known to be something
  * else — an unknown id or an unavailable catalog returns `'unknown'` so we never
  * block a valid request on a catalog blip (a genuinely wrong id then fails at
- * the provider as a 502, which is correct).
+ * the provider as a 502, which is correct). The lookup is the shared
+ * catalogCapability, so a slow catalog also degrades to `'unknown'` after 1.5s
+ * rather than holding the request for fetchFresh's 10s budget.
  */
 export async function embeddingCapability(
   model: string,
 ): Promise<'embedding' | 'not_embedding' | 'unknown'> {
-  let all: AvailableModel[];
-  try {
-    all = await listAllModels();
-  } catch {
-    return 'unknown';
-  }
-  const m = all.find((x) => x.id === model);
-  if (!m) return 'unknown';
-  return modelSupportsEmbeddings(m) ? 'embedding' : 'not_embedding';
+  const result = await catalogCapability(model, modelSupportsEmbeddings);
+  return result === 'supported' ? 'embedding' : result === 'unsupported' ? 'not_embedding' : 'unknown';
 }
 
 // ---- Request parsing (pure) -------------------------------------------------

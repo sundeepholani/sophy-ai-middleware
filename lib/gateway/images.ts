@@ -20,7 +20,7 @@ import {
 import type { ImageGenerationRequest, ImageGenerationResponse } from '@/lib/http/openai';
 import { safeGatewayErrorMessage, upstreamErrorResponse } from '@/lib/gateway/upstream-error';
 import { providerOf } from '@/lib/gateway/call';
-import { listAllModels } from '@/lib/gateway/models';
+import { catalogCapability } from '@/lib/gateway/models';
 import { type AvailableModel } from '@/lib/gateway/capabilities';
 import {
   normalizeProjectGatewayError,
@@ -42,18 +42,13 @@ export function modelSupportsImageGeneration(m: AvailableModel): boolean {
  * `'not_image'` only when the model is positively known to be non-image — an
  * unknown id or an unavailable catalog returns `'unknown'` so we never block a
  * valid request on a catalog blip (a genuinely wrong id then fails at the
- * provider as a 502, which is correct).
+ * provider as a 502, which is correct). The lookup is the shared
+ * catalogCapability, so a slow catalog also degrades to `'unknown'` after 1.5s
+ * rather than holding the request for fetchFresh's 10s budget.
  */
 export async function imageCapability(model: string): Promise<'image' | 'not_image' | 'unknown'> {
-  let all: AvailableModel[];
-  try {
-    all = await listAllModels();
-  } catch {
-    return 'unknown';
-  }
-  const m = all.find((x) => x.id === model);
-  if (!m) return 'unknown';
-  return modelSupportsImageGeneration(m) ? 'image' : 'not_image';
+  const result = await catalogCapability(model, modelSupportsImageGeneration);
+  return result === 'supported' ? 'image' : result === 'unsupported' ? 'not_image' : 'unknown';
 }
 
 // ---- Request parsing (pure) -------------------------------------------------

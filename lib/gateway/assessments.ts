@@ -38,7 +38,7 @@ import type {
 } from '@/lib/http/openai';
 import { safeGatewayErrorMessage, upstreamErrorResponse } from '@/lib/gateway/upstream-error';
 import { providerOf } from '@/lib/gateway/call';
-import { listAllModels } from '@/lib/gateway/models';
+import { catalogCapability } from '@/lib/gateway/models';
 import { type AvailableModel } from '@/lib/gateway/capabilities';
 import {
   normalizeProjectGatewayError,
@@ -71,20 +71,15 @@ export function modelSupportsAssessment(m: AvailableModel): boolean {
  * block a valid request on a catalog blip (a genuinely wrong id then fails at
  * the provider as a 502, which is correct). This matters more here than
  * elsewhere: evaluation models are new, and the catalog memo is an hour long,
- * so a freshly listed model must not be rejected by a stale warm instance.
+ * so a freshly listed model must not be rejected by a stale warm instance. The lookup is the shared
+ * catalogCapability, so a slow catalog also degrades to `'unknown'` after 1.5s
+ * rather than holding the request for fetchFresh's 10s budget.
  */
 export async function assessmentCapability(
   model: string,
 ): Promise<'assessment' | 'not_assessment' | 'unknown'> {
-  let all: AvailableModel[];
-  try {
-    all = await listAllModels();
-  } catch {
-    return 'unknown';
-  }
-  const m = all.find((x) => x.id === model);
-  if (!m) return 'unknown';
-  return modelSupportsAssessment(m) ? 'assessment' : 'not_assessment';
+  const result = await catalogCapability(model, modelSupportsAssessment);
+  return result === 'supported' ? 'assessment' : result === 'unsupported' ? 'not_assessment' : 'unknown';
 }
 
 // ---- Request parsing (pure) -------------------------------------------------

@@ -141,9 +141,9 @@ export async function catalogCapability(
 }
 
 /**
- * Classify a key's model for the chat/responses surfaces. The embeddings, image
- * and assessment modules still carry their own copies of this shape; folding
- * them onto catalogCapability is a separate mechanical change.
+ * Classify a key's model for the chat/responses surfaces. Every surface guard —
+ * this one, transcription, embeddings, image and assessment — goes through
+ * catalogCapability, so they share one fail-open policy and one time bound.
  */
 export async function languageCapability(
   model: string,
