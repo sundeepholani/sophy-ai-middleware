@@ -89,6 +89,18 @@ describe('catalogCapability — shared by every surface guard', () => {
     await expect(mod.catalogCapability('nope/nope', isImage)).resolves.toBe('unknown');
   });
 
+  it('cancels its timeout once the catalog answers, leaving no timer behind', async () => {
+    // Promise.race settles on the first contender but stops none of them. With
+    // a warm memo the catalog wins instantly on almost every request, so an
+    // uncancelled 1.5s timeout would outlive each guarded request.
+    const { mod } = await freshModels([{ id: 'openai/gpt-5-mini', type: 'language' }]);
+    await mod.languageCapability('openai/gpt-5-mini'); // warm the memo
+
+    vi.useFakeTimers();
+    await expect(mod.languageCapability('openai/gpt-5-mini')).resolves.toBe('language');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("gives up with 'unknown' rather than letting a slow catalog become chat's TTFB", async () => {
     vi.resetModules();
     // A fetch that never settles: the guard must not wait on it.
