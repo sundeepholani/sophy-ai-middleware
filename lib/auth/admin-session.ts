@@ -4,8 +4,9 @@
  * The session is an httpOnly, SameSite=Strict iron-session cookie scoped to
  * /admin + /api/admin (see proxy.ts). Client `mw_*` keys never grant console
  * access, and the console cookie never grants proxy access. Login is passwordless
- * (magic link) — see lib/auth/magic-link.ts; there is no stored password.
+ * (email OTP) — see lib/auth/otp.ts; there is no stored password.
  */
+import { getScopedCliIdentity } from '@/lib/auth/cli-session';
 import { cookies } from 'next/headers';
 import { getIronSession, type IronSession } from 'iron-session';
 import {
@@ -41,6 +42,8 @@ export interface CurrentUser {
  * are loaded from Postgres by viewer.ts and never trusted from cookie claims.
  */
 export async function currentUser(): Promise<CurrentUser | null> {
+  const cli = getScopedCliIdentity();
+  if (cli) return { userId: cli.userId };
   const s = await getSession();
   return s.userId ? { userId: s.userId } : null;
 }

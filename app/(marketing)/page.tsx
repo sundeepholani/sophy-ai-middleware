@@ -16,6 +16,7 @@ import {
   RotateCw,
   ShieldCheck,
   Star,
+  Terminal,
   UserRoundPlus,
   UsersRound,
   Wrench,
@@ -171,6 +172,16 @@ const OPERATIONS: { icon: typeof FlaskConical; title: string; body: string }[] =
     icon: RotateCw,
     title: 'Mature key operations',
     body: 'Rotate secrets in place, revoke immediately, search active and revoked keys, and apply model changes or start evaluations in bulk.',
+  },
+  {
+    icon: Terminal,
+    title: 'Manage Sophy from your terminal',
+    body: 'Create, edit, rotate, and revoke keys from the CLI, with bulk model changes and evaluations under the same project permissions as the console.',
+  },
+  {
+    icon: ShieldCheck,
+    title: 'One code, familiar access',
+    body: 'Sign in to the console or CLI with a code sent to your email. Your project roles and resource ownership apply in both.',
   },
 ];
 

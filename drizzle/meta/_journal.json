@@ -92,6 +92,13 @@
       "when": 1785731970472,
       "tag": "0012_seven_day_image_input_retention",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790084855796,
+      "tag": "0013_email_otp_cli_sessions",
+      "breakpoints": true
     }
   ]
 }

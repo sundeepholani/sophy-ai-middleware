@@ -69,7 +69,7 @@ export const env = {
   /** iron-session cookie password (>= 32 chars). */
   sessionPassword: () => requireEnv('SESSION_PASSWORD'),
   /**
-   * Canonical origin (e.g. https://sophy.in) used to build magic-link URLs.
+   * Canonical origin (e.g. https://sophy.in) used to build invitation and notification URLs.
    * MUST be server-controlled — never derived from request Host headers, which
    * are attacker-spoofable and would let a poisoned link leak a valid token.
    * Falls back to Vercel's production URL; undefined locally (dev uses the request origin).

@@ -19,14 +19,18 @@ import {
 
 /**
  * Explicit POST acceptance. Merely opening/prefetching the link never consumes
- * it. The email-bound token can create the identity, but never creates “My
- * Project”; the invited project becomes default only when the identity has none.
+ * it. Email OTP sign-in is required first. The invited project becomes default
+ * only when the identity has none.
  */
 export async function acceptProjectInvitation(formData: FormData): Promise<void> {
   const rawToken = String(formData.get('token') ?? '');
   if (!rawToken) redirect('/admin/invitations/accept?error=1');
   const tokenHash = hashToken(rawToken);
   const signedIn = await currentUser();
+  if (!signedIn) {
+    const next = `/admin/invitations/accept?token=${encodeURIComponent(rawToken)}`;
+    redirect(`/admin/login?next=${encodeURIComponent(next)}`);
+  }
 
   let accepted: {
     userId: string;
@@ -84,84 +88,13 @@ export async function acceptProjectInvitation(formData: FormData): Promise<void>
         .limit(1);
       if (!invitation) return null;
 
-      let identity:
-        | {
-            id: string;
-            email: string;
-            status: 'active' | 'inactive';
-            defaultProjectId: string | null;
-          }
-        | undefined;
-      if (signedIn) {
-        [identity] = await tx
-          .select({
-            id: users.id,
-            email: users.email,
-            status: users.status,
-            defaultProjectId: users.defaultProjectId,
-          })
-          .from(users)
-          .where(eq(users.id, signedIn.userId))
-          .limit(1);
-        if (
-          !identity ||
-          identity.status !== 'active' ||
-          identity.email !== invitation.email
-        ) {
-          throw new Error('invitation_email_mismatch');
-        }
-      } else {
-        [identity] = await tx
-          .select({
-            id: users.id,
-            email: users.email,
-            status: users.status,
-            defaultProjectId: users.defaultProjectId,
-          })
-          .from(users)
-          .where(eq(users.email, invitation.email))
-          .limit(1);
-        if (identity?.status === 'inactive') {
-          throw new Error('invitation_inactive_identity');
-        }
-        if (!identity) {
-          const [created] = await tx
-            .insert(users)
-            .values({
-              email: invitation.email,
-              role: 'editor',
-              status: 'active',
-            })
-            .onConflictDoNothing({ target: users.email })
-            .returning({
-              id: users.id,
-              email: users.email,
-              status: users.status,
-              defaultProjectId: users.defaultProjectId,
-            });
-          identity = created;
-
-          // Different project invitations for one unknown email can be
-          // accepted concurrently. The unique email winner creates the
-          // identity; every other transaction safely reuses it.
-          if (!identity) {
-            [identity] = await tx
-              .select({
-                id: users.id,
-                email: users.email,
-                status: users.status,
-                defaultProjectId: users.defaultProjectId,
-              })
-              .from(users)
-              .where(eq(users.email, invitation.email))
-              .limit(1);
-            if (!identity || identity.status !== 'active') {
-              throw new Error('invitation_inactive_identity');
-            }
-          }
-        }
+      const [identity] = await tx
+        .select({ id: users.id, email: users.email, status: users.status,
+          defaultProjectId: users.defaultProjectId })
+        .from(users).where(eq(users.id, signedIn.userId)).limit(1);
+      if (!identity || identity.status !== 'active' || identity.email !== invitation.email) {
+        throw new Error('invitation_email_mismatch');
       }
-      if (!identity) return null;
 
       // Share the same per-identity linearization point as no-project recovery.
       // Whichever onboarding path commits first owns the initial default;

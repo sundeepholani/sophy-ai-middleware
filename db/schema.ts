@@ -425,6 +425,57 @@ export const loginTokens = pgTable(
   ],
 );
 
+// ---- Email OTP challenges and independently revocable CLI sessions ---------
+
+export const loginChallenges = pgTable(
+  'login_challenges',
+  {
+    id: uuid('id').primaryKey(),
+    email: text('email').notNull(),
+    /** HMAC includes challenge id, email and code; the secret stays outside DB. */
+    codeHash: text('code_hash').notNull(),
+    invitationId: uuid('invitation_id'),
+    attempts: integer('attempts').notNull().default(0),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('login_challenges_email_created_idx').on(t.email, t.createdAt),
+    index('login_challenges_retention_idx').on(t.createdAt),
+    foreignKey({
+      name: 'login_challenges_invitation_fk',
+      columns: [t.invitationId],
+      foreignColumns: [projectInvitations.id],
+    }).onDelete('restrict'),
+    check('login_challenges_attempts_check', sql`${t.attempts} between 0 and 5`),
+    check('login_challenges_email_check', sql`${t.email} = lower(btrim(${t.email}))`),
+  ],
+);
+
+export const cliSessions = pgTable(
+  'cli_sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').notNull(),
+    tokenHash: text('token_hash').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('cli_sessions_token_idx').on(t.tokenHash),
+    index('cli_sessions_user_idx').on(t.userId),
+    index('cli_sessions_expiry_idx').on(t.expiresAt),
+    index('cli_sessions_revoked_idx').on(t.revokedAt).where(sql`${t.revokedAt} is not null`),
+    foreignKey({
+      name: 'cli_sessions_user_fk',
+      columns: [t.userId],
+      foreignColumns: [users.id],
+    }).onDelete('cascade'),
+  ],
+);
+
 // ---- API keys (the whole config) -------------------------------------------
 
 export const apiKeys = pgTable(

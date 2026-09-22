@@ -14,8 +14,7 @@ import {
   type AdminSession,
 } from '@/lib/auth/session-config';
 
-// Public (unauthenticated) console paths: the email-link request, and the verify
-// landing/confirm (which establishes the session itself).
+// Public OTP request/verification and invitation landing pages.
 const PUBLIC_ADMIN_PATHS = [
   '/admin/login',
   '/api/admin/login',
@@ -25,6 +24,11 @@ const PUBLIC_ADMIN_PATHS = [
 
 export default async function proxy(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
+  // These handlers require their own revocable CLI bearer token. A browser
+  // cookie cannot authorize them, and the token cannot authorize browser pages.
+  if (pathname === '/api/admin/cli' || pathname.startsWith('/api/admin/cli/')) {
+    return NextResponse.next();
+  }
   const isPublic = PUBLIC_ADMIN_PATHS.some(
     (p) => pathname === p || pathname.startsWith(`${p}/`),
   );

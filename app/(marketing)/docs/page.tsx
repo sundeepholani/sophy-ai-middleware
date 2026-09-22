@@ -5,7 +5,7 @@ import { CodeTabs, CodeBlock } from '@/components/marketing/code-tabs';
 export const metadata: Metadata = {
   title: 'Docs — Sophy',
   description:
-    'Sophy documentation for its multi-project console, project-owned Vercel Gateway credentials, Chat Completions, Responses, audio transcription, embeddings, images, evaluation models, tools, files, key policy, knowledgebases, model evaluations, errors, and limits.',
+    'Sophy documentation for its console and CLI, email-code sign-in, project-owned Vercel Gateway credentials, AI APIs, key policy, knowledgebases, model evaluations, errors, and limits.',
 };
 
 const BASE_URL = 'https://sophy.in/v1';
@@ -48,6 +48,8 @@ const NAV_GROUPS = [
       { id: 'agent-mode', label: 'Agent mode' },
       { id: 'knowledgebases', label: 'Knowledgebases' },
       { id: 'operator-console', label: 'Operator console' },
+      { id: 'operator-sign-in', label: 'Operator sign-in' },
+      { id: 'sophy-cli', label: 'Sophy CLI' },
     ],
   },
   {
@@ -630,8 +632,8 @@ export default function DocsPage() {
               <Link href="/admin/login" className="text-primary underline-offset-4 hover:underline">
                 Sophy console
               </Link>
-              . Sign in with any verified email to create a renameable <Code>My Project</Code>, or
-              join an existing project through an Admin invitation.
+              . The console and CLI use email codes for operator sign-in. A verified email can
+              create a renameable <Code>My Project</Code> or accept an Admin invitation.
             </P>
             <CodeBlock label="header" code="Authorization: Bearer mw_live_…" />
             <P>
@@ -1742,6 +1744,165 @@ with open("out.png", "wb") as f:
                 the key automatically.
               </p>
             </Note>
+          </Section>
+
+          <Section id="operator-sign-in" title="Operator sign-in with email codes">
+            <P>
+              The console and CLI use the same email identity. Sophy sends a six-digit one-time
+              password (OTP) to your inbox. Each code expires after 10 minutes and permits at most
+              five attempts. A successful attempt consumes the code.
+            </P>
+            <P>
+              Sign-in links no longer authenticate an account. Invitation links identify the
+              invitation, but acceptance requires sign-in with the matching email account.
+            </P>
+            <Method method="POST" path="/api/admin/login" />
+            <CodeBlock label="request" code={'{ "email": "operator@example.com" }'} />
+            <CodeBlock label="response" code={'{ "ok": true, "challengeId": "<challenge-id>" }'} />
+            <P>
+              This response does not reveal whether an account exists. Email delivery and
+              verification are subject to rate limits. When Sophy issues a new code, it invalidates
+              the previous code for that email. The optional <Code>next</Code> field preserves a
+              local invitation path through sign-in.
+            </P>
+            <P>
+              Code requests require 60 seconds between deliveries. Each email permits five codes
+              per 15 minutes and 10 per hour. Each IP permits 10 requests per 15 minutes for each
+              sign-in endpoint. Sign-in JSON bodies permit at most 4 KiB.
+            </P>
+            <Method method="POST" path="/api/admin/login/verify" />
+            <FieldTable
+              caption="Email code verification fields"
+              rows={[
+                { name: 'challengeId', type: 'string', note: 'Required. The challengeId from the code request.' },
+                { name: 'code', type: 'string', note: 'Required. The six digits from the email, including any leading zero.' },
+                { name: 'client', type: 'web | cli', note: 'Required. Selects a browser cookie or a CLI session token.' },
+                { name: 'next', type: 'string', note: 'Optional local return path for the web flow. External URLs are not allowed.' },
+              ]}
+            />
+            <CodeBlock
+              label="CLI request"
+              code={'{ "challengeId": "<challenge-id>", "code": "012345", "client": "cli" }'}
+            />
+            <P>
+              For <Code>web</Code>, verification sets the browser session cookie and returns the
+              next local path. For <Code>cli</Code>, it returns <Code>token</Code>,{' '}
+              <Code>expiresAt</Code>, and <Code>user</Code>. A CLI session expires after five days.
+              Each request checks the current account, project membership, and project status.
+            </P>
+            <Method method="POST" path="/api/admin/cli/logout" />
+            <P>
+              Send the CLI token in the <Code>Authorization: Bearer</Code> header to revoke that
+              session. The CLI removes its local session after a successful logout.
+            </P>
+            <P>
+              Sign-in endpoints return <Code>{'{ "error": "code" }'}</Code> on errors.
+              Malformed verification requests return <Code>400 invalid_request</Code>.
+              Invalid emails return <Code>400 invalid_email</Code>. Invalid, used, or expired codes
+              return <Code>401 invalid_or_expired_code</Code>. Request limits return{' '}
+              <Code>429 too_many_attempts</Code>. An invalid CLI logout token returns{' '}
+              <Code>401 unauthorized</Code>.
+            </P>
+          </Section>
+
+          <Section id="sophy-cli" title="Sophy CLI">
+            <P>
+              The CLI provides terminal access to Sophy management. It uses the same project
+              roles, key ownership, and knowledgebase ownership as the console.
+              Admins manage project resources. Editors manage the keys and knowledgebases they own.
+            </P>
+            <P>
+              Install from a local checkout of the Sophy repository with Node.js 22 or newer.
+              The CLI package is available from source. There is no published npm package in this
+              release.
+            </P>
+            <CodeBlock
+              label="terminal"
+              code={`npm install -g ./cli
+sophy login --url https://sophy.in --email operator@example.com
+sophy projects list
+sophy projects use <project-id>
+sophy keys list
+sophy keys create --name "Support" --model openai/gpt-4.1
+sophy keys update <key-id> --data @changes.json
+sophy keys rotate <key-id>
+sophy logout`}
+            />
+            <P>
+              Login prompts for the email code without a browser callback. The CLI stores the
+              session locally. The <Code>--project</Code> flag overrides the local default for one
+              command. The <Code>--json</Code> flag produces compact JSON output.
+            </P>
+            <FieldTable
+              caption="CLI management coverage"
+              rows={[
+                { name: 'keys', type: 'management', note: 'List, create, edit, rotate, and revoke. Change models or start evaluations in bulk.' },
+                { name: 'key settings', type: 'policy', note: 'Set the model, prompt, parameters, schema, logging, RPM limit, knowledgebase, and transcript processor. Admins also control budgets and ownership.' },
+                { name: 'projects / gateway', type: 'management', note: 'List, create, rename, and select projects. Admins connect or disconnect the project Gateway credential.' },
+                { name: 'members / invitations', type: 'admin only', note: 'Manage project membership, roles, and pending invitations.' },
+                { name: 'knowledgebases', type: 'management', note: 'Create and remove collections. List, upload, retry, and remove documents within your access.' },
+                { name: 'evals / models / usage / logs', type: 'operations', note: 'Run or cancel evaluations. Read results, the model catalog, usage, and request logs within your access.' },
+              ]}
+            />
+            <P>
+              Key creation and rotation show the new secret once. Sophy cannot return an existing
+              secret. If an update replaces <Code>params</Code>, include every parameter you want
+              to retain. Run <Code>sophy --help</Code> for the command list, or read the{' '}
+              <a
+                href="https://github.com/sundeepholani/sophy-ai-middleware/blob/Prod/cli/README.md"
+                className="text-primary underline-offset-4 hover:underline"
+              >
+                CLI reference
+              </a>
+              .
+            </P>
+            <Method method="POST" path="/api/admin/cli" />
+            <P>
+              The management API requires a CLI session token in the <Code>Authorization: Bearer</Code>{' '}
+              header. Browser cookies and application API keys cannot authenticate this route.
+              CLI tokens cannot authenticate the AI routes under <Code>/v1</Code>.
+            </P>
+            <FieldTable
+              caption="CLI management request fields"
+              rows={[
+                { name: 'operation', type: 'string', note: 'Required. An operation name, such as keys.list.' },
+                { name: 'projectId', type: 'UUID', note: 'Required for project operations. The server checks your active membership.' },
+                { name: 'input', type: 'object', note: 'Operation-specific fields. The server validates types and rejects unknown fields.' },
+              ]}
+            />
+            <CodeBlock
+              label="management request"
+              code={'{ "operation": "keys.list", "projectId": "<project-id>", "input": {} }'}
+            />
+            <CodeBlock label="success" code={'{ "ok": true, "data": [] }'} />
+            <CodeBlock
+              label="error"
+              code={'{ "error": { "code": "forbidden", "message": "Your current project role or resource ownership does not allow this action." } }'}
+            />
+            <P>
+              Management responses use <Code>Cache-Control: no-store</Code>. Access decisions
+              happen on the server. A local project choice or a stale CLI session never grants
+              additional project rights.
+            </P>
+            <P>
+              JSON requests permit at most 1 MiB. Knowledgebase uploads use multipart fields{' '}
+              <Code>operation=knowledgebases.upload</Code>, <Code>projectId</Code>,{' '}
+              <Code>kbId</Code>, and <Code>file</Code>. Files permit at most 4 MiB, with 64 KiB
+              for the multipart envelope. Each account permits 120 management requests per minute.
+            </P>
+            <P>
+              Invalid fields return <Code>400 invalid_request</Code>. Missing project selection
+              returns <Code>400 project_required</Code>. Unknown operations return{' '}
+              <Code>400 unknown_operation</Code>. Invalid sessions return <Code>401 unauthorized</Code>,
+              denied access returns <Code>403 forbidden</Code>, and unavailable resources return{' '}
+              <Code>404 not_found</Code>.
+            </P>
+            <P>
+              Oversized requests return <Code>413 payload_too_large</Code>. Unsupported content
+              types return <Code>415 unsupported_media_type</Code>. Request limits return{' '}
+              <Code>429 rate_limited</Code> with <Code>Retry-After: 60</Code>. Unexpected failures
+              return <Code>500 internal_error</Code> without database details.
+            </P>
           </Section>
 
           <Section id="errors" title="Errors and retries">
