@@ -1811,11 +1811,16 @@ with open("out.png", "wb") as f:
               roles, key ownership, and knowledgebase ownership as the console.
               Admins manage project resources. Editors manage the keys and knowledgebases they own.
             </P>
-            <Note title="First npm publication pending">
-              The first public release of <Code>@sophyai/sophy-cli</Code> is pending. The npm commands
-              below apply after publication. The public package will not require access to the
-              Sophy source repository.
-            </Note>
+            <P>
+              Install the public{' '}
+              <a
+                href="https://www.npmjs.com/package/@sophyai/sophy-cli"
+                className="text-primary underline-offset-4 hover:underline"
+              >
+                @sophyai/sophy-cli npm package
+              </a>
+              . A source checkout is not required.
+            </P>
             <P>Use Node.js 22 or newer. Install the CLI from npm:</P>
             <CodeBlock
               label="terminal"

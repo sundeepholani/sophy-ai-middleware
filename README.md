@@ -144,8 +144,8 @@ Admins manage all resources in their project. Editors manage their own keys and
 knowledgebases. Only Admins can change key ownership, key budgets, members, or
 project settings. Every request reloads the current account and project access.
 
-The first public npm release of `@sophyai/sophy-cli` is pending. After publication, use
-Node.js 22 or newer to install the CLI without a source checkout:
+Install the public [@sophyai/sophy-cli npm package](https://www.npmjs.com/package/@sophyai/sophy-cli)
+with Node.js 22 or newer. A source checkout is not required:
 
 ```bash
 npm install -g @sophyai/sophy-cli
