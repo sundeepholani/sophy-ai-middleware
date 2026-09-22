@@ -2,7 +2,7 @@
 
 Manage Sophy projects, API keys, evaluations, knowledgebases, members, usage, logs, and settings from a terminal. The server applies the same project roles and ownership rules as the web console.
 
-[Sophy](https://sophy.in) · [Documentation](https://sophy.in/docs#sophy-cli)
+[Sophy](https://sophy.in) · [Documentation](https://sophy.in/docs#sophy-cli) · [npm package](https://www.npmjs.com/package/@sophyai/sophy-cli)
 
 ## Install
 
@@ -322,4 +322,6 @@ Then confirm the published version:
 npm view @sophyai/sophy-cli version
 ```
 
-After the first publication succeeds, remove the pending-release notices from the repository README and Sophy documentation. For later releases, use a new package version before publication.
+npm's [publish-time scanning](https://github.com/orgs/community/discussions/203413) can delay installation after a successful publish. If `npm view` initially returns `404`, wait and retry until the version appears before you confirm a fresh installation.
+
+After publication, confirm that the registry returns the intended version. Confirm that a fresh installation runs. For each release, use a new package version before publication.
