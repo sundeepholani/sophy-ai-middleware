@@ -84,7 +84,9 @@ JSON error response.
 
 ## Operate Sophy
 
-The passwordless console is at `/admin`. Any verified email can create an account;
+The console is at `/admin`. Sign in with a six-digit code sent to your email.
+The same code flow works in the CLI. Each code expires after 10 minutes and
+permits at most five attempts. Any verified email can create an account;
 independent signup creates a renameable `My Project` and makes that person its
 Admin. Invitation-first signup joins only the invited project and makes it the
 person's default. The same identity can be an Admin in one project and an Editor
@@ -135,6 +137,41 @@ and evaluations.
   project name and Gateway connection, and project-specific evaluation judge and
   summary-email settings.
 
+## Sophy CLI
+
+The CLI uses the same project roles and ownership rules as the console.
+Admins manage all resources in their project. Editors manage their own keys and
+knowledgebases. Only Admins can change key ownership, key budgets, members, or
+project settings. Every request reloads the current account and project access.
+
+Install the CLI from this repository with Node.js 22 or newer:
+
+```bash
+npm install -g ./cli
+sophy login --url https://sophy.in
+sophy projects list
+sophy keys list --project <project-id>
+```
+
+Enter your email, then enter the code from your inbox. No browser callback is
+required. The CLI stores a local session with a fixed five-day expiry.
+`sophy logout` revokes that session on the server and removes the local session.
+
+The CLI supports key creation, editing, rotation, revocation, bulk model changes,
+and evaluations. It also provides project, Gateway, member, invitation,
+knowledgebase, model catalog, usage, and log commands. Creation and rotation
+return the new key secret once. Existing secrets cannot be retrieved.
+
+See [cli/README.md](cli/README.md) for commands, JSON input, file uploads, and
+session storage. The CLI is installed from source. This repository does not
+publish an npm package as part of the change.
+
+The CLI management endpoint is `POST /api/admin/cli`. It requires a CLI session
+token and accepts `{ "operation", "projectId", "input" }`. Successful responses
+use `{ "ok": true, "data": ... }`. Errors use `{ "error": { "code", "message" } }`.
+Application keys (`mw_live_...`) cannot authenticate this endpoint. CLI sessions
+cannot authenticate `/v1/*`.
+
 ## Stack
 
 Node.js 22 or newer, Next.js 16 (App Router), AI SDK v6 with an isolated v7
@@ -165,7 +202,7 @@ Blob, shadcn/ui, and iron-session.
      keep the fingerprint key immutable after first use unless every active
      credential is re-fingerprinted in one coordinated rotation
    - `AI_GATEWAY_API_KEY` only for the time-limited legacy migration bridge
-   - ZeptoMail variables for production sign-in links and optional evaluation
+   - ZeptoMail variables for production sign-in codes and optional evaluation
      summaries
 
    Generate random secrets with `openssl rand -hex 32`.
@@ -176,14 +213,37 @@ Blob, shadcn/ui, and iron-session.
    pnpm db:migrate
    ```
 
+   Before deployment, apply
+   [0013_email_otp_cli_sessions.sql](drizzle/0013_email_otp_cli_sessions.sql)
+   through the migration command. It adds storage for login challenges and
+   revocable CLI sessions, plus indexes for retention cleanup.
+   Old sign-in links no longer authenticate an account. Request a new code
+   through the console or CLI. Invitation links still identify invitations,
+   but recipients must sign in with a code before acceptance. Existing valid
+   browser sessions remain active.
+
 ## Develop
 
 ```bash
 pnpm install
 pnpm dev        # http://localhost:3000
 pnpm typecheck
-pnpm test
+pnpm test       # Application unit tests and standalone CLI tests
 pnpm build
+```
+
+The PostgreSQL integration tests require an explicit connection to a local
+database named `sophy_test`. They use real transactions to verify OTP redemption,
+CLI sessions, project roles, and resource ownership. Each test suite creates a
+random schema and removes that schema afterward. Without
+`SOPHY_TEST_DATABASE_URL`, these tests are skipped.
+
+Create a dedicated local `sophy_test` database before this command. Replace the
+local username and port as needed. Never use a production database for tests.
+
+```bash
+SOPHY_TEST_DATABASE_URL='postgresql://test_user@127.0.0.1:5432/sophy_test?sslmode=disable' \
+  pnpm exec vitest run tests/auth-otp-postgres.test.ts tests/cli-management.integration.test.ts
 ```
 
 The idempotent `/api/cron/rollup` job runs every 15 minutes. It rolls up usage,
@@ -192,6 +252,11 @@ expired client uploads (24 hours by default, extended to the matching seven-day
 window for content-logged image references), processes model evaluations, and
 ingests knowledgebase documents. `CRON_SECRET` protects the route, and a
 Postgres lock prevents overlapping runs; Redis is not used.
+
+The cron also removes old authentication records. Login challenges become
+eligible after 24 hours. CLI sessions become eligible 24 hours after expiry or
+revocation. Each run removes at most 500 records from each table. Active sessions
+and recent sign-in rate history remain intact.
 
 ## Minimal client migration
 

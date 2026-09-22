@@ -20,6 +20,7 @@ import { discardExpiredImageInputs } from '@/lib/usage/record';
 import { processEvalRuns } from '@/lib/eval/process';
 import { processKbIngestion } from '@/lib/kb/ingest';
 import { env } from '@/lib/env';
+import { purgeExpiredAuthentication } from '@/lib/auth/maintenance';
 
 const REQUEST_LOG_RETENTION_DAYS = 30;
 
@@ -97,6 +98,7 @@ export async function GET(req: Request): Promise<Response> {
   }
 
   try {
+    const purgedAuthentication = await purgeExpiredAuthentication();
     const rolled = await rollupRecentDays();
     // Remove complete image values before sweeping any Sophy-owned source
     // objects whose matching retention window has ended.
@@ -111,6 +113,7 @@ export async function GET(req: Request): Promise<Response> {
     return Response.json({
       ok: true,
       rolledRows: rolled,
+      purgedAuthentication,
       discardedImageInputs,
       sweptBlobs: swept,
       purgedRequestLogs: purged.rowCount ?? 0,

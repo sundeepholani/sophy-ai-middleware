@@ -8,6 +8,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
+import { getIdentityViewer } from '@/lib/auth/viewer';
 import { getProjectInvitationPreview } from '@/lib/projects/repository';
 import { acceptProjectInvitation, switchInvitationAccount } from './actions';
 
@@ -19,6 +20,7 @@ export default async function AcceptInvitationPage({
   searchParams: Promise<{ token?: string; error?: string; accepted?: string }>;
 }) {
   const params = await searchParams;
+  const identity = await getIdentityViewer();
   const existingAccess = params.accepted === 'existing';
   const accountMismatch = params.error === 'account_mismatch';
   const invitation =
@@ -47,7 +49,7 @@ export default async function AcceptInvitationPage({
               : validAccountMismatch
                 ? `This invitation belongs to ${invitation.email}.`
               : invitation
-                ? 'Review and explicitly accept your Sophy project invitation.'
+                ? identity ? 'Review and explicitly accept your Sophy project invitation.' : 'Verify your email with a sign-in code, then accept your invitation.'
                 : 'This invitation could not be accepted.'}
           </CardDescription>
         </CardHeader>
@@ -104,7 +106,7 @@ export default async function AcceptInvitationPage({
                 You can change your default later.
               </p>
               <Button type="submit" className="w-full">
-                Accept invitation
+                {identity ? 'Accept invitation' : 'Continue with an email code'}
               </Button>
             </form>
           ) : (

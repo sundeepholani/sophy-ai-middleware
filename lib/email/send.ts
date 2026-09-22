@@ -3,7 +3,7 @@
  *
  * Feature-gated: sending is a no-op (returns false) unless ZEPTOMAIL_TOKEN and
  * ZEPTOMAIL_FROM are set — so local dev and unconfigured environments degrade
- * gracefully (the caller can fall back, e.g. log a magic link in non-prod).
+ * gracefully. Authentication callers must never log codes or credentials.
  * Throws only on a hard send failure (non-2xx from the API).
  *
  * The API host is data-center specific (US api.zeptomail.com, India .in, EU .eu);

@@ -1,0 +1,11 @@
+{
+  "name": "@sophy/cli",
+  "version": "0.1.0",
+  "description": "Manage Sophy projects and API keys from your terminal",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "bin": { "sophy": "bin/sophy.mjs" },
+  "files": ["bin/", "src/", "operations.json", "README.md"],
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "private": true
+}
