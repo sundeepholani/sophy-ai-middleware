@@ -1,11 +1,34 @@
 {
-  "name": "@sophy/cli",
+  "name": "@sophyai/sophy-cli",
   "version": "0.1.0",
   "description": "Manage Sophy projects and API keys from your terminal",
+  "license": "MIT",
+  "homepage": "https://sophy.in/docs#sophy-cli",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sundeepholani/sophy-ai-middleware.git",
+    "directory": "cli"
+  },
+  "keywords": ["sophy", "cli", "ai", "api-keys"],
   "type": "module",
   "engines": { "node": ">=22" },
   "bin": { "sophy": "bin/sophy.mjs" },
-  "files": ["bin/", "src/", "operations.json", "README.md"],
-  "scripts": { "test": "node --test test/*.test.mjs" },
-  "private": true
+  "files": [
+    "bin/sophy.mjs",
+    "src/cli.mjs",
+    "src/config.mjs",
+    "src/transport.mjs",
+    "operations.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check:package": "node scripts/check-package.mjs",
+    "prepublishOnly": "npm test && npm run check:package"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
 }

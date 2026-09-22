@@ -1811,14 +1811,15 @@ with open("out.png", "wb") as f:
               roles, key ownership, and knowledgebase ownership as the console.
               Admins manage project resources. Editors manage the keys and knowledgebases they own.
             </P>
-            <P>
-              Install from a local checkout of the Sophy repository with Node.js 22 or newer.
-              The CLI package is available from source. There is no published npm package in this
-              release.
-            </P>
+            <Note title="First npm publication pending">
+              The first public release of <Code>@sophyai/sophy-cli</Code> is pending. The npm commands
+              below apply after publication. The public package will not require access to the
+              Sophy source repository.
+            </Note>
+            <P>Use Node.js 22 or newer. Install the CLI from npm:</P>
             <CodeBlock
               label="terminal"
-              code={`npm install -g ./cli
+              code={`npm install -g @sophyai/sophy-cli
 sophy login --url https://sophy.in --email operator@example.com
 sophy projects list
 sophy projects use <project-id>
@@ -1828,10 +1829,22 @@ sophy keys update <key-id> --data @changes.json
 sophy keys rotate <key-id>
 sophy logout`}
             />
+            <P>To run a command without a global installation, use <Code>npx</Code>:</P>
+            <CodeBlock
+              label="terminal"
+              code={`npx --package @sophyai/sophy-cli sophy --help
+npx --package @sophyai/sophy-cli sophy login --email operator@example.com
+npx --package @sophyai/sophy-cli sophy projects list`}
+            />
             <P>
               Login prompts for the email code without a browser callback. The CLI stores the
               session locally. The <Code>--project</Code> flag overrides the local default for one
-              command. The <Code>--json</Code> flag produces compact JSON output.
+              command. The <Code>--json</Code> flag produces compact JSON output. The installed
+              command and <Code>npx</Code> share the same local session storage.
+            </P>
+            <P>
+              For development from a source checkout, run <Code>npm install -g ./cli</Code> from
+              the repository root.
             </P>
             <FieldTable
               caption="CLI management coverage"
@@ -1847,14 +1860,8 @@ sophy logout`}
             <P>
               Key creation and rotation show the new secret once. Sophy cannot return an existing
               secret. If an update replaces <Code>params</Code>, include every parameter you want
-              to retain. Run <Code>sophy --help</Code> for the command list, or read the{' '}
-              <a
-                href="https://github.com/sundeepholani/sophy-ai-middleware/blob/Prod/cli/README.md"
-                className="text-primary underline-offset-4 hover:underline"
-              >
-                CLI reference
-              </a>
-              .
+              to retain. Run <Code>sophy --help</Code> for the command list. Run{' '}
+              <Code>sophy &lt;command&gt; --help</Code> for the input fields of a command.
             </P>
             <Method method="POST" path="/api/admin/cli" />
             <P>

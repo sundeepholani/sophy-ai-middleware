@@ -144,13 +144,21 @@ Admins manage all resources in their project. Editors manage their own keys and
 knowledgebases. Only Admins can change key ownership, key budgets, members, or
 project settings. Every request reloads the current account and project access.
 
-Install the CLI from this repository with Node.js 22 or newer:
+The first public npm release of `@sophyai/sophy-cli` is pending. After publication, use
+Node.js 22 or newer to install the CLI without a source checkout:
 
 ```bash
-npm install -g ./cli
+npm install -g @sophyai/sophy-cli
 sophy login --url https://sophy.in
 sophy projects list
 sophy keys list --project <project-id>
+```
+
+To run commands without a global installation, use:
+
+```bash
+npx --package @sophyai/sophy-cli sophy login --email operator@example.com
+npx --package @sophyai/sophy-cli sophy projects list
 ```
 
 Enter your email, then enter the code from your inbox. No browser callback is
@@ -163,8 +171,12 @@ knowledgebase, model catalog, usage, and log commands. Creation and rotation
 return the new key secret once. Existing secrets cannot be retrieved.
 
 See [cli/README.md](cli/README.md) for commands, JSON input, file uploads, and
-session storage. The CLI is installed from source. This repository does not
-publish an npm package as part of the change.
+session storage. The public [Sophy documentation](https://sophy.in/docs#sophy-cli)
+also describes the commands and access rules.
+
+For development, install from the repository root with `npm install -g ./cli`.
+Before a release, run `npm run check:package --prefix cli`. See the
+[release procedure](cli/README.md#publish-a-release) for npm authentication and publication.
 
 The CLI management endpoint is `POST /api/admin/cli`. It requires a CLI session
 token and accepts `{ "operation", "projectId", "input" }`. Successful responses

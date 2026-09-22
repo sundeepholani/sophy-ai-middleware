@@ -6,6 +6,7 @@ import { configDirectory, loadConfig, normalizeOrigin, requireSession, updateCon
 import { request } from './transport.mjs';
 
 const operations = JSON.parse(await readFile(new URL('../operations.json', import.meta.url), 'utf8'));
+const { version } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 const booleanOptions = new Set(['json', 'yes', 'help', 'version', 'log-content', 'stop-running-eval', 'active']);
 const commonOptions = new Set(['url', 'project', 'data', 'json', 'yes', 'help', 'version']);
 const kebab = (value) => value.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
@@ -270,7 +271,7 @@ async function uploadBody(command, input, options, projectId) {
 
 export async function run(argv = process.argv.slice(2)) {
   const { positionals, options } = parseArguments(argv);
-  if (options.version) { process.stdout.write('0.1.0\n'); return; }
+  if (options.version) { process.stdout.write(`${version}\n`); return; }
   if (options.help || positionals.length === 0 || positionals[0] === 'help') {
     showHelp(positionals[0] === 'help' ? positionals.slice(1) : positionals);
     return;
