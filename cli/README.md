@@ -2,23 +2,28 @@
 
 Manage Sophy projects, API keys, evaluations, knowledgebases, members, usage, logs, and settings from a terminal. The server applies the same project roles and ownership rules as the web console.
 
+[Sophy](https://sophy.in) · [Documentation](https://sophy.in/docs#sophy-cli)
+
 ## Install
 
-Use Node.js 22 or later. From this repository, run:
+Use Node.js 22 or later. Install the CLI from npm:
 
 ```sh
-npm install -g ./cli
+npm install -g @sophyai/sophy-cli
 sophy --help
 ```
 
-This package has no external dependencies. Installation uses this local source directory. This change does not publish an npm package.
+The npm package has no external dependencies. A public installation does not require access to the Sophy source repository.
 
-For a temporary local installation without global permissions, run:
+To run a command without a global installation, use `npx`:
 
 ```sh
-npm install --prefix /tmp/sophy-cli-install ./cli
-/tmp/sophy-cli-install/node_modules/.bin/sophy --help
+npx --package @sophyai/sophy-cli sophy --help
+npx --package @sophyai/sophy-cli sophy login --email person@example.com
+npx --package @sophyai/sophy-cli sophy projects list
 ```
+
+The installed command and `npx` use the same local session storage.
 
 ## Sign in with an email code
 
@@ -262,11 +267,59 @@ The storage directory uses mode `0700`. The file uses mode `0600`. The CLI rejec
 
 The server verifies the active account, session expiry, project membership, role, and resource ownership for each command. Console access changes therefore apply to CLI requests too. A Sophy API key cannot replace a CLI session token.
 
+## Install from source
+
+For development, install from the root of a source checkout:
+
+```sh
+npm install -g ./cli
+sophy --help
+```
+
+For a temporary installation without global permissions, run:
+
+```sh
+npm install --prefix /tmp/sophy-cli-install ./cli
+/tmp/sophy-cli-install/node_modules/.bin/sophy --help
+```
+
 ## Development checks
 
 ```sh
 npm test --prefix cli
-npm pack ./cli --dry-run
+npm run check:package --prefix cli
 ```
 
 The tests use local fake HTTP servers and synthetic credentials. They cover authentication, access-error handling, origin isolation, redirect rejection, input mapping, uploads, confirmations, concurrent session updates, revocation retries, and logout.
+
+## Publish a release
+
+The npm package name is `@sophyai/sophy-cli`. Publication requires an npm account with write access to the `sophyai` scope.
+
+From the repository root, run the package checks:
+
+```sh
+npm run check:package --prefix cli
+```
+
+Sign in to the authorized npm account:
+
+```sh
+npm login
+npm whoami
+```
+
+Publish from the CLI directory:
+
+```sh
+cd cli
+npm publish --access public
+```
+
+Then confirm the published version:
+
+```sh
+npm view @sophyai/sophy-cli version
+```
+
+After the first publication succeeds, remove the pending-release notices from the repository README and Sophy documentation. For later releases, use a new package version before publication.
