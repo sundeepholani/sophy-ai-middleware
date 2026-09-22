@@ -29,7 +29,7 @@ import { cn } from '@/lib/utils';
 export const metadata: Metadata = {
   title: 'Sophy — one governed API for your AI stack',
   description:
-    'Sophy is a multi-project, OpenAI-compatible AI gateway for language, transcription, image, and embedding models, plus a native route for evaluation models, with project-owned Gateway credentials, governed keys, knowledgebases, evaluations, analytics, and cost controls.',
+    'Sophy is a multi-project, OpenAI-compatible AI gateway with governed keys, knowledgebases, evaluations, and cost controls. Manage it from the console or CLI, with email OTP sign-in and commands for coding agents.',
 };
 
 const HERO_SAMPLES = [
@@ -260,6 +260,38 @@ console.log(resp.output_text);`,
   },
 ];
 
+const CLI_SAMPLES = [
+  {
+    label: 'Install and sign in',
+    code: `npm install -g @sophyai/sophy-cli
+sophy login
+# Enter the code sent to your email.
+
+sophy projects list
+sophy projects use <project-id>
+sophy keys list`,
+  },
+  {
+    label: 'Update instructions',
+    code: `sophy keys get <key-id> --project <project-id> --json
+
+sophy keys update <key-id> --project <project-id> \\
+  --system-prompt "Answer using the support guide."
+
+sophy keys get <key-id> --project <project-id> --json`,
+  },
+  {
+    label: 'Discover commands',
+    code: `# Your coding agent can read the same built-in help.
+sophy --help
+sophy keys --help
+sophy keys update --help
+
+# Read settings as compact JSON after sign-in.
+sophy keys get <key-id> --project <project-id> --json`,
+  },
+];
+
 export default function HomePage() {
   return (
     <>
@@ -280,7 +312,7 @@ export default function HomePage() {
             <p className="max-w-xl text-lg text-muted-foreground text-pretty">
               Sophy puts supported models behind project-scoped keys. Each project brings its own
               Vercel AI Gateway credential while its team governs prompts, models, schemas,
-              knowledge, logging, and limits from one console.
+              knowledge, logging, and limits from the console or CLI.
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <Link href="/docs" className={cn(buttonVariants({ size: 'lg' }), 'h-11 px-6 text-base')}>
@@ -295,6 +327,13 @@ export default function HomePage() {
                 )}
               >
                 Sign in or create an account
+              </Link>
+              <Link
+                href="#cli"
+                className="inline-flex items-center gap-2 rounded-md px-2 py-2 text-sm font-medium text-primary hover:underline"
+              >
+                <Terminal className="size-4" />
+                Explore the CLI
               </Link>
             </div>
             <p className="text-xs text-muted-foreground">
@@ -424,6 +463,48 @@ export default function HomePage() {
         </div>
       </section>
 
+      <section id="cli" aria-labelledby="cli-title" className="scroll-mt-20 border-b">
+        <div className="mx-auto grid w-full max-w-7xl items-center gap-12 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:px-8">
+          <div className="space-y-5">
+            <p className="text-sm font-medium text-primary">Sophy CLI · Available on npm</p>
+            <h2 id="cli-title" className="font-heading text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+              Put Sophy in your terminal and your coding workflow
+            </h2>
+            <p className="text-lg text-muted-foreground text-pretty">
+              Create keys, update their instructions, switch models, and inspect usage from your
+              terminal. Your coding agent can use the same commands in its signed-in environment.
+            </p>
+            <ul className="space-y-3 text-sm leading-relaxed text-muted-foreground">
+              <li>
+                <strong className="font-medium text-foreground">Install from npm.</strong>{' '}
+                Use Node.js 22 or newer. No source repository access is required.
+              </li>
+              <li>
+                <strong className="font-medium text-foreground">One identity across the console and CLI.</strong>{' '}
+                Sign in with an email OTP and use your existing project permissions.
+              </li>
+              <li>
+                <strong className="font-medium text-foreground">Commands an agent can discover.</strong>{' '}
+                Built-in help explains inputs. JSON input and output support scripts and coding agents.
+              </li>
+            </ul>
+            <div className="flex flex-wrap items-center gap-3">
+              <Link href="/docs#sophy-cli" className={cn(buttonVariants())}>
+                Read the CLI guide
+                <ArrowRight />
+              </Link>
+              <a
+                href="https://www.npmjs.com/package/@sophyai/sophy-cli"
+                className={cn(buttonVariants({ variant: 'outline' }))}
+              >
+                View npm package
+              </a>
+            </div>
+          </div>
+          <CodeTabs samples={CLI_SAMPLES} className="min-w-0" />
+        </div>
+      </section>
+
       <section id="evaluation" className="scroll-mt-20 border-b">
         <div className="mx-auto w-full max-w-7xl px-4 py-20 sm:px-6 lg:px-8">
           <div className="max-w-2xl space-y-3">
@@ -517,7 +598,7 @@ export default function HomePage() {
               Ready to put your AI stack under control?
             </h2>
             <p className="text-primary-foreground/80">
-              Read the compatibility guide or sign in to manage keys, knowledge, usage, and evaluations.
+              Manage keys, knowledge, usage, and evaluations from the console or CLI.
             </p>
           </div>
           <div className="flex flex-wrap gap-3">

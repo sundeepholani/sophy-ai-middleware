@@ -49,7 +49,15 @@ const NAV_GROUPS = [
       { id: 'knowledgebases', label: 'Knowledgebases' },
       { id: 'operator-console', label: 'Operator console' },
       { id: 'operator-sign-in', label: 'Operator sign-in' },
-      { id: 'sophy-cli', label: 'Sophy CLI' },
+    ],
+  },
+  {
+    label: 'Sophy CLI',
+    items: [
+      { id: 'sophy-cli', label: 'Install and sign in' },
+      { id: 'cli-key-instructions', label: 'Update key instructions' },
+      { id: 'cli-agents', label: 'Use with coding agents' },
+      { id: 'cli-reference', label: 'Commands and API' },
     ],
   },
   {
@@ -1807,8 +1815,8 @@ with open("out.png", "wb") as f:
 
           <Section id="sophy-cli" title="Sophy CLI">
             <P>
-              The CLI provides terminal access to Sophy management. It uses the same project
-              roles, key ownership, and knowledgebase ownership as the console.
+              Manage Sophy from a terminal or a coding agent that can run terminal commands.
+              The CLI uses the same project roles and resource ownership as the console.
               Admins manage project resources. Editors manage the keys and knowledgebases they own.
             </P>
             <P>
@@ -1825,32 +1833,127 @@ with open("out.png", "wb") as f:
             <CodeBlock
               label="terminal"
               code={`npm install -g @sophyai/sophy-cli
-sophy login --url https://sophy.in --email operator@example.com
-sophy projects list
-sophy projects use <project-id>
-sophy keys list
-sophy keys create --name "Support" --model openai/gpt-4.1
-sophy keys update <key-id> --data @changes.json
-sophy keys rotate <key-id>
-sophy logout`}
+sophy --help`}
             />
             <P>To run a command without a global installation, use <Code>npx</Code>:</P>
             <CodeBlock
               label="terminal"
               code={`npx --package @sophyai/sophy-cli sophy --help
-npx --package @sophyai/sophy-cli sophy login --email operator@example.com
-npx --package @sophyai/sophy-cli sophy projects list`}
+npx --package @sophyai/sophy-cli sophy login --email operator@example.com`}
             />
             <P>
-              Login prompts for the email code without a browser callback. The CLI stores the
-              session locally. The <Code>--project</Code> flag overrides the local default for one
-              command. The <Code>--json</Code> flag produces compact JSON output. The installed
-              command and <Code>npx</Code> share the same local session storage.
+              The following examples use the installed <Code>sophy</Code> command.
+              With <Code>npx</Code>, prefix each command with{' '}
+              <Code>npx --package @sophyai/sophy-cli</Code>.
+            </P>
+            <P>Sign in with your email. Then choose a project from your project list:</P>
+            <CodeBlock
+              label="terminal"
+              code={`sophy login --email operator@example.com
+sophy whoami
+sophy projects list
+sophy projects use <project-id>
+sophy keys list`}
+            />
+            <P>
+              Enter the six-digit email code at the hidden login prompt. The default server is{' '}
+              <Code>https://sophy.in</Code>. The installed command and <Code>npx</Code> use the same
+              local session. The <Code>--project</Code> flag selects a project for one command.
+              Run <Code>sophy logout</Code> to revoke the session.
             </P>
             <P>
               For development from a source checkout, run <Code>npm install -g ./cli</Code> from
               the repository root.
             </P>
+          </Section>
+
+          <Section id="cli-key-instructions" title="Update key instructions">
+            <P>
+              The <Code>systemPrompt</Code> field stores the instructions for a key.
+              An update applies to subsequent requests with that key. Read the current settings
+              before you change them:
+            </P>
+            <CodeBlock
+              label="terminal"
+              code={`sophy keys get <key-id> --project <project-id> --json`}
+            />
+            <P>For a short instruction, use the <Code>--system-prompt</Code> flag:</P>
+            <CodeBlock
+              label="terminal"
+              code={`sophy keys update <key-id> --project <project-id> \\
+  --system-prompt "Answer support questions using the attached knowledgebase."`}
+            />
+            <P>
+              For longer instructions, save a JSON file named <Code>key-instructions.json</Code>.
+              Use <Code>\n</Code> for line breaks inside the JSON string:
+            </P>
+            <CodeBlock
+              label="key-instructions.json"
+              code={`{
+  "systemPrompt": "You are the support assistant.\\nUse the attached knowledgebase.\\nIf the answer is unavailable, say so."
+}`}
+            />
+            <P>Apply the file. Then read the key again to confirm the saved instructions:</P>
+            <CodeBlock
+              label="terminal"
+              code={`sophy keys update <key-id> --project <project-id> \\
+  --data @key-instructions.json --json
+sophy keys get <key-id> --project <project-id> --json`}
+            />
+            <Note title="Change only the fields you intend to change">
+              An update preserves omitted settings. The example changes only <Code>systemPrompt</Code>.
+              A supplied <Code>params</Code> object replaces all existing parameters.
+              For a parameter change, include every parameter you want to retain.
+              JSON <Code>null</Code> clears the system prompt.
+            </Note>
+          </Section>
+
+          <Section id="cli-agents" title="Use Sophy with coding agents">
+            <P>
+              A coding agent can use the CLI through its terminal. Commands run with the account
+              signed in to that environment. A remote agent needs its own login in its environment.
+              Your browser session or another computer&apos;s CLI session does not sign in that agent.
+            </P>
+            <P>
+              Use <Code>--json</Code> for compact JSON output. Use <Code>--data @file.json</Code> for
+              nested input or long prompts. Project roles and resource ownership still apply to
+              every command. Admin-only changes remain restricted to project admins.
+            </P>
+            <P>Copy these instructions into a task for your coding agent:</P>
+            <CodeBlock
+              label="Agent instructions"
+              code={`Use the Sophy CLI for this task.
+
+1. Run sophy --help, then sophy keys update --help to read the supported fields.
+2. Run sophy whoami --json. If sign-in is required, ask me to complete
+   sophy login in this environment. Do not copy a session from another machine.
+3. Run sophy projects list --json. Use the project ID and key ID I identify.
+   Include --project <project-id> on every project command.
+4. Before editing, run:
+   sophy keys get <key-id> --project <project-id> --json
+5. Put only the requested changes in changes.json. Use systemPrompt for instructions.
+   Preserve omitted settings. If changing params, include all parameters to retain.
+6. Apply the changes:
+   sophy keys update <key-id> --project <project-id> --data @changes.json --json
+7. Read the key again with keys get. Confirm the requested changes and preserved settings.
+   Report the saved result. Treat any nonzero exit code as incomplete work.
+8. Use --yes only for an action I explicitly authorized. Do not include secrets in reports.`}
+            />
+            <P>
+              The CLI returns exit code <Code>1</Code> for errors. Exit code <Code>2</Code> means
+              a bulk action skipped items or a key update requires evaluation-stop confirmation.
+              The JSON result identifies the incomplete work.
+            </P>
+          </Section>
+
+          <Section id="cli-reference" title="CLI commands and management API">
+            <P>Discover commands, command groups, and input fields through the built-in help:</P>
+            <CodeBlock
+              label="terminal"
+              code={`sophy --help
+sophy keys --help
+sophy keys update --help`}
+            />
             <FieldTable
               caption="CLI management coverage"
               rows={[
@@ -1858,15 +1961,14 @@ npx --package @sophyai/sophy-cli sophy projects list`}
                 { name: 'key settings', type: 'policy', note: 'Set the model, prompt, parameters, schema, logging, RPM limit, knowledgebase, and transcript processor. Admins also control budgets and ownership.' },
                 { name: 'projects / gateway', type: 'management', note: 'List, create, rename, and select projects. Admins connect or disconnect the project Gateway credential.' },
                 { name: 'members / invitations', type: 'admin only', note: 'Manage project membership, roles, and pending invitations.' },
+                { name: 'settings', type: 'admin only', note: 'Read or update the project judge model and notification email.' },
                 { name: 'knowledgebases', type: 'management', note: 'Create and remove collections. List, upload, retry, and remove documents within your access.' },
                 { name: 'evals / models / usage / logs', type: 'operations', note: 'Run or cancel evaluations. Read results, the model catalog, usage, and request logs within your access.' },
               ]}
             />
             <P>
               Key creation and rotation show the new secret once. Sophy cannot return an existing
-              secret. If an update replaces <Code>params</Code>, include every parameter you want
-              to retain. Run <Code>sophy --help</Code> for the command list. Run{' '}
-              <Code>sophy &lt;command&gt; --help</Code> for the input fields of a command.
+              secret. Rotation and revocation require confirmation.
             </P>
             <Method method="POST" path="/api/admin/cli" />
             <P>

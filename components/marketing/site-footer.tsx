@@ -7,6 +7,7 @@ const COLUMNS: { title: string; links: { label: string; href: string }[] }[] = [
     links: [
       { label: 'Features', href: '/#features' },
       { label: 'How it works', href: '/#how-it-works' },
+      { label: 'Sophy CLI', href: '/#cli' },
       { label: 'Model evaluations', href: '/#evaluation' },
     ],
   },
@@ -15,6 +16,7 @@ const COLUMNS: { title: string; links: { label: string; href: string }[] }[] = [
     links: [
       { label: 'API docs', href: '/docs' },
       { label: 'Quickstart', href: '/docs#quickstart' },
+      { label: 'CLI guide', href: '/docs#sophy-cli' },
       { label: 'Audio transcription', href: '/docs#audio-transcriptions' },
       { label: 'Embeddings', href: '/docs#embeddings' },
       { label: 'Evaluate API', href: '/docs#evaluate' },
