@@ -80,6 +80,11 @@ export interface CallContext {
   structured: boolean;
   /** The JSON schema to enforce (from the key's config). */
   schema: Record<string, unknown> | null;
+  /**
+   * True when per-turn knowledgebase context was folded into systemPrompt: the prefix then
+   * changes every turn, so an Anthropic cache write over the conversation would rarely be read.
+   */
+  kbAugmented?: boolean;
   includeUsage: boolean;
   /** Whether to persist inbound/outbound message content for this request. */
   logContent: boolean;
@@ -131,7 +136,7 @@ export function commonCall(ctx: CallContext, messages: ModelMessage[]) {
   return {
     model: ctx.gateway.gateway.languageModel(ctx.model),
     system: buildSystem(ctx.systemPrompt),
-    messages: withPromptCache(ctx.model, messages),
+    messages: ctx.kbAugmented ? messages : withPromptCache(ctx.model, messages),
     temperature: ctx.params.temperature,
     topP: ctx.params.topP,
     maxOutputTokens: ctx.params.maxOutputTokens,
