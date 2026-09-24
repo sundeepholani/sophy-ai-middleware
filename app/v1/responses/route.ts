@@ -199,6 +199,7 @@ export async function POST(req: Request): Promise<Response> {
     params: resolveParams(key.params),
     structured,
     schema: structured ? normalizeOutputSchema(key.outputSchema) : key.outputSchema,
+    kbAugmented: systemPrompt !== basePrompt,
     includeUsage: true,
     logContent: key.logContent,
     requestStartedAt,
