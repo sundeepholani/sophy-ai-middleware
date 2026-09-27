@@ -56,7 +56,12 @@ export default async function proxy(req: NextRequest): Promise<NextResponse> {
   }
   const url = req.nextUrl.clone();
   url.pathname = '/admin/login';
-  url.searchParams.set('next', pathname);
+  // Return to the full requested URL, query included, so a filtered link such
+  // as logs?key=… survives sign-in. Only `next` rides on the login URL; the
+  // verify route re-checks it with safeNextPath. (Next strips its internal
+  // `_rsc` param before the proxy runs, so it never lands in `next`.)
+  url.search = '';
+  url.searchParams.set('next', `${pathname}${req.nextUrl.search}`);
   return NextResponse.redirect(url);
 }
 
