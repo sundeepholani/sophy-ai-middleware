@@ -18,8 +18,8 @@ import {
 } from '@/components/ui/table';
 
 /** Request-logs table with a free-text search over the loaded rows. The source
- *  filter (All/Proxy/Challenger) is applied server-side on the page; this narrows
- *  within the rows it returns. */
+ *  and key filters are applied server-side on the page; this narrows within the
+ *  rows it returns. */
 export function LogsTable({ projectId, logs }: { projectId: string; logs: LogListRow[] }) {
   const { query, setQuery, filtered } = useTableFilter(logs, (l) =>
     [
