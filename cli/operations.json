@@ -24,7 +24,7 @@
   {"command":"overview","operation":"overview.get","summary":"Show the project's 30-day overview"},
   {"command":"models","operation":"models.list","summary":"List the model catalog"},
   {"command":"usage","operation":"usage.get","summary":"Read usage totals and breakdowns","fields":{"sinceDays":"number","keyId":"string","model":"string"},"defaults":{"sinceDays":30}},
-  {"command":"logs list","operation":"logs.list","summary":"List recent request logs","fields":{"limit":"number","source":"string"}},
+  {"command":"logs list","operation":"logs.list","summary":"List up to 100 recent request logs, optionally for one key","fields":{"limit":"number","source":"string","keyId":"string"}},
   {"command":"logs get","operation":"logs.get","summary":"Read one request log and any retained content","positional":"id","fields":{"id":"string"},"required":["id"]},
   {"command":"knowledgebases list","operation":"knowledgebases.list","summary":"List knowledgebases you can manage"},
   {"command":"knowledgebases options","operation":"knowledgebases.options","summary":"List project knowledgebases available to attach to a key"},

@@ -1963,12 +1963,28 @@ sophy keys update --help`}
                 { name: 'members / invitations', type: 'admin only', note: 'Manage project membership, roles, and pending invitations.' },
                 { name: 'settings', type: 'admin only', note: 'Read or update the project judge model and notification email.' },
                 { name: 'knowledgebases', type: 'management', note: 'Create and remove collections. List, upload, retry, and remove documents within your access.' },
-                { name: 'evals / models / usage / logs', type: 'operations', note: 'Run or cancel evaluations. Read results, the model catalog, usage, and request logs within your access.' },
+                { name: 'evals / models / usage / logs', type: 'operations', note: 'Run or cancel evaluations. Read results, the model catalog, usage, and request logs within your access, overall or for one key.' },
               ]}
             />
             <P>
               Key creation and rotation show the new secret once. Sophy cannot return an existing
               secret. Rotation and revocation require confirmation.
+            </P>
+            <P>
+              To read one key&apos;s recent traffic, supply its ID. The command returns the key&apos;s
+              100 most recent logs from every log source, newest first. Add <Code>--source</Code>{' '}
+              or a smaller <Code>--limit</Code> to narrow the list:
+            </P>
+            <CodeBlock
+              label="terminal"
+              code={`sophy logs list --key-id <key-id> --project <project-id> --json
+sophy logs get <log-id> --project <project-id> --json`}
+            />
+            <P>
+              A log list contains metadata. <Code>logs get</Code> returns one log with any retained
+              content. Admins can read logs for any key in the project, and editors for the keys
+              they own. Any other key returns <Code>404 not_found</Code>. The management API takes
+              the key as <Code>keyId</Code> in the <Code>logs.list</Code> input.
             </P>
             <Method method="POST" path="/api/admin/cli" />
             <P>

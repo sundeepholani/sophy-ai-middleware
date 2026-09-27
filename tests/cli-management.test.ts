@@ -124,7 +124,7 @@ describe('CLI management permission and input boundary', () => {
     ['members.status', { userId: OTHER, active: 'false' }],
     ['members.role', { userId: OTHER, role: 'superadmin' }],
     ['keys.rotate', { id: KEY, projectId: OTHER }],
-    ['logs.list', { limit: 100_000 }], ['usage.get', { sinceDays: -1 }],
+    ['logs.list', { limit: 100_000 }], ['logs.list', { keyId: 'key-1' }], ['usage.get', { sinceDays: -1 }],
     ['evals.start', { apiKeyId: KEY, challengerModel: 'model', targetN: 10_000 }],
   ])('rejects malformed or excessive input to %s', async (operation, input) => {
     await expect(call(operation, input)).rejects.toThrow();
@@ -143,6 +143,17 @@ describe('CLI management permission and input boundary', () => {
     }
     await call('logs.get', { id: KEY }).catch(() => undefined);
     expect(mocks.queries.getLogDetail).toHaveBeenCalledWith(VIEWER, KEY);
+  });
+
+  it('reads one key’s 100 most recent logs only when that key is in the viewer’s scope', async () => {
+    await call('logs.list', { keyId: KEY });
+    expect(mocks.queries.getRecentLogs).toHaveBeenCalledWith(VIEWER, 100, undefined, KEY);
+    await call('logs.list');
+    expect(mocks.queries.getRecentLogs).toHaveBeenLastCalledWith(VIEWER, 100, undefined, undefined);
+    // listKeys is owner-scoped, so another editor's key is indistinguishable
+    // from a missing one and never reaches the log query.
+    await expect(call('logs.list', { keyId: OTHER })).rejects.toThrow('not_found');
+    expect(mocks.queries.getRecentLogs).toHaveBeenCalledTimes(2);
   });
 
   it('uses the console document access guard and rejects duplicate multipart fields', async () => {

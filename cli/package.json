@@ -1,6 +1,6 @@
 {
   "name": "@sophyai/sophy-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Manage Sophy projects and API keys from your terminal",
   "license": "MIT",
   "homepage": "https://sophy.in/docs#sophy-cli",

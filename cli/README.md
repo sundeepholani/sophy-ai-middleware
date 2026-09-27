@@ -205,6 +205,7 @@ sophy gateway connect --data @gateway.json
 sophy usage --since-days 30
 sophy usage --since-days 7 --key-id <key-id>
 sophy logs list --source proxy --limit 50
+sophy logs list --key-id <key-id>
 sophy logs get <log-id>
 sophy knowledgebases create --name "Support Guide"
 sophy knowledgebases upload <knowledgebase-id> --file ./guide.pdf
@@ -222,7 +223,9 @@ The gateway JSON file contains `{"apiKey":"<gateway-secret>"}`. The CLI accepts 
 
 Document uploads support text, Markdown, CSV, JSON, PDF, and Word (`.docx`). Each file must be nonempty and no larger than 4 MB.
 
-The usage range supports 7, 30, or 90 days. Log sources are `proxy`, `processor`, `challenger`, `judge`, and `kb`. Log lists return up to 100 entries.
+The usage range supports 7, 30, or 90 days. Log sources are `proxy`, `processor`, `challenger`, `judge`, and `kb`. Log lists return up to 100 entries, newest first.
+
+To read the 100 most recent logs for one key, supply `--key-id`. You can combine it with `--source` and `--limit`. An admin can read logs for any key in the project. An editor can read logs for the keys they own. Other keys return `not_found`. A log list contains metadata; `logs get <log-id>` returns one log with any retained content.
 
 ## JSON input and output
 

@@ -622,21 +622,24 @@ const CHALLENGER_TS = sql<string>`coalesce(${evalSamples.judgedAt}, ${evalSample
  * carries the judge context and (until purge) the content the detail page
  * renders. usage_events ALSO records every challenger call
  * (source='eval_challenger') for accounting — those rows are excluded here so
- * a challenger isn't listed twice.
+ * a challenger isn't listed twice. An optional keyId narrows both sets to one
+ * key's rows; like the owner scope it ANDs with, it never widens access.
  */
 export async function getRecentLogs(
   viewer: Viewer,
   limit = 100,
   source?: LogSource,
+  keyId?: string,
 ): Promise<LogListRow[]> {
   const db = getDb();
   const rows: LogListRow[] = [];
 
   if (source !== 'challenger') {
-    // The source filter lives in SQL, BEFORE the LIMIT: post-filtering in JS
-    // would let judge/kb rows consume the row budget and under-fill a filtered
-    // view (e.g. the Proxy tab showing a handful of rows right after an eval
-    // run floods usage_events with judge calls).
+    // The source and key filters live in SQL, BEFORE the LIMIT: post-filtering
+    // in JS would let judge/kb rows (or other keys' rows) consume the row
+    // budget and under-fill a filtered view (e.g. the Proxy tab showing a
+    // handful of rows right after an eval run floods usage_events with judge
+    // calls).
     const sourceCond =
       source === 'proxy'
         ? sql`${usageEvents.source} = 'proxy'`
@@ -674,6 +677,7 @@ export async function getRecentLogs(
         and(
           eq(usageEvents.projectId, viewer.projectId),
           sourceCond,
+          keyId ? eq(usageEvents.apiKeyId, keyId) : undefined,
           scopeToOwner(viewer, usageEvents.apiKeyId),
         ),
       )
@@ -716,6 +720,7 @@ export async function getRecentLogs(
         and(
           eq(evalSamples.projectId, viewer.projectId),
           inArray(evalSamples.status, ['judged', 'failed']),
+          keyId ? eq(evalRuns.apiKeyId, keyId) : undefined,
           scopeToOwner(viewer, evalRuns.apiKeyId),
         ),
       )
