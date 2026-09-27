@@ -1,9 +1,10 @@
 import Link from 'next/link';
-import { getRecentLogs, type LogSource } from '@/lib/admin/queries';
+import { getRecentLogs, listKeys, type LogSource } from '@/lib/admin/queries';
 import { requireProjectViewer } from '@/lib/auth/viewer';
 import { cn } from '@/lib/utils';
 import { projectPath } from '@/components/admin/project-path';
 import { LogsTable } from '@/components/admin/logs-table';
+import { LogsKeyFilter } from '@/components/admin/logs-key-filter';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,13 +24,24 @@ export default async function LogsPage({
   searchParams,
 }: {
   params: Promise<{ projectId: string }>;
-  searchParams: Promise<{ source?: string }>;
+  searchParams: Promise<{ source?: string; key?: string }>;
 }) {
   const [{ projectId }, sp] = await Promise.all([params, searchParams]);
   const viewer = await requireProjectViewer(projectId);
   const source = SOURCES.find((candidate) => candidate === sp.source);
-  const logs = await getRecentLogs(viewer, 100, source);
+  // As on Usage, only a key this viewer can see becomes a filter; an unknown or
+  // out-of-scope ?key= falls back to all keys and never reaches the SQL.
+  const keys = await listKeys(viewer);
+  const keyId = sp.key && keys.some((key) => key.id === sp.key) ? sp.key : undefined;
+  const logs = await getRecentLogs(viewer, 100, source, keyId);
   const basePath = projectPath(projectId, 'logs');
+  const sourceHref = (value: LogSource | 'all') => {
+    const query = new URLSearchParams();
+    if (value !== 'all') query.set('source', value);
+    if (keyId) query.set('key', keyId);
+    const qs = query.toString();
+    return qs ? `${basePath}?${qs}` : basePath;
+  };
 
   return (
     <div className="space-y-6">
@@ -41,24 +53,30 @@ export default async function LogsPage({
         </p>
       </div>
 
-      <div className="inline-flex max-w-full overflow-x-auto rounded-md border bg-muted/40 p-0.5">
-        {FILTERS.map((filter) => {
-          const active = (source ?? 'all') === filter.value;
-          return (
-            <Link
-              key={filter.value}
-              href={filter.value === 'all' ? basePath : `${basePath}?source=${filter.value}`}
-              className={cn(
-                'whitespace-nowrap rounded px-2.5 py-1 text-xs font-medium transition-colors',
-                active
-                  ? 'bg-background text-foreground shadow-sm'
-                  : 'text-muted-foreground hover:text-foreground',
-              )}
-            >
-              {filter.label}
-            </Link>
-          );
-        })}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="inline-flex max-w-full overflow-x-auto rounded-md border bg-muted/40 p-0.5">
+          {FILTERS.map((filter) => {
+            const active = (source ?? 'all') === filter.value;
+            return (
+              <Link
+                key={filter.value}
+                href={sourceHref(filter.value)}
+                className={cn(
+                  'whitespace-nowrap rounded px-2.5 py-1 text-xs font-medium transition-colors',
+                  active
+                    ? 'bg-background text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+              >
+                {filter.label}
+              </Link>
+            );
+          })}
+        </div>
+        <LogsKeyFilter
+          keys={keys.map((key) => ({ id: key.id, name: key.name }))}
+          current={keyId ?? 'all'}
+        />
       </div>
 
       <LogsTable projectId={projectId} logs={logs} />

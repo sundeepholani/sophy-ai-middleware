@@ -1730,7 +1730,7 @@ with open("out.png", "wb") as f:
                 },
                 {
                   title: 'Usage and logs',
-                  body: 'Filter requests, tokens, estimated cost, latency, model mix, errors, and source-tagged spend.',
+                  body: 'Filter usage and request logs by key. Track requests, tokens, estimated cost, latency, model mix, errors, and source-tagged spend.',
                 },
                 {
                   title: 'Champion vs challenger evals',
