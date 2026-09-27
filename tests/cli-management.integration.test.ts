@@ -34,7 +34,7 @@ const schemaName = `cli_management_${randomUUID().replaceAll('-', '')}`;
 const tableNames = [
   'users', 'projects', 'project_memberships', 'project_invitations',
   'project_gateway_credentials', 'project_settings', 'knowledgebases',
-  'kb_documents', 'api_keys', 'eval_runs', 'audit_log',
+  'kb_documents', 'api_keys', 'eval_runs', 'audit_log', 'usage_events', 'eval_samples',
 ];
 let pool: Pool;
 let db: ReturnType<typeof drizzle<typeof schema>>;
@@ -254,6 +254,41 @@ describe.skipIf(!url)('CLI management on real PostgreSQL', () => {
     expect((await keyRecord(owned.id)).knowledgebaseId).toBe(sharedKb);
     await expect(call(editor, 'keys.update', { id: owned.id, knowledgebaseId: foreignKb })).rejects.toThrow('Knowledgebase not found');
     expect((await keyRecord(owned.id)).knowledgebaseId).toBe(sharedKb);
+  });
+
+  it('lists one visible key’s 100 newest logs across sources, filtering before the limit', async () => {
+    const at = (minute: number) => new Date(Date.UTC(2026, 0, 1, 0, minute));
+    // The peer key's 120 rows are all newer than the owned key's rows, so a key
+    // filter applied after the LIMIT would return none of the owned key's logs.
+    await db.insert(schema.usageEvents).values([
+      ...Array.from({ length: 99 }, (_, i) => ({ projectId: projectA, apiKeyId: owned.id, createdAt: at(i) })),
+      { projectId: projectA, apiKeyId: owned.id, source: 'eval_judge' as const, createdAt: at(150) },
+      ...Array.from({ length: 120 }, (_, i) => ({ projectId: projectA, apiKeyId: unowned.id, createdAt: at(200 + i) })),
+      { projectId: projectA, apiKeyId: null, source: 'kb_ingest' as const, createdAt: at(400) },
+    ]);
+    const [run] = await db.insert(schema.evalRuns).values({
+      projectId: projectA, apiKeyId: owned.id, status: 'completed',
+      championModel: 'test/language', challengerModel: 'test/challenger', judgeModel: 'test/judge',
+    }).returning();
+    await db.insert(schema.evalSamples).values({ projectId: projectA, runId: run.id, status: 'judged', judgedAt: at(160) });
+
+    type Log = { apiKeyId: string | null; source: string; createdAt: Date };
+    const logs = await call(editor, 'logs.list', { keyId: owned.id }) as Log[];
+    expect(logs).toHaveLength(100);
+    expect(logs.every((log) => log.apiKeyId === owned.id)).toBe(true);
+    expect(logs.slice(0, 2).map((log) => log.source)).toEqual(['challenger', 'judge']);
+    // Newest first; the oldest of the key's 101 rows falls outside the 100.
+    expect(logs.map((log) => log.createdAt.getTime())).toEqual(logs.map((log) => log.createdAt.getTime()).sort((a, b) => b - a));
+    expect(logs.at(-1)!.createdAt).toEqual(at(1));
+    expect(await call(editor, 'logs.list', { keyId: owned.id, source: 'challenger' })).toHaveLength(1);
+    expect(await call(editor, 'logs.list', { keyId: owned.id, limit: 5 })).toHaveLength(5);
+
+    await expect(call(editor, 'logs.list', { keyId: unowned.id })).rejects.toThrow('not_found');
+    await expect(call(editor, 'logs.list', { keyId: ownedElsewhere.id })).rejects.toThrow('not_found');
+    await expect(call(admin, 'logs.list', { keyId: foreign.id })).rejects.toThrow('not_found');
+    const peerLogs = await call(admin, 'logs.list', { keyId: unowned.id }) as Log[];
+    expect(peerLogs).toHaveLength(100);
+    expect(peerLogs.every((log) => log.apiKeyId === unowned.id)).toBe(true);
   });
 
   it('keeps simultaneous identities isolated across actual database awaits', async () => {

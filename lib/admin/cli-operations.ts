@@ -121,7 +121,12 @@ const operations: Record<string, Handler> = {
     ]);
     return { totals, byKey, byModel, bySource, series, stackedModel, stackedKey };
   }),
-  'logs.list': projectOperation(z.strictObject({ limit: z.number().int().min(1).max(100).default(100), source: z.enum(['proxy', 'processor', 'challenger', 'judge', 'kb']).optional() }), (i, v) => queries.getRecentLogs(v, i.limit, i.source)),
+  'logs.list': projectOperation(z.strictObject({ limit: z.number().int().min(1).max(100).default(100), source: z.enum(['proxy', 'processor', 'challenger', 'judge', 'kb']).optional(), keyId: uuid.optional() }), async (i, v) => {
+    // A mistyped or out-of-scope key is a 404, not an empty list that looks
+    // like an idle key. listKeys applies the same owner scope as the logs.
+    if (i.keyId) found((await queries.listKeys(v)).find((k) => k.id === i.keyId));
+    return queries.getRecentLogs(v, i.limit, i.source, i.keyId);
+  }),
   'logs.get': projectOperation(idInput, async (i, v) => found(await queries.getLogDetail(v, i.id))),
   'knowledgebases.list': projectOperation(empty, (_, v) => queries.listKnowledgebases(v)),
   'knowledgebases.options': projectOperation(empty, (_, v) => queries.listKnowledgebaseOptions(v)),

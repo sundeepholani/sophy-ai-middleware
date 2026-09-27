@@ -134,6 +134,7 @@ test('management commands map IDs and named flags to the server contract', async
     [['knowledgebases', 'documents', 'kb-1'], 'knowledgebases.documents', { kbId: 'kb-1' }],
     [['usage', '--since-days', '7', '--key-id', 'key-1'], 'usage.get', { sinceDays: 7, keyId: 'key-1' }],
     [['logs', 'list', '--source', 'processor', '--limit', '8'], 'logs.list', { source: 'processor', limit: 8 }],
+    [['logs', 'list', '--key-id', 'key-1'], 'logs.list', { keyId: 'key-1' }],
     [['settings', 'update', '--judge-model', 'vendor/judge', '--notify-email', 'null'], 'settings.update', { judgeModel: 'vendor/judge', notifyEmail: null }],
   ];
   for (const [args, operation, input, project] of cases) {
