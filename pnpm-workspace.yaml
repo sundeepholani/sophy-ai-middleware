@@ -26,17 +26,24 @@ ignoredBuiltDependencies:
   - unrs-resolver
 
 # Force patched versions of transitive deps flagged by the security scan:
-# - postcss <8.5.18 (CSS source-map path traversal) via next
+# - postcss <8.5.23 (CSS source-map path traversal) via @tailwindcss/postcss's
+#   exact 8.5.15 pin, vite and shadcn
 # - esbuild <=0.24.2 (dev-server SSRF) via drizzle-kit's deprecated @esbuild-kit/*
-# - fast-uri <3.1.4 (URL host confusion) via ajv
+# - fast-uri <3.1.6 (URL host confusion) via ajv
 # - sharp <0.35.4 (inherited libvips/libheif vulnerabilities) via next
 #
 # The sharp key names the vulnerable range, not a Next version: the old
 # `next@16.2.11>sharp` key silently stopped matching once Next was bumped. pnpm
 # applies a `name@range` key only to requests that intersect the range, so it
 # leaves next's own `^0.35.4` alone and lifts only an older request to the floor.
+#
+# postcss and fast-uri use the same conditional-floor keys. They replace exact
+# pins that went stale: `postcss: '8.5.18'` had started downgrading next's own
+# exact 8.5.23. Their values are caret ranges rather than the `>=` that
+# `pnpm audit --fix` writes, because `>=3.1.6` would resolve ajv's `^3.0.1` to
+# fast-uri 4.x.
 overrides:
-  postcss: '8.5.18'
+  'postcss@<8.5.23': '^8.5.23'
   esbuild: '>=0.25.0'
-  fast-uri: '3.1.4'
+  'fast-uri@<3.1.6': '^3.1.6'
   'sharp@<0.35.4': '>=0.35.4'
