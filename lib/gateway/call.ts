@@ -10,7 +10,7 @@
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { generateText, streamText, Output, jsonSchema } from 'ai';
-import type { ModelMessage, FinishReason, ToolSet } from 'ai';
+import type { ModelMessage, FinishReason, SystemModelMessage, ToolSet } from 'ai';
 import { waitUntil } from '@vercel/functions';
 import {
   toChatCompletion,
@@ -81,10 +81,12 @@ export interface CallContext {
   /** The JSON schema to enforce (from the key's config). */
   schema: Record<string, unknown> | null;
   /**
-   * True when per-turn knowledgebase context was folded into systemPrompt: the prefix then
-   * changes every turn, so an Anthropic cache write over the conversation would rarely be read.
+   * Per-turn knowledgebase context, already folded into systemPrompt as its suffix (see
+   * withKbContext). Kept separately so Anthropic gets it after the system cache breakpoint.
+   * Its presence also skips the conversation breakpoint: a prefix that changes every turn
+   * would rarely be read back.
    */
-  kbAugmented?: boolean;
+  kbContext?: string;
   includeUsage: boolean;
   /** Whether to persist inbound/outbound message content for this request. */
   logContent: boolean;
@@ -104,17 +106,54 @@ export function providerOf(model: string): string {
 }
 
 
+const EPHEMERAL_CACHE = { anthropic: { cacheControl: { type: 'ephemeral' } } } as const;
+
 /**
- * Anthropic prompt caching. Marking the last message as an ephemeral cache
- * breakpoint makes the provider cache the whole prefix (system prompt + prior
- * turns); the next turn re-reads it at ~0.1x input cost instead of reprocessing
- * the full transcript. Verified through the AI Gateway: a marked call writes the
- * prefix to cache and the next identical-prefix call reads it.
+ * The system prompt as sent upstream. For Anthropic it becomes system blocks with
+ * an ephemeral cache breakpoint on the stable part (preamble + operator prompt):
+ * that part is byte-identical on every request a key makes, so one-shot calls
+ * share it too — each re-reads it at ~0.1x input cost instead of reprocessing it.
+ * Tools render ahead of system, so the breakpoint caches them as well.
+ *
+ * Per-turn knowledgebase context goes in a second, unmarked block AFTER the
+ * breakpoint. It changes every turn; folded into the marked block it would make
+ * the whole prefix unique, which is why KB keys used to get no caching at all.
+ *
+ * A prefix under the model's cacheable minimum (512–4096 tokens) silently doesn't
+ * cache and bills no write. Other providers cache automatically and get the
+ * unchanged single string.
+ */
+export function cachedSystem(
+  model: string,
+  systemPrompt: string | null,
+  kbContext?: string,
+): string | SystemModelMessage[] | undefined {
+  const system = buildSystem(systemPrompt);
+  if (!system || providerOf(model) !== 'anthropic') return system;
+  const kbSuffix = kbContext ? `\n\n${kbContext}` : '';
+  if (!kbSuffix || !system.endsWith(kbSuffix)) {
+    return [{ role: 'system', content: system, providerOptions: EPHEMERAL_CACHE }];
+  }
+  return [
+    // Exactly buildSystem(basePrompt) (or the bare preamble), so a turn with KB
+    // context hits the same entry as one where retrieval came back empty.
+    { role: 'system', content: system.slice(0, -kbSuffix.length), providerOptions: EPHEMERAL_CACHE },
+    { role: 'system', content: kbContext! },
+  ];
+}
+
+/**
+ * Anthropic prompt caching for the conversation. Marking the last message as an
+ * ephemeral cache breakpoint makes the provider cache the whole prefix (system
+ * prompt + prior turns); the next turn re-reads it at ~0.1x input cost instead
+ * of reprocessing the full transcript. Verified through the AI Gateway: a marked
+ * call writes the prefix to cache and the next identical-prefix call reads it.
  *
  * Gated to multi-turn requests (≥2 messages): there the prefix is re-read by the
  * next turn within Anthropic's ~5-min cache TTL, so the read savings dwarf the
- * one-time 1.25x write — whereas a one-shot call would never re-read it and
- * would just pay the write premium. OpenAI/DeepSeek cache automatically and
+ * one-time 1.25x write — whereas a one-shot call's user message would never be
+ * re-read and would just pay the write premium (its system prompt is covered by
+ * cachedSystem's breakpoint instead). OpenAI/DeepSeek cache automatically and
  * ignore this marker (provider options are namespaced), so it's safe to leave
  * it scoped to Anthropic only.
  */
@@ -126,7 +165,7 @@ export function withPromptCache(model: string, messages: ModelMessage[]): ModelM
     ...last,
     providerOptions: {
       ...last.providerOptions,
-      anthropic: { ...anthropic, cacheControl: { type: 'ephemeral' } },
+      anthropic: { ...anthropic, ...EPHEMERAL_CACHE.anthropic },
     },
   } as ModelMessage;
   return [...messages.slice(0, -1), marked];
@@ -135,8 +174,8 @@ export function withPromptCache(model: string, messages: ModelMessage[]): ModelM
 export function commonCall(ctx: CallContext, messages: ModelMessage[]) {
   return {
     model: ctx.gateway.gateway.languageModel(ctx.model),
-    system: buildSystem(ctx.systemPrompt),
-    messages: ctx.kbAugmented ? messages : withPromptCache(ctx.model, messages),
+    system: cachedSystem(ctx.model, ctx.systemPrompt, ctx.kbContext),
+    messages: ctx.kbContext ? messages : withPromptCache(ctx.model, messages),
     temperature: ctx.params.temperature,
     topP: ctx.params.topP,
     maxOutputTokens: ctx.params.maxOutputTokens,

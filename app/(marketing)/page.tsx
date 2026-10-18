@@ -143,7 +143,7 @@ const FEATURES: { icon: typeof Plug; title: string; body: string }[] = [
   {
     icon: Gauge,
     title: 'Budgets and rate limits',
-    body: 'Enforce per-key requests-per-minute limits and monthly cost caps before paid model calls reach the provider.',
+    body: 'Enforce per-key requests-per-minute limits and monthly cost caps before paid model calls reach the provider, while Anthropic calls reuse each key’s cached prompt automatically.',
   },
   {
     icon: Paperclip,

@@ -255,14 +255,21 @@ function ok(
  * Append an explicit JSON-only + schema instruction to the system prompt for the
  * plain-text retry. Models that ignore the SDK's structured mode (and emit prose)
  * usually comply with a direct instruction; the schema tells them the target shape
- * the way native structured mode would.
+ * the way native structured mode would. System blocks (Anthropic, carrying a cache
+ * breakpoint) get the instruction as their own trailing block, so the retry keeps
+ * the operator prompt and still reads the cached prefix.
  */
-function withJsonInstruction(system: string | undefined, schema: Record<string, unknown>): string {
+export function withJsonInstruction(
+  system: GenerateTextArgs['system'],
+  schema: Record<string, unknown>,
+): GenerateTextArgs['system'] {
   const instr =
     'Respond with ONLY a single JSON object that conforms to the JSON Schema below. ' +
     'Output nothing else — no prose, no explanation, no markdown code fences.\n\nJSON Schema:\n' +
     JSON.stringify(schema);
-  return system && system.trim() ? `${system}\n\n${instr}` : instr;
+  if (typeof system === 'string') return system.trim() ? `${system}\n\n${instr}` : instr;
+  if (!system) return instr;
+  return [...(Array.isArray(system) ? system : [system]), { role: 'system', content: instr }];
 }
 
 /**
@@ -353,11 +360,10 @@ export async function generateStructured(
   // not a schema validation outcome. But when the STRICT attempt completed (and
   // was billed), its cost/usage ride along on a StructuredAttemptError so the
   // caller's error accounting can still charge them.
-  const baseSystem = typeof args.system === 'string' ? args.system : undefined;
   let r2: Awaited<ReturnType<typeof generateText>>;
   try {
     r2 = await generateText(
-      withAttemptSignal({ ...args, system: withJsonInstruction(baseSystem, schema) }),
+      withAttemptSignal({ ...args, system: withJsonInstruction(args.system, schema) }),
     );
   } catch (e) {
     if (costUsd != null || usage) {

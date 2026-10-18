@@ -20,7 +20,7 @@ import {
 } from '@/lib/gateway/openai-map';
 import { handleNonStreaming, handleStreaming, type CallContext } from '@/lib/gateway/call';
 import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
-import { systemPromptWithKb } from '@/lib/kb/retrieve';
+import { kbContextFor, withKbContext } from '@/lib/kb/retrieve';
 import {
   assertOwnedBlobs,
   extractModelImageUrls,
@@ -180,12 +180,9 @@ export async function POST(req: Request): Promise<Response> {
     : null;
   const basePrompt = composeSystemPrompt(key.systemPrompt, clientPrompt);
   const structured = key.outputSchema != null;
-  let systemPrompt: string | null;
+  let kbContext: string;
   try {
-    systemPrompt = await systemPromptWithKb(basePrompt, key.knowledgebaseId, messages, {
-      keyId: key.id,
-      gateway,
-    });
+    kbContext = await kbContextFor(key.knowledgebaseId, messages, { keyId: key.id, gateway });
   } catch (error) {
     const unavailable = projectGatewayUnavailableResponse(error);
     if (unavailable) return unavailable;
@@ -193,6 +190,7 @@ export async function POST(req: Request): Promise<Response> {
       code: 'upstream_error',
     });
   }
+  const systemPrompt = withKbContext(basePrompt, kbContext);
   const ctx: CallContext = {
     keyId: key.id,
     gateway,
@@ -201,7 +199,7 @@ export async function POST(req: Request): Promise<Response> {
     params: resolveParams(key.params),
     structured,
     schema: structured ? normalizeOutputSchema(key.outputSchema) : key.outputSchema,
-    kbAugmented: systemPrompt !== basePrompt,
+    kbContext: kbContext || undefined,
     includeUsage: body.stream_options?.include_usage === true,
     logContent: key.logContent,
     requestStartedAt,

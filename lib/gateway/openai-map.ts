@@ -285,6 +285,7 @@ function toOpenAIUsage(u: NormalizedUsage): OpenAIUsage {
     prompt_tokens: u.inputTokens,
     completion_tokens: u.outputTokens,
     total_tokens: u.totalTokens,
+    prompt_tokens_details: { cached_tokens: u.cachedInputTokens },
   };
 }
 
