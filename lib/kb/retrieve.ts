@@ -155,12 +155,11 @@ export async function retrieveContext(
 }
 
 /**
- * Convenience for the request handlers: returns the system prompt augmented with
- * KB context when the key has a knowledgebase, else the base prompt unchanged.
- * Zero overhead for non-KB keys.
+ * Convenience for the request handlers: the KB context block for this turn when
+ * the key has a knowledgebase ('' when it doesn't or nothing matched). Zero
+ * overhead for non-KB keys. Fold it into the prompt with withKbContext.
  */
-export async function systemPromptWithKb(
-  basePrompt: string | null,
+export async function kbContextFor(
   knowledgebaseId: string | null,
   messages: ModelMessage[],
   opts: {
@@ -168,9 +167,17 @@ export async function systemPromptWithKb(
     keyId?: string;
     gateway: ProjectGatewaySnapshot;
   },
-): Promise<string | null> {
-  if (!knowledgebaseId) return basePrompt;
-  const block = await retrieveContext(knowledgebaseId, latestUserText(messages), opts);
+): Promise<string> {
+  if (!knowledgebaseId) return '';
+  return retrieveContext(knowledgebaseId, latestUserText(messages), opts);
+}
+
+/**
+ * The system prompt augmented with a KB context block as its suffix, else the
+ * base prompt unchanged. The block stays last so cachedSystem can send the
+ * stable part ahead of it.
+ */
+export function withKbContext(basePrompt: string | null, block: string): string | null {
   if (!block) return basePrompt;
   return basePrompt ? `${basePrompt}\n\n${block}` : block;
 }

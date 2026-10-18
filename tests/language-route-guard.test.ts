@@ -18,7 +18,7 @@ const mocks = vi.hoisted(() => ({
   handleStreaming: vi.fn(),
   handleResponsesNonStreaming: vi.fn(),
   handleResponsesStreaming: vi.fn(),
-  systemPromptWithKb: vi.fn(),
+  kbContextFor: vi.fn(),
   assertOwnedBlobs: vi.fn(),
 }));
 
@@ -56,7 +56,7 @@ vi.mock('@/lib/gateway/responses', async (importOriginal) => ({
 }));
 vi.mock('@/lib/kb/retrieve', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/kb/retrieve')>()),
-  systemPromptWithKb: mocks.systemPromptWithKb,
+  kbContextFor: mocks.kbContextFor,
 }));
 vi.mock('@/lib/files/blob', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/files/blob')>()),
@@ -107,7 +107,7 @@ beforeEach(() => {
   mocks.languageCapability.mockResolvedValue('language');
   mocks.checkRateLimit.mockResolvedValue({ ok: true });
   mocks.costUsedThisMonth.mockResolvedValue(0);
-  mocks.systemPromptWithKb.mockResolvedValue(null);
+  mocks.kbContextFor.mockResolvedValue('');
   mocks.assertOwnedBlobs.mockResolvedValue({ ok: true });
   mocks.handleNonStreaming.mockResolvedValue(Response.json({ ok: true }));
   mocks.handleStreaming.mockReturnValue(new Response('stream'));
@@ -155,7 +155,7 @@ for (const surface of SURFACES) {
     it('rejects before the paid knowledgebase embed and the blob retention write', async () => {
       mocks.languageCapability.mockResolvedValue('not_language');
       await surface.post(surface.req());
-      expect(mocks.systemPromptWithKb).not.toHaveBeenCalled();
+      expect(mocks.kbContextFor).not.toHaveBeenCalled();
       expect(mocks.assertOwnedBlobs).not.toHaveBeenCalled();
     });
 
@@ -205,3 +205,24 @@ describe('guard ordering vs the free sync rejects', () => {
     expect(mocks.languageCapability).not.toHaveBeenCalled();
   });
 });
+
+for (const surface of SURFACES) {
+  describe(`${surface.name} — knowledgebase context`, () => {
+    it('hands the call the full prompt plus the KB block it can send after the cache breakpoint', async () => {
+      mocks.verifyKey.mockResolvedValue({ ...key, systemPrompt: 'Be brief.', knowledgebaseId: 'kb_1' });
+      mocks.kbContextFor.mockResolvedValue('--- BEGIN CONTEXT ---\n[1] fact\n--- END CONTEXT ---');
+      await surface.post(surface.req());
+      const ctx = surface.handler.mock.calls[0][0];
+      expect(ctx.kbContext).toBe('--- BEGIN CONTEXT ---\n[1] fact\n--- END CONTEXT ---');
+      expect(ctx.systemPrompt).toBe(`Be brief.\n\n${ctx.kbContext}`);
+    });
+
+    it('leaves kbContext unset when retrieval adds nothing', async () => {
+      mocks.verifyKey.mockResolvedValue({ ...key, systemPrompt: 'Be brief.', knowledgebaseId: 'kb_1' });
+      await surface.post(surface.req());
+      const ctx = surface.handler.mock.calls[0][0];
+      expect(ctx.kbContext).toBeUndefined();
+      expect(ctx.systemPrompt).toBe('Be brief.');
+    });
+  });
+}

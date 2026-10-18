@@ -745,7 +745,12 @@ export default function DocsPage() {
     "message": { "role": "assistant", "content": "Hello! How can I help?" },
     "finish_reason": "stop"
   }],
-  "usage": { "prompt_tokens": 9, "completion_tokens": 7, "total_tokens": 16 }
+  "usage": {
+    "prompt_tokens": 9,
+    "completion_tokens": 7,
+    "total_tokens": 16,
+    "prompt_tokens_details": { "cached_tokens": 0 }
+  }
 }`}
             />
             <h3 className="font-heading pt-2 text-lg font-medium">Streaming</h3>
@@ -1641,9 +1646,15 @@ with open("out.png", "wb") as f:
             <P>
               When a language or transcript-processing call has an effective system prompt, Sophy
               prepends a fixed platform security preamble before the key and any applicable
-              Agent-mode client instructions. Eligible multi-turn Anthropic requests also receive an
-              ephemeral prompt-cache breakpoint; cache reads appear in Responses usage as{' '}
-              <Code>cached_tokens</Code>.
+              Agent-mode client instructions. On Anthropic models, Chat and Responses requests mark
+              that system prompt (with any tools) as an ephemeral prompt-cache breakpoint, so
+              requests on the same key within the cache window re-read it instead of paying full
+              input price; knowledgebase context is sent after the breakpoint so it doesn’t break
+              the shared prefix. Multi-turn requests on keys without a knowledgebase also mark the
+              latest message, caching the conversation so far. Prompts shorter than the model’s
+              cacheable minimum are not cached. Cache reads appear in usage as{' '}
+              <Code>prompt_tokens_details.cached_tokens</Code> (Chat) and{' '}
+              <Code>input_tokens_details.cached_tokens</Code> (Responses).
             </P>
           </Section>
 

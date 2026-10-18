@@ -106,7 +106,7 @@ describe('SSE frames', () => {
         inputTokens: 3,
         outputTokens: 5,
         totalTokens: 8,
-        cachedInputTokens: 0,
+        cachedInputTokens: 2,
         cacheWriteTokens: null,
         reasoningTokens: 0,
       },
@@ -115,6 +115,7 @@ describe('SSE frames', () => {
     expect(frame.usage?.prompt_tokens).toBe(3);
     expect(frame.usage?.completion_tokens).toBe(5);
     expect(frame.usage?.total_tokens).toBe(8);
+    expect(frame.usage?.prompt_tokens_details).toEqual({ cached_tokens: 2 });
   });
 
   it('sse() emits a data line terminated by a blank line', () => {

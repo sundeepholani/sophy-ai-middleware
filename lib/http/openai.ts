@@ -128,6 +128,8 @@ export interface OpenAIUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** cached_tokens: the part of prompt_tokens served from the provider's prompt cache. */
+  prompt_tokens_details: { cached_tokens: number };
 }
 
 export interface ChatCompletion {
