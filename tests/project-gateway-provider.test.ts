@@ -92,6 +92,23 @@ describe('project gateway provider invariants', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  it('sends image evaluations to the TypeSafe-compatible endpoint with the image opt-in', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe('https://ai-gateway.vercel.sh/typesafe/v1/systemone');
+      const headers = new Headers(init?.headers);
+      expect(headers.get('authorization')).toBe('Bearer explicit-test-key');
+      expect(headers.get('typesafe-danger-zone-images')).toBe('true');
+      expect(JSON.parse(String(init?.body))).toEqual({ model: 'typesafe-ai/jev' });
+      return new Response('{}', { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await createExplicitEvaluator('explicit-test-key').systemOneWithImages(
+      { model: 'typesafe-ai/jev' },
+      new AbortController().signal,
+    );
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('puts an explicit provider model object on the shared generation call', () => {
     const gateway = createExplicitGateway('explicit-test-key');
     const snapshot = Object.freeze({
