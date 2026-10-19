@@ -34,6 +34,7 @@ import {
 } from '@/lib/usage/record';
 import type {
   AssessmentAnswer,
+  AssessmentAsset,
   AssessmentQuestion,
   EvaluationRequest,
   EvaluationResponse,
@@ -58,6 +59,21 @@ const MAX_QUESTIONS = 32;
 const MAX_STATE_CHARS = 200_000;
 
 const EVALUATE_URL = 'https://ai-gateway.vercel.sh/v1/evaluate';
+const SYSTEMONE_URL = 'https://ai-gateway.vercel.sh/typesafe/v1/systemone';
+
+/**
+ * Images ride only on TypeSafe's own request shape: the gateway's /v1/evaluate
+ * drops `assets` silently, so Jev answered "cannot see a picture". Requests
+ * carrying assets go to the gateway's TypeSafe-compatible endpoint instead.
+ * TypeSafe's own per-image limit is 16 MiB, but Vercel caps a function request
+ * body at 4.5 MB, which binds first; the count cap just bounds the fan-out.
+ */
+const ASSET_PROVIDER = 'typesafe-ai';
+const MAX_ASSETS = 8;
+const ASSET_KEY = /^[A-Za-z0-9_-]{1,64}$/;
+const ASSET_FORMATS = new Set(['png', 'jpg', 'jpeg']);
+/** Standard padded base64 — TypeSafe rejects whitespace, url-safe and `data:` forms. */
+const STRICT_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 // ---- Capability guard -------------------------------------------------------
 
@@ -95,6 +111,8 @@ export interface ParsedAssessmentRequest {
   questions: Record<string, AssessmentQuestion>;
   /** Namespaced provider options: provider-specific knobs only. */
   providerOptions: Record<string, Record<string, unknown>>;
+  /** Images keyed by the string `state`/questions use to refer to them. */
+  assets?: Record<string, AssessmentAsset>;
 }
 
 export type ParseAssessmentResult =
@@ -183,6 +201,77 @@ function checkQuestion(
 }
 
 /**
+ * Validate `assets`. Each must be a base64 PNG/JPEG whose bytes match its
+ * declared format, and each key must appear somewhere in state/questions —
+ * TypeSafe 400s an unreferenced asset, so failing here gives a clearer error.
+ */
+function parseAssets(
+  raw: unknown,
+  model: string,
+  referenced: string,
+): { ok: true; value: Record<string, AssessmentAsset> } | ReturnType<typeof bad> {
+  if (!isPlainObject(raw)) return bad('assets must be an object.', 'invalid_assets', 'assets');
+  if (providerOf(model) !== ASSET_PROVIDER) {
+    return bad(
+      "Image assets are only supported for TypeSafe Jev keys; this key's model cannot accept them.",
+      'assets_not_supported',
+      'assets',
+    );
+  }
+  const keys = Object.keys(raw);
+  if (keys.length === 0) return bad('assets must contain at least one entry.', 'invalid_assets', 'assets');
+  if (keys.length > MAX_ASSETS) {
+    return bad(`assets must not contain more than ${MAX_ASSETS} entries.`, 'too_many_assets', 'assets');
+  }
+  const assets: Record<string, AssessmentAsset> = {};
+  for (const key of keys) {
+    const at = `assets.${key}`;
+    if (!ASSET_KEY.test(key)) {
+      return bad(
+        `Asset keys must be 1-64 characters of letters, digits, "_" or "-".`,
+        'invalid_asset_key',
+        at,
+      );
+    }
+    const a = raw[key];
+    if (!isPlainObject(a) || a.type !== 'image') {
+      return bad(`${at} must be an object with type "image".`, 'invalid_asset', at);
+    }
+    const format = typeof a.format === 'string' ? a.format.toLowerCase() : '';
+    if (!ASSET_FORMATS.has(format)) {
+      return bad(`${at}.format must be "png", "jpg" or "jpeg".`, 'unsupported_asset_format', `${at}.format`);
+    }
+    const data = a.data_base64;
+    if (typeof data !== 'string' || data.length === 0 || !STRICT_BASE64.test(data)) {
+      return bad(
+        `${at}.data_base64 must be standard padded base64 with no "data:" prefix or whitespace.`,
+        'invalid_asset_data',
+        `${at}.data_base64`,
+      );
+    }
+    // PNG and JPEG signatures, as they read once base64-encoded.
+    const isPng = data.startsWith('iVBORw0KGgo');
+    const isJpeg = data.startsWith('/9j/');
+    if (format === 'png' ? !isPng : !isJpeg) {
+      return bad(
+        `${at}.data_base64 is not a ${format === 'png' ? 'PNG' : 'JPEG'} image.`,
+        'asset_format_mismatch',
+        `${at}.data_base64`,
+      );
+    }
+    if (!referenced.includes(key)) {
+      return bad(
+        `${at} is not referenced: put "${key}" in state, an instruction or criteria.`,
+        'unreferenced_asset',
+        at,
+      );
+    }
+    assets[key] = { type: 'image', format: format as AssessmentAsset['format'], data_base64: data };
+  }
+  return { ok: true, value: assets };
+}
+
+/**
  * Pure: validate and normalize an evaluate request. No I/O. The client's
  * `model` is deliberately not read — the key owns the model.
  */
@@ -254,9 +343,25 @@ export function parseAssessmentRequest(
     }
   }
 
+  let assets: Record<string, AssessmentAsset> | undefined;
+  if (body.assets !== undefined && body.assets !== null) {
+    const parsedAssets = parseAssets(
+      body.assets,
+      model,
+      JSON.stringify([body.state, body.questions]),
+    );
+    if (!parsedAssets.ok) return parsedAssets;
+    assets = parsedAssets.value;
+  }
+
   return {
     ok: true,
-    value: { state: body.state, questions: body.questions, providerOptions },
+    value: {
+      state: body.state,
+      questions: body.questions,
+      providerOptions,
+      ...(assets ? { assets } : {}),
+    },
   };
 }
 
@@ -332,6 +437,54 @@ export function toAssessmentResponse(
     answers,
     usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens },
   };
+}
+
+// ---- TypeSafe shape translation (pure) --------------------------------------
+
+/**
+ * Pure: the TypeSafe System One body for an image request. TypeSafe calls a
+ * boolean question `noul`; everything else, `providerOptions` included (the
+ * gateway reads `providerOptions.gateway` there too), carries over unchanged.
+ */
+export function toTypeSafeRequest(
+  parsed: ParsedAssessmentRequest,
+  model: string,
+): Record<string, unknown> {
+  const questions = Object.fromEntries(
+    Object.entries(parsed.questions).map(([name, q]) => [
+      name,
+      q.type === 'boolean' ? { ...q, type: 'noul' } : q,
+    ]),
+  );
+  return {
+    model,
+    state: parsed.state,
+    questions,
+    assets: parsed.assets,
+    ...(Object.keys(parsed.providerOptions).length > 0
+      ? { providerOptions: parsed.providerOptions }
+      : {}),
+  };
+}
+
+/**
+ * Pure: lift a TypeSafe System One response into the gateway's /v1/evaluate
+ * shape, so toAssessmentResponse and usage recording stay one path.
+ */
+export function fromTypeSafeResponse(raw: unknown): RawAssessmentResponse {
+  if (!isPlainObject(raw)) return {};
+  const answers = isPlainObject(raw.answers)
+    ? Object.fromEntries(
+        Object.entries(raw.answers).map(([name, a]) => [
+          name,
+          isPlainObject(a) && a.type === 'noul' ? { type: 'boolean', probability: a.noul } : a,
+        ]),
+      )
+    : raw.answers;
+  const usage = isPlainObject(raw.usage)
+    ? { inputTokens: raw.usage.input_tokens, outputTokens: raw.usage.output_tokens }
+    : undefined;
+  return { model: raw.model, answers, usage, providerMetadata: raw.provider_metadata };
 }
 
 // ---- Orchestrator (side-effectful) ------------------------------------------
@@ -488,10 +641,14 @@ async function postEvaluate(
   ctx: AssessmentCallContext,
   body: unknown,
   signal: AbortSignal,
+  withImages: boolean,
 ): Promise<Response> {
+  const url = withImages ? SYSTEMONE_URL : EVALUATE_URL;
   let res: Response;
   try {
-    res = await ctx.gateway.evaluator.evaluate(body, signal);
+    res = withImages
+      ? await ctx.gateway.evaluator.systemOneWithImages(body, signal)
+      : await ctx.gateway.evaluator.evaluate(body, signal);
   } catch (error) {
     if (
       error instanceof TypeError &&
@@ -502,7 +659,7 @@ async function postEvaluate(
       throw new APICallError({
         message: `Cannot connect to API: ${typeof causeMessage === 'string' ? causeMessage : 'network error'}`,
         cause: error.cause,
-        url: EVALUATE_URL,
+        url,
         requestBodyValues: { model: ctx.model },
         isRetryable: true,
       });
@@ -513,7 +670,7 @@ async function postEvaluate(
     const bodyText = await res.text().catch(() => '');
     throw new APICallError({
       message: liftUpstreamMessage(bodyText) ?? `gateway evaluate request failed: ${res.status}`,
-      url: EVALUATE_URL,
+      url,
       requestBodyValues: { model: ctx.model },
       statusCode: res.status,
       responseHeaders: Object.fromEntries(res.headers),
@@ -521,6 +678,27 @@ async function postEvaluate(
     });
   }
   return res;
+}
+
+/**
+ * What the request log keeps of each image: its format and decoded size, never
+ * the bytes — a base64 selfie would blow the log cap and is not ours to retain.
+ */
+export function summarizeAssets(
+  assets: Record<string, AssessmentAsset> | undefined,
+): Record<string, { format: string; bytes: number }> | undefined {
+  if (!assets) return undefined;
+  return Object.fromEntries(
+    Object.entries(assets).map(([key, a]) => [
+      key,
+      {
+        format: a.format,
+        bytes:
+          (a.data_base64.length / 4) * 3 -
+          (a.data_base64.endsWith('==') ? 2 : a.data_base64.endsWith('=') ? 1 : 0),
+      },
+    ]),
+  );
 }
 
 /**
@@ -546,26 +724,34 @@ export async function handleAssessment(
           keyId: ctx.keyId,
           state: parsed.state,
           questions: parsed.questions,
+          assets: summarizeAssets(parsed.assets),
           answers,
           status,
         })
       : Promise.resolve();
 
   try {
-    const upstreamBody = {
-      model: ctx.model,
-      state: parsed.state,
-      questions: parsed.questions,
-      ...(Object.keys(parsed.providerOptions).length > 0
-        ? { providerOptions: parsed.providerOptions }
-        : {}),
-    };
+    const withImages = parsed.assets !== undefined;
+    const upstreamBody = withImages
+      ? toTypeSafeRequest(parsed, ctx.model)
+      : {
+          model: ctx.model,
+          state: parsed.state,
+          questions: parsed.questions,
+          ...(Object.keys(parsed.providerOptions).length > 0
+            ? { providerOptions: parsed.providerOptions }
+            : {}),
+        };
     const signal = AbortSignal.timeout(UPSTREAM_TIMEOUT_MS);
-    const res = await withRetries(() => postEvaluate(ctx, upstreamBody, signal), signal);
+    const res = await withRetries(
+      () => postEvaluate(ctx, upstreamBody, signal, withImages),
+      signal,
+    );
 
     let raw: RawAssessmentResponse;
     try {
-      raw = (await res.json()) as RawAssessmentResponse;
+      const json: unknown = await res.json();
+      raw = withImages ? fromTypeSafeResponse(json) : (json as RawAssessmentResponse);
     } catch {
       raw = {};
     }
@@ -573,7 +759,7 @@ export async function handleAssessment(
     if (!payload) {
       throw new APICallError({
         message: 'The gateway returned an unusable evaluation response.',
-        url: EVALUATE_URL,
+        url: withImages ? SYSTEMONE_URL : EVALUATE_URL,
         requestBodyValues: { model: ctx.model },
         statusCode: 502,
         isRetryable: false,

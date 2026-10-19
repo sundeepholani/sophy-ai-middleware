@@ -384,6 +384,24 @@ const ERROR_ROWS: { status: string; type: string; code: string; when: string }[]
   {
     status: '400',
     type: 'invalid_request_error',
+    code: 'assets_not_supported',
+    when: 'Evaluate `assets` was sent on a key whose model is not a TypeSafe Jev model.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'invalid_asset_data',
+    when: 'An evaluate asset’s `data_base64` is not standard padded base64 (no `data:` prefix, no whitespace).',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
+    code: 'unreferenced_asset',
+    when: 'An evaluate asset key does not appear anywhere in `state` or the questions.',
+  },
+  {
+    status: '400',
+    type: 'invalid_request_error',
     code: 'unsupported_file_type',
     when: 'The uploaded file content type is outside the allowlist.',
   },
@@ -1298,6 +1316,11 @@ print(resp.data[0].embedding)`,
                   note: 'Optional provider-specific knobs, namespaced by provider. Only the namespace matching the key model’s provider is accepted.',
                 },
                 {
+                  name: 'assets',
+                  type: 'object',
+                  note: 'Optional, TypeSafe Jev keys only (typesafe-ai/jev-1.13.0 and later). Maps an asset key to { "type": "image", "format": "png" | "jpg" | "jpeg", "data_base64" }. Put the key in state, an instruction or criteria to refer to the image. 1–8 images.',
+                },
+                {
                   name: 'model',
                   type: 'string',
                   note: 'Ignored. The evaluation model bound to the key wins and is echoed in the response.',
@@ -1424,10 +1447,51 @@ print(resp.json()["answers"])`,
   "usage": { "inputTokens": 412, "outputTokens": 36, "totalTokens": 448 }
 }`}
             />
+            <h3 className="font-heading pt-2 text-lg font-medium">Images (TypeSafe Jev)</h3>
+            <P>
+              Keys bound to TypeSafe Jev 1.13.0 or later can send still images in{' '}
+              <Code>assets</Code>. Give each image a key, then use that key as a value in{' '}
+              <Code>state</Code> and refer to it by its state name in your questions. Sophy
+              turns on TypeSafe’s image input for you, so you don’t send any extra header.
+              Images must be PNG or JPEG, base64-encoded with no <Code>data:</Code> prefix,
+              280–1,568 pixels on each side, and already rotated upright (EXIF orientation is
+              not applied). The whole request must stay under 4.5 MB. TypeSafe still labels image
+              input experimental, so validate results before you depend on them.
+            </P>
+            <CodeBlock
+              label="curl"
+              code={`curl ${BASE_URL}/evaluate \\
+  -H "Authorization: Bearer mw_live_…" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "state": { "selfie": "selfie-1" },
+    "assets": {
+      "selfie-1": { "type": "image", "format": "jpg", "data_base64": "/9j/4AAQ…" }
+    },
+    "questions": {
+      "groomed": {
+        "type": "score",
+        "instructions": "Rate the grooming of the person in \`selfie\`.",
+        "criteria": ["poor", "acceptable", "good"]
+      }
+    }
+  }'`}
+            />
+            <P>
+              Bad image input is rejected before any paid call with{' '}
+              <Code>400 assets_not_supported</Code>, <Code>400 invalid_assets</Code>,{' '}
+              <Code>400 too_many_assets</Code>, <Code>400 invalid_asset_key</Code>,{' '}
+              <Code>400 invalid_asset</Code>, <Code>400 unsupported_asset_format</Code>,{' '}
+              <Code>400 invalid_asset_data</Code>, <Code>400 asset_format_mismatch</Code>, or{' '}
+              <Code>400 unreferenced_asset</Code>. An image the model rejects, for example one
+              outside the size range, returns <Code>400 upstream_invalid_request</Code> with
+              TypeSafe’s message.
+            </P>
             <P>
               One evaluate call consumes one RPM slot and is checked against the key’s monthly cost
               cap before the paid model call. When content logging is enabled on the key, Sophy
-              stores the evaluated state, the questions, and the returned answers.
+              stores the evaluated state, the questions, and the returned answers. For images it
+              logs only each one’s format and size, never the image itself.
             </P>
             <Note title="Compatibility boundary">
               <p>

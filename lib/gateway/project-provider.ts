@@ -101,6 +101,10 @@ function normalizeGatewayApiKey(apiKey: string): string {
 // The gateway's native evaluation endpoint. NOT derivable from the SDK base URL,
 // which defaults to https://ai-gateway.vercel.sh/v1/ai and does not serve this route.
 const GATEWAY_EVALUATE_URL = 'https://ai-gateway.vercel.sh/v1/evaluate';
+// The gateway's TypeSafe-compatible endpoint. Unlike /v1/evaluate it forwards
+// TypeSafe's `assets` map, so it is the only gateway route where Jev sees
+// images (verified 2026-10-19: /v1/evaluate drops assets silently).
+const GATEWAY_TYPESAFE_SYSTEMONE_URL = 'https://ai-gateway.vercel.sh/typesafe/v1/systemone';
 
 export interface GatewayEvaluator {
   /**
@@ -108,6 +112,11 @@ export interface GatewayEvaluator {
    * caller owns status mapping and JSON parsing.
    */
   evaluate(body: unknown, signal: AbortSignal): Promise<Response>;
+  /**
+   * POST a TypeSafe-shaped request carrying images to the gateway's
+   * TypeSafe-compatible System One endpoint, with the image opt-in header.
+   */
+  systemOneWithImages(body: unknown, signal: AbortSignal): Promise<Response>;
 }
 
 /** Construct the AI 6 provider only after proving the key is present and non-empty. */
@@ -142,6 +151,18 @@ export function createExplicitEvaluator(apiKey: string): GatewayEvaluator {
         headers: {
           authorization: `Bearer ${bearer}`,
           'content-type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal,
+      }),
+    systemOneWithImages: (body, signal) =>
+      fetch(GATEWAY_TYPESAFE_SYSTEMONE_URL, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${bearer}`,
+          'content-type': 'application/json',
+          // TypeSafe rejects image requests without this per-request opt-in.
+          'typesafe-danger-zone-images': 'true',
         },
         body: JSON.stringify(body),
         signal,

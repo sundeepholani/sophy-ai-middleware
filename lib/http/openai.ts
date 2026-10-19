@@ -252,6 +252,19 @@ export interface EvaluationRequest {
   state?: unknown;
   questions?: Record<string, AssessmentQuestion>;
   providerOptions?: Record<string, Record<string, unknown>>;
+  /**
+   * Images the state or questions refer to by key (TypeSafe Jev keys only).
+   * A string in `state` equal to the key is replaced by the image upstream.
+   */
+  assets?: Record<string, AssessmentAsset>;
+}
+
+/** One base64 still image, in TypeSafe's asset shape. */
+export interface AssessmentAsset {
+  type: 'image';
+  format: 'png' | 'jpg' | 'jpeg';
+  /** Standard, padded base64 — no `data:` prefix, no whitespace. */
+  data_base64: string;
 }
 
 /** One answer, discriminated by the question type that produced it. */

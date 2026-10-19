@@ -30,12 +30,13 @@ import {
 const MODEL = 'typesafe-ai/jev';
 
 const evaluate = vi.fn();
+const systemOneWithImages = vi.fn();
 const gateway = {
   projectId: '00000000-0000-4000-8000-000000000001',
   gatewayCredentialId: '00000000-0000-4000-8000-000000000002',
   credentialRevision: 1,
   source: 'encrypted_api_key',
-  evaluator: { evaluate },
+  evaluator: { evaluate, systemOneWithImages },
 } as unknown as ProjectGatewaySnapshot;
 
 const parsed: ParsedAssessmentRequest = {
@@ -62,6 +63,7 @@ const HAPPY = {
 
 beforeEach(() => {
   evaluate.mockReset();
+  systemOneWithImages.mockReset();
   mocks.recordUsage.mockClear();
   mocks.recordAssessmentLog.mockClear();
   mocks.normalizeProjectGatewayError.mockClear();
@@ -409,5 +411,77 @@ describe('withRetries', () => {
     expect(error.name).toBe('TimeoutError');
     expect(attempt).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('handleAssessment — image assets', () => {
+  const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
+  const withImage: ParsedAssessmentRequest = {
+    state: { photo: 'selfie-1' },
+    questions: { groomed: { type: 'boolean', instructions: 'Is the person in `photo` groomed?' } },
+    providerOptions: {},
+    assets: { 'selfie-1': { type: 'image', format: 'png', data_base64: PNG_B64 } },
+  };
+  const TYPESAFE_OK = {
+    model: MODEL,
+    answers: { groomed: { type: 'noul', noul: 0.91 } },
+    usage: { input_tokens: 655, output_tokens: 62 },
+    provider_metadata: { gateway: { cost: '0.00002751', generationId: 'gen_img' } },
+  };
+
+  it('routes to the TypeSafe endpoint in its shape and maps the answer back', async () => {
+    systemOneWithImages.mockResolvedValue(upstreamOk(TYPESAFE_OK));
+    const res = await handleAssessment(
+      { keyId: 'key-1', gateway, model: MODEL, logContent: false },
+      withImage,
+    );
+
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(systemOneWithImages.mock.calls[0][0]).toEqual({
+      model: MODEL,
+      state: withImage.state,
+      questions: { groomed: { type: 'noul', instructions: 'Is the person in `photo` groomed?' } },
+      assets: withImage.assets,
+    });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      model: MODEL,
+      answers: { groomed: { type: 'boolean', probability: 0.91 } },
+      usage: { inputTokens: 655, outputTokens: 62, totalTokens: 717 },
+    });
+    expect(mocks.recordUsage.mock.calls[0][0]).toMatchObject({
+      status: 'ok',
+      costUsd: 0.00002751,
+      gatewayRequestId: 'gen_img',
+      usage: expect.objectContaining({ inputTokens: 655, outputTokens: 62 }),
+    });
+  });
+
+  it('logs the image format and size, never its bytes', async () => {
+    systemOneWithImages.mockResolvedValue(upstreamOk(TYPESAFE_OK));
+    await handleAssessment({ keyId: 'key-1', gateway, model: MODEL, logContent: true }, withImage);
+    const logged = mocks.recordAssessmentLog.mock.calls[0][0] as Record<string, unknown>;
+    expect(logged.assets).toEqual({
+      'selfie-1': { format: 'png', bytes: Buffer.from(PNG_B64, 'base64').length },
+    });
+    expect(JSON.stringify(logged)).not.toContain(PNG_B64);
+  });
+
+  it("surfaces TypeSafe's 400 message (e.g. image too small) as a client error", async () => {
+    systemOneWithImages.mockImplementation(
+      respond(400, {
+        message: 'Image selfie-1 is 1x1; each side must be between 280 and 1568 pixels.',
+        error_type: 'invalid_request',
+      }),
+    );
+    const res = await handleAssessment(
+      { keyId: 'key-1', gateway, model: MODEL, logContent: false },
+      withImage,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { message: string; code: string } };
+    expect(body.error.code).toBe('upstream_invalid_request');
+    expect(body.error.message).toContain('280 and 1568');
+    expect(systemOneWithImages).toHaveBeenCalledOnce();
   });
 });

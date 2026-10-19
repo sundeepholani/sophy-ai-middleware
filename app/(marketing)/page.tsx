@@ -113,7 +113,7 @@ const FEATURES: { icon: typeof Plug; title: string; body: string }[] = [
   {
     icon: Plug,
     title: 'A familiar API surface',
-    body: 'Use supported OpenAI SDK methods for Chat Completions, Responses, audio transcription, embeddings, image generation, models, and files, plus a native route for evaluation models.',
+    body: 'Use supported OpenAI SDK methods for Chat Completions, Responses, audio transcription, embeddings, image generation, models, and files, plus a native route for evaluation models, including image input for TypeSafe Jev.',
   },
   {
     icon: KeyRound,

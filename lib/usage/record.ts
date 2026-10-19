@@ -437,6 +437,8 @@ export interface RecordAssessmentLogInput {
   keyId: string;
   state: unknown;
   questions: Record<string, unknown>;
+  /** Image format and size only; the bytes are never logged. */
+  assets?: Record<string, { format: string; bytes: number }>;
   answers: unknown;
   status: UsageStatus;
 }
@@ -451,8 +453,13 @@ export interface RecordAssessmentLogInput {
 export function toAssessmentLogRequest(input: {
   state: unknown;
   questions: Record<string, unknown>;
+  assets?: Record<string, { format: string; bytes: number }>;
 }): object {
-  const request = { state: input.state, questions: input.questions };
+  const request = {
+    state: input.state,
+    questions: input.questions,
+    ...(input.assets ? { assets: input.assets } : {}),
+  };
   const serialized = JSON.stringify(request);
   return serialized.length > MAX_LOG_CHARS
     ? { truncated: true, preview: serialized.slice(0, MAX_LOG_CHARS) }
