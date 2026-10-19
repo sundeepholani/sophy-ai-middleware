@@ -1451,9 +1451,8 @@ print(resp.json()["answers"])`,
             <P>
               Keys bound to TypeSafe Jev 1.13.0 or later can send still images in{' '}
               <Code>assets</Code>. Give each image a key, then use that key as a value in{' '}
-              <Code>state</Code> and refer to it by its state name in your questions. Sophy
-              turns on TypeSafe’s image input for you, so you don’t send any extra header.
-              Images must be PNG or JPEG, base64-encoded with no <Code>data:</Code> prefix,
+              <Code>state</Code> and refer to it by its state name in your questions. Images
+              must be PNG or JPEG, base64-encoded with no <Code>data:</Code> prefix,
               280–1,568 pixels on each side, and already rotated upright (EXIF orientation is
               not applied). The whole request must stay under 4.5 MB. TypeSafe still labels image
               input experimental, so validate results before you depend on them.
@@ -1477,6 +1476,22 @@ print(resp.json()["answers"])`,
     }
   }'`}
             />
+            <Note title="No TypeSafe header needed">
+              <p>
+                TypeSafe’s own API requires a <Code>TypeSafe-Danger-Zone-Images: true</Code>{' '}
+                header on every image request. On Sophy, the <Code>assets</Code> field is the
+                opt-in: when a request includes it, Sophy adds that header upstream for you.
+                Sophy doesn’t forward client headers, so sending the TypeSafe header to Sophy has
+                no effect.
+              </p>
+              <p>
+                Images only reach the model through <Code>assets</Code>. Base64 pasted into{' '}
+                <Code>state</Code> or a question arrives as plain text, and the model can’t see
+                it. TypeSafe’s <Code>box</Code> question type (image location, Jev 1.14) is not
+                supported yet; use <Code>boolean</Code>, <Code>choice</Code>, or{' '}
+                <Code>score</Code>.
+              </p>
+            </Note>
             <P>
               Bad image input is rejected before any paid call with{' '}
               <Code>400 assets_not_supported</Code>, <Code>400 invalid_assets</Code>,{' '}
