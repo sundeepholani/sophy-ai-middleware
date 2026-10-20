@@ -74,6 +74,19 @@ function found<T>(value: T | null | undefined): T {
   return value;
 }
 
+/**
+ * The console's credential actions return result objects, because Next masks
+ * thrown Server Action messages in production. The CLI rethrows the code so
+ * cli-http's knownErrors map it to a status and a safe message. An unexpected
+ * code is not in knownErrors and fails closed as a masked 500.
+ * Typed structurally so this module does not import from components/.
+ */
+type CredentialActionResult = { ok: true } | { ok: false; code: string };
+function okOrThrow(result: CredentialActionResult): { ok: true } {
+  if (!result.ok) throw new Error(result.code);
+  return { ok: true };
+}
+
 const operations: Record<string, Handler> = {
   'identity.get': operation(empty, async () => {
     const identity = await requireIdentity();
@@ -87,6 +100,21 @@ const operations: Record<string, Handler> = {
   'gateway.status': projectOperation(empty, (_, v) => repository.getProjectGatewaySummary(v.projectId)),
   'gateway.connect': projectOperation(z.strictObject({ apiKey: z.string().trim().min(1).max(8192) }), (i, v) => projects.connectProjectGateway({ ...i, projectId: v.projectId }), true),
   'gateway.disconnect': projectOperation(empty, (_, v) => projects.disconnectProjectGateway({ projectId: v.projectId }), true),
+  // Editors get state and readiness only (docs/multi-tenancy-plan.md:469;
+  // redaction shared with the Overview page). This deliberately differs from
+  // gateway.status above, which predates the rule and is left unchanged.
+  'cloudflare.status': projectOperation(empty, async (_, v) =>
+    repository.redactProjectCloudflareSummary(await repository.getProjectCloudflareSummary(v.projectId), v.role)),
+  // The token stays inside the trimmed JSON boundary; ZodError responses list
+  // field paths only. connectProjectCloudflare re-checks Admin, normalises the
+  // account id (case) and token, and validates with Cloudflare before saving.
+  'cloudflare.connect': projectOperation(
+    z.strictObject({ accountId: z.string().trim().min(1).max(64), apiToken: z.string().trim().min(1).max(512) }),
+    async (i, v) => okOrThrow(await projects.connectProjectCloudflare({ ...i, projectId: v.projectId })),
+    true,
+  ),
+  'cloudflare.disconnect': projectOperation(empty, async (_, v) =>
+    okOrThrow(await projects.disconnectProjectCloudflare({ projectId: v.projectId })), true),
   'keys.list': projectOperation(empty, (_, v) => queries.listKeys(v)),
   'keys.get': projectOperation(idInput, async (i, v) => found((await queries.listKeys(v)).find((k) => k.id === i.id))),
   'keys.create': projectOperation(keyFields.extend({

@@ -1,10 +1,13 @@
 import { redirect } from 'next/navigation';
 import {
+  connectProjectCloudflare,
   connectProjectGateway,
+  disconnectProjectCloudflare,
   disconnectProjectGateway,
   renameProject,
   setDefaultProject,
 } from '@/app/admin/project-actions';
+import { CloudflareCredentialCard } from '@/components/admin/cloudflare-credential-card';
 import { GatewayCredentialCard } from '@/components/admin/gateway-credential-card';
 import { MakeDefaultProjectButton } from '@/components/admin/make-default-project-button';
 import { projectPath } from '@/components/admin/project-path';
@@ -21,7 +24,11 @@ import {
 import { getSettings } from '@/lib/admin/settings';
 import { requireProjectViewer } from '@/lib/auth/viewer';
 import { listGatewayModels, type AvailableModel } from '@/lib/gateway/models';
-import { getProjectGatewaySummary } from '@/lib/projects/repository';
+import {
+  getProjectCloudflareSummary,
+  getProjectGatewaySummary,
+  redactProjectCloudflareSummary,
+} from '@/lib/projects/repository';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,9 +41,10 @@ export default async function ProjectSettingsPage({
   const viewer = await requireProjectViewer(projectId);
   if (viewer.role !== 'admin') redirect(projectPath(projectId));
 
-  const [settings, gateway] = await Promise.all([
+  const [settings, gateway, cloudflare] = await Promise.all([
     getSettings(viewer),
     getProjectGatewaySummary(projectId),
+    getProjectCloudflareSummary(projectId),
   ]);
   let models: AvailableModel[] = [];
   let modelsUnavailable = false;
@@ -51,7 +59,7 @@ export default async function ProjectSettingsPage({
       <div>
         <h1 className="text-2xl font-semibold">Project settings</h1>
         <p className="text-sm text-muted-foreground">
-          Configuration, Gateway connection, and identity for {viewer.projectName}.
+          Configuration, AI provider connections, and identity for {viewer.projectName}.
         </p>
       </div>
 
@@ -64,11 +72,22 @@ export default async function ProjectSettingsPage({
         disconnectAction={disconnectProjectGateway}
       />
 
+      {/* Settings already redirects non-Admins, so redaction is the identity here. It keeps "the
+          card only ever receives a redacted summary" true if that redirect ever changes. */}
+      <CloudflareCredentialCard
+        projectId={projectId}
+        projectName={viewer.projectName}
+        role={viewer.role}
+        summary={redactProjectCloudflareSummary(cloudflare, viewer.role)}
+        connectAction={connectProjectCloudflare}
+        disconnectAction={disconnectProjectCloudflare}
+      />
+
       <Card>
         <CardHeader>
           <CardTitle>General</CardTitle>
           <CardDescription>
-            Rename this project without changing its stable URL, memberships, Gateway connection,
+            Rename this project without changing its stable URL, memberships, AI provider connections,
             or Sophy API keys.
           </CardDescription>
         </CardHeader>

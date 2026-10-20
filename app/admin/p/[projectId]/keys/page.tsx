@@ -6,7 +6,11 @@ import {
 import { getSettings } from '@/lib/admin/settings';
 import { requireProjectViewer } from '@/lib/auth/viewer';
 import { listKeyModels, type AvailableModel } from '@/lib/gateway/models';
-import { getProjectGatewaySummary, listProjectMembers } from '@/lib/projects/repository';
+import {
+  getProjectCloudflareSummary,
+  getProjectGatewaySummary,
+  listProjectMembers,
+} from '@/lib/projects/repository';
 import { KeysManager } from '@/components/admin/keys-manager';
 
 export const dynamic = 'force-dynamic';
@@ -18,14 +22,16 @@ export default async function KeysPage({
 }) {
   const { projectId } = await params;
   const viewer = await requireProjectViewer(projectId);
-  const [keys, evalStatuses, settings, knowledgebases, members, gateway] = await Promise.all([
-    listKeys(viewer),
-    getEvalStatuses(viewer),
-    getSettings(viewer),
-    listKnowledgebaseOptions(viewer),
-    viewer.role === 'admin' ? listProjectMembers(viewer) : Promise.resolve([]),
-    getProjectGatewaySummary(projectId),
-  ]);
+  const [keys, evalStatuses, settings, knowledgebases, members, gateway, cloudflare] =
+    await Promise.all([
+      listKeys(viewer),
+      getEvalStatuses(viewer),
+      getSettings(viewer),
+      listKnowledgebaseOptions(viewer),
+      viewer.role === 'admin' ? listProjectMembers(viewer) : Promise.resolve([]),
+      getProjectGatewaySummary(projectId),
+      getProjectCloudflareSummary(projectId),
+    ]);
 
   let models: AvailableModel[] = [];
   let modelsUnavailable = false;
@@ -41,14 +47,16 @@ export default async function KeysPage({
       <div>
         <h1 className="text-2xl font-semibold">Sophy API keys</h1>
         <p className="text-sm text-muted-foreground">
-          Client-facing keys for {viewer.projectName}. Each key uses this project’s Vercel AI
-          Gateway connection and cannot access another project.
+          Client-facing keys for {viewer.projectName}. Each key uses this project’s Vercel AI Gateway
+          connection, or its Cloudflare Workers AI connection for Clef and Clairic models, and cannot
+          access another project.
         </p>
       </div>
       <KeysManager
         projectId={projectId}
         projectName={viewer.projectName}
         gatewayReady={gateway.isReady}
+        cloudflareReady={cloudflare.isReady}
         keys={keys}
         models={models}
         transcriptProcessorModels={transcriptProcessorModels}

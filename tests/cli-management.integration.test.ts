@@ -27,6 +27,7 @@ vi.mock('@/lib/gateway/models', async (original) => ({
 }));
 import { APICallError } from 'ai';
 import { dispatchCliOperation } from '@/lib/admin/cli-operations';
+import { cliErrorResponse } from '@/lib/admin/cli-http';
 import { withCliIdentity } from '@/lib/auth/cli-session';
 import { issueKey, verifyKey } from '@/lib/auth/api-key';
 import { connectProjectCloudflare, disconnectProjectCloudflare } from '@/app/admin/project-actions';
@@ -141,6 +142,23 @@ function cloudflare401() {
     statusCode: 401, isRetryable: false,
     data: { provider: 'cloudflare', code: 10000, message: 'Authentication error', requestId: null, neurons: null } satisfies CloudflareErrorInfo,
   });
+}
+
+// CLI-layer Cloudflare cases. The file's fetch stub forbids every request; a test
+// that lets connect reach it queues a synthetic answer and resets it in a finally.
+const CF_SEARCH_URL = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/models/search?search=clef&per_page=1`;
+const cfOk = () => Promise.resolve(Response.json({ success: true, result: [], errors: [], messages: [] }));
+/** Every Admin-only summary field, as an Editor (or a project with no credential) sees it. */
+const CF_NULLS = {
+  credentialId: null, accountId: null, lifecycle: null, health: null, lastFour: null,
+  connectedAt: null, verifiedAt: null, lastCheckedAt: null, lastFailureCode: null,
+};
+
+/** A directly seeded current Cloudflare credential: the row plus the project's pointer to it. */
+async function seedCloudflare(projectId: string, creator: string) {
+  const row = await cloudflareRow(projectId, creator, { verifiedAt: new Date(), lastCheckedAt: new Date() });
+  await db.update(schema.projects).set({ currentCloudflareCredentialId: row.id }).where(eq(schema.projects.id, projectId));
+  return row;
 }
 
 describe.skipIf(!url)('CLI management on real PostgreSQL', () => {
@@ -560,5 +578,127 @@ describe.skipIf(!url)('CLI management on real PostgreSQL', () => {
     await expect(asUser(editor, () => disconnectProjectCloudflare({ projectId: projectA }))).rejects.toThrow('forbidden');
     expect(await db.select().from(schema.projectCloudflareCredentials)).toHaveLength(0);
     expect(await projectRecord(projectA)).toMatchObject({ currentCloudflareCredentialId: null, cloudflareCredentialRevision: 0 });
+  });
+
+  it('shows Cloudflare credential metadata to Admins and only readiness to Editors through the CLI', async () => {
+    const row = await seedCloudflare(projectA, admin.id);
+    expect(await call(admin, 'cloudflare.status')).toMatchObject({
+      projectId: projectA, state: 'ready', isReady: true, credentialId: row.id, accountId: CF_ACCOUNT,
+      lifecycle: 'available', health: 'healthy', lastFour: 'abcd',
+    });
+    expect(await call(editor, 'cloudflare.status')).toEqual({ projectId: projectA, state: 'ready', isReady: true, ...CF_NULLS });
+    // admin is only an Editor of project B, which has no Cloudflare credential.
+    expect(await call(admin, 'cloudflare.status', {}, projectB)).toEqual({ projectId: projectB, state: 'not_connected', isReady: false, ...CF_NULLS });
+    await expect(call(outsider, 'cloudflare.status')).rejects.toThrow('forbidden');
+    await db.update(schema.projectCloudflareCredentials)
+      .set({ health: 'invalid', lastFailureCode: 'cloudflare_authentication_failed' })
+      .where(eq(schema.projectCloudflareCredentials.id, row.id));
+    expect(await call(editor, 'cloudflare.status')).toEqual({ projectId: projectA, state: 'attention', isReady: false, ...CF_NULLS });
+    expect(await call(admin, 'cloudflare.status')).toMatchObject({
+      state: 'attention', isReady: false, health: 'invalid', lastFailureCode: 'cloudflare_authentication_failed',
+    });
+  });
+
+  it('keeps Cloudflare connect and disconnect Admin-only through the CLI', async () => {
+    const row = await seedCloudflare(projectA, admin.id);
+    await expect(call(editor, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_ONE })).rejects.toThrow('forbidden');
+    await expect(call(editor, 'cloudflare.disconnect')).rejects.toThrow('forbidden');
+    // admin is only an Editor of project B.
+    await expect(call(admin, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_ONE }, projectB)).rejects.toThrow('forbidden');
+    await expect(call(admin, 'cloudflare.disconnect', {}, projectB)).rejects.toThrow('forbidden');
+    expect(await db.select().from(schema.projectCloudflareCredentials)).toEqual([expect.objectContaining({ id: row.id, lifecycle: 'available' })]);
+    expect((await projectRecord(projectA)).currentCloudflareCredentialId).toBe(row.id);
+    expect(await db.select().from(schema.auditLog)).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('saves nothing through the CLI when the account id is malformed, the token is rejected, or Cloudflare cannot be reached', async () => {
+    const fetchMock = vi.mocked(fetch);
+    try {
+      await expect(call(admin, 'cloudflare.connect', { accountId: 'not-a-cloudflare-account-id', apiToken: CF_TOKEN_ONE }))
+        .rejects.toThrow('cloudflare_invalid_account_id');
+      expect(fetchMock).not.toHaveBeenCalled(); // normalised before any network call
+      // The file's forbid-all stub throws synchronously; validateCloudflareCredential never throws.
+      const error = await call(admin, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_ONE }).catch((e: unknown) => e);
+      expect((error as Error).message).toBe('cloudflare_unreachable');
+      const response = cliErrorResponse(error);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: { code: 'cloudflare_unreachable', message: 'Cloudflare could not be reached to validate the credential. Try again.' } });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0][0])).toBe(CF_SEARCH_URL);
+      // A real-world network failure (a rejected promise) maps the same way.
+      fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
+      await expect(call(admin, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_ONE })).rejects.toThrow('cloudflare_unreachable');
+      // Cloudflare refusing the token is cloudflare_invalid (anchored: the account-id code shares the prefix).
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 401 }));
+      await expect(call(admin, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_ONE })).rejects.toThrow(/^cloudflare_invalid$/);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(await db.select().from(schema.projectCloudflareCredentials)).toEqual([]);
+      expect(await projectRecord(projectA)).toMatchObject({ currentCloudflareCredentialId: null, cloudflareCredentialRevision: 0 });
+      expect(await db.select().from(schema.auditLog)).toEqual([]);
+    } finally {
+      fetchMock.mockReset();
+    }
+  });
+
+  it('connects, rotates and disconnects Cloudflare through the CLI without storing or auditing the token', async () => {
+    // The crypto env (key version test-v1) is stubbed once in beforeAll.
+    const fetchMock = vi.mocked(fetch);
+    try {
+      fetchMock.mockImplementationOnce(cfOk);
+      expect(await call(admin, 'cloudflare.connect', { accountId: ` ${CF_ACCOUNT.toUpperCase()} `, apiToken: ` ${CF_TOKEN_ONE} ` })).toEqual({ ok: true });
+      const [first] = await db.select().from(schema.projectCloudflareCredentials);
+      expect(first).toMatchObject({
+        projectId: projectA, accountId: CF_ACCOUNT, lifecycle: 'available', health: 'healthy',
+        secretLastFour: '0001', encryptionKeyVersion: 'test-v1', createdByUserId: admin.id,
+      });
+      expect(first.secretFingerprint).toMatch(/^[0-9a-f]{64}$/);
+      expect(await projectRecord(projectA)).toMatchObject({ currentCloudflareCredentialId: first.id, cloudflareCredentialRevision: 1 });
+      expect(await call(editor, 'cloudflare.status')).toEqual({ projectId: projectA, state: 'ready', isReady: true, ...CF_NULLS });
+
+      fetchMock.mockImplementationOnce(cfOk); // rotate
+      expect(await call(admin, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_TWO })).toEqual({ ok: true });
+      const rows = await db.select().from(schema.projectCloudflareCredentials);
+      expect(rows).toHaveLength(2);
+      const replaced = rows.find((row) => row.id === first.id)!;
+      const current = rows.find((row) => row.id !== first.id)!;
+      expect(replaced).toMatchObject({ lifecycle: 'replaced', encryptedSecret: null, encryptionNonce: null, encryptionTag: null });
+      expect(replaced.replacedAt).toBeInstanceOf(Date);
+      expect(current).toMatchObject({ lifecycle: 'available', secretLastFour: '0002' });
+
+      fetchMock.mockImplementationOnce(cfOk); // the same token on project B, whose Admin is outsider
+      const inUse = await call(outsider, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_TWO }, projectB).catch((e: unknown) => e);
+      expect((inUse as Error).message).toBe('cloudflare_in_use');
+      const response = cliErrorResponse(inUse);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: { code: 'cloudflare_in_use', message: 'This Cloudflare API token is already in use by another project.' } });
+      expect(await db.select().from(schema.projectCloudflareCredentials).where(eq(schema.projectCloudflareCredentials.projectId, projectB))).toEqual([]);
+      expect(await db.select().from(schema.auditLog).where(eq(schema.auditLog.projectId, projectB))).toEqual([]);
+
+      expect(await call(admin, 'cloudflare.disconnect')).toEqual({ ok: true });
+      const disconnected = await credentialRecord(current.id);
+      expect(disconnected).toMatchObject({ lifecycle: 'disconnected', encryptedSecret: null, encryptionNonce: null, encryptionTag: null });
+      expect(disconnected.disconnectedAt).toBeInstanceOf(Date);
+      expect(await projectRecord(projectA)).toMatchObject({ currentCloudflareCredentialId: null, cloudflareCredentialRevision: 3 });
+      expect(await call(admin, 'cloudflare.disconnect')).toEqual({ ok: true }); // idempotent
+      expect(await call(admin, 'cloudflare.status')).toMatchObject({ state: 'not_connected', isReady: false, credentialId: null });
+
+      const audits = await db.select().from(schema.auditLog).where(eq(schema.auditLog.projectId, projectA));
+      expect(audits.map((entry) => entry.action).sort()).toEqual(['cloudflare.connect', 'cloudflare.disconnect', 'cloudflare.disconnect', 'cloudflare.rotate']);
+      expect(audits).toEqual(expect.arrayContaining([
+        expect.objectContaining({ action: 'cloudflare.connect', actor: admin.email, target: first.id, after: { lastFour: '0001', fingerprint: first.secretFingerprint } }),
+        expect.objectContaining({ action: 'cloudflare.rotate', target: current.id, after: { lastFour: '0002', fingerprint: current.secretFingerprint } }),
+        expect.objectContaining({ action: 'cloudflare.disconnect', target: current.id, after: { lastFour: '0002', fingerprint: current.secretFingerprint } }),
+        expect.objectContaining({ action: 'cloudflare.disconnect', target: projectA, after: null }),
+      ]));
+      const stored = JSON.stringify([await db.select().from(schema.projectCloudflareCredentials), await db.select().from(schema.auditLog)]);
+      for (const secret of [CF_TOKEN_ONE, CF_TOKEN_TWO]) expect(stored).not.toContain(secret);
+
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      for (const [url] of fetchMock.mock.calls) expect(String(url)).toBe(CF_SEARCH_URL);
+      expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('authorization')).toBe(`Bearer ${CF_TOKEN_ONE}`);
+    } finally {
+      fetchMock.mockReset();
+    }
   });
 });

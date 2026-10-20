@@ -70,7 +70,7 @@ function showHelp(positionals = []) {
   }
   if (!name || name === 'projects' || name === 'projects use') lines.push('  projects use <project-id>  Select a verified local default project', '');
   for (const command of matches) lines.push(`  ${command.command.padEnd(31)} ${command.summary}`);
-  lines.push('', 'Global: --project <id>, --url <origin>, --json, --help', 'Run sophy <command> --help for input fields. Use --data @file for nested JSON.', 'OTP codes and gateway secrets are never accepted as command-line flags.', 'Code input: hidden prompt on a terminal, otherwise a single code on stdin.', 'Environment: SOPHY_URL, SOPHY_PROJECT, SOPHY_CONFIG_DIR.', 'Default server: https://sophy.in. HTTP is limited to loopback development servers.');
+  lines.push('', 'Global: --project <id>, --url <origin>, --json, --help', 'Run sophy <command> --help for input fields. Use --data @file for nested JSON.', 'OTP codes and credential secrets are never accepted as command-line flags.', 'Code input: hidden prompt on a terminal, otherwise a single code on stdin.', 'Environment: SOPHY_URL, SOPHY_PROJECT, SOPHY_CONFIG_DIR.', 'Default server: https://sophy.in. HTTP is limited to loopback development servers.');
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
@@ -146,7 +146,7 @@ async function buildInput(command, positionals, options) {
   validateOptions(options, [...namedFields, ...(command.upload ? ['file'] : [])]);
   const data = await inputData(options.data);
   if (Object.entries(fields).some(([name, type]) => type === 'secret' && own(data, name)) && options.data !== '-' && !options.data?.startsWith('@')) {
-    throw new Error('Read gateway credentials with --data @file or --data -; do not place secrets in command-line arguments.');
+    throw new Error('Read credential secrets with --data @file or --data -; do not place secrets in command-line arguments.');
   }
   for (const name of Object.keys(data)) if (!own(fields, name)) throw new Error(`Unknown input field ${name}. Run sophy ${command.command} --help.`);
   const input = { ...command.defaults, ...data };

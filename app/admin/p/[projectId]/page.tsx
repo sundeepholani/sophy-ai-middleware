@@ -1,8 +1,11 @@
 import {
+  connectProjectCloudflare,
   connectProjectGateway,
+  disconnectProjectCloudflare,
   disconnectProjectGateway,
   setDefaultProject,
 } from '@/app/admin/project-actions';
+import { CloudflareCredentialCard } from '@/components/admin/cloudflare-credential-card';
 import { GatewayCredentialCard } from '@/components/admin/gateway-credential-card';
 import { MakeDefaultProjectButton } from '@/components/admin/make-default-project-button';
 import { projectRoleLabel } from '@/components/admin/project-types';
@@ -10,7 +13,11 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { getOverview } from '@/lib/admin/queries';
 import { requireProjectViewer } from '@/lib/auth/viewer';
-import { getProjectGatewaySummary } from '@/lib/projects/repository';
+import {
+  getProjectCloudflareSummary,
+  getProjectGatewaySummary,
+  redactProjectCloudflareSummary,
+} from '@/lib/projects/repository';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,9 +41,10 @@ export default async function ProjectOverviewPage({
 }) {
   const { projectId } = await params;
   const viewer = await requireProjectViewer(projectId);
-  const [overview, gateway] = await Promise.all([
+  const [overview, gateway, cloudflare] = await Promise.all([
     getOverview(viewer),
     getProjectGatewaySummary(projectId),
+    getProjectCloudflareSummary(projectId),
   ]);
   const nf = new Intl.NumberFormat('en-US');
   const isDefault = viewer.defaultProjectId === projectId;
@@ -57,6 +65,9 @@ export default async function ProjectOverviewPage({
           lastCheckedAt: null,
           lastFailureCode: null,
         };
+  // Same rule for Cloudflare: Editors' Flight payload carries only projectId, state and isReady.
+  // Account id, credential id, suffix, timestamps and failure details are Admin-only.
+  const clientCloudflare = redactProjectCloudflareSummary(cloudflare, viewer.role);
 
   return (
     <div className="space-y-6">
@@ -100,6 +111,15 @@ export default async function ProjectOverviewPage({
         summary={clientGateway}
         connectAction={connectProjectGateway}
         disconnectAction={disconnectProjectGateway}
+      />
+
+      <CloudflareCredentialCard
+        projectId={projectId}
+        projectName={viewer.projectName}
+        role={viewer.role}
+        summary={clientCloudflare}
+        connectAction={connectProjectCloudflare}
+        disconnectAction={disconnectProjectCloudflare}
       />
     </div>
   );

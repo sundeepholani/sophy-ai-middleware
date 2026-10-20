@@ -3,7 +3,7 @@
 import { useId, useState, useTransition } from 'react';
 import Link from 'next/link';
 import { toast } from 'sonner';
-import { Plus, Pencil, FlaskConical, Ban, RotateCw, Replace, Cable } from 'lucide-react';
+import { Plus, Pencil, FlaskConical, Ban, RotateCw, Replace, Cable, Cloud } from 'lucide-react';
 import {
   createKey,
   updateKey,
@@ -14,7 +14,20 @@ import {
   type KeyFormInput,
   type BulkActionResult,
 } from '@/app/admin/actions';
-import { evalChampionBlocked, transcriptProcessorSelectionError } from '@/lib/admin/keys';
+import {
+  CLOUDFLARE_NOT_READY,
+  cloudflareBindingError,
+  cloudflareModelBadges,
+  evalChampionBlocked,
+  keyFormCloudflareError,
+  transcriptProcessorSelectionError,
+} from '@/lib/admin/keys';
+import {
+  cloudflareAvailableModel,
+  getCloudflareModel,
+  isCloudflareModelId,
+} from '@/lib/gateway/cloudflare-models';
+import { cloudflareBindingCopy, cloudflareKeysNotice } from '@/components/admin/cloudflare-copy';
 import { cn } from '@/lib/utils';
 import type { KeyRow } from '@/lib/admin/queries';
 import type { AvailableModel } from '@/lib/gateway/models';
@@ -105,6 +118,7 @@ export function KeysManager({
   projectId,
   projectName,
   gatewayReady,
+  cloudflareReady,
   keys,
   models,
   transcriptProcessorModels,
@@ -118,6 +132,9 @@ export function KeysManager({
   projectId: string;
   projectName: string;
   gatewayReady: boolean;
+  /** The project's Cloudflare Workers AI credential is ready (D3). Only this boolean crosses to
+   *  the client: the Keys page never sends Cloudflare metadata. */
+  cloudflareReady: boolean;
   keys: KeyRow[];
   models: AvailableModel[];
   /** Language models eligible to process a raw speech-to-text transcript. */
@@ -149,6 +166,13 @@ export function KeysManager({
   const activeKeys = keys.filter((k) => k.status === 'active');
   const revokedKeys = keys.filter((k) => k.status !== 'active');
   const statusKeys = tab === 'active' ? activeKeys : revokedKeys;
+
+  // Existing keys that already point at Workers AI fail with the typed 503 while the credential is
+  // not ready (D3), so say so on the page, not only inside the form. A project that never uses
+  // Clef or Clairic sees nothing.
+  const cloudflareKeyCount = activeKeys.filter((k) => isCloudflareModelId(k.model)).length;
+  const cloudflareNotice =
+    !cloudflareReady && cloudflareKeyCount > 0 ? cloudflareKeysNotice(cloudflareKeyCount, role) : null;
 
   // Free-text filter across everything visible in a row. The key prefix is
   // searchable too even though only the last-4 shows, since searching a key
@@ -222,6 +246,25 @@ export function KeysManager({
         </div>
       )}
 
+      {cloudflareNotice && (
+        <div className="flex flex-col gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 sm:flex-row sm:items-center">
+          <Cloud className="size-5 shrink-0 text-amber-600" />
+          <div className="min-w-0 flex-1">
+            <p className="font-medium">{cloudflareNotice.title}</p>
+            <p className="text-sm text-muted-foreground">{cloudflareNotice.body}</p>
+          </div>
+          {role === 'admin' && (
+            <Button
+              variant="outline"
+              nativeButton={false}
+              render={<Link href={projectPath(projectId, 'settings')} />}
+            >
+              Open Settings
+            </Button>
+          )}
+        </div>
+      )}
+
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h2 className="text-sm font-medium text-muted-foreground">
           {query.trim()
@@ -246,6 +289,7 @@ export function KeysManager({
               models={models}
               transcriptProcessorModels={transcriptProcessorModels}
               modelsUnavailable={modelsUnavailable}
+              cloudflareReady={cloudflareReady}
               role={role}
               users={users}
               knowledgebases={knowledgebases}
@@ -361,7 +405,15 @@ export function KeysManager({
                 <TableCell className="font-mono text-xs text-muted-foreground">
                   …{k.keyLast4}
                 </TableCell>
-                <TableCell className="font-mono text-xs">{k.model}</TableCell>
+                <TableCell className="font-mono text-xs">
+                  {k.model}
+                  {/* Research preview (D9): Clairic. */}
+                  {getCloudflareModel(k.model)?.preview && (
+                    <Badge variant="outline" className="ml-1.5 font-sans font-normal">
+                      Preview
+                    </Badge>
+                  )}
+                </TableCell>
                 <TableCell className="text-xs text-muted-foreground">
                   {k.ownerEmail ?? <span className="italic">Unassigned</span>}
                 </TableCell>
@@ -453,6 +505,7 @@ export function KeysManager({
               models={models}
               transcriptProcessorModels={transcriptProcessorModels}
               modelsUnavailable={modelsUnavailable}
+              cloudflareReady={cloudflareReady}
               role={role}
               users={users}
               knowledgebases={knowledgebases}
@@ -490,6 +543,8 @@ export function KeysManager({
         modelsUnavailable={modelsUnavailable}
         evalStatuses={evalStatuses}
         onDone={() => setSelected(new Set())}
+        role={role}
+        cloudflareReady={cloudflareReady}
       />
       <BulkEvalDialog
         projectId={projectId}
@@ -555,6 +610,38 @@ function SelectedKeysList({ keys }: { keys: KeyRow[] }) {
   );
 }
 
+/** §4.3 callout under a model picker when a Workers AI selection cannot be saved (D3, D4). */
+function CloudflareBindingCallout({
+  error,
+  role,
+  projectId,
+}: {
+  error: string;
+  role: ProjectRole;
+  projectId: string;
+}) {
+  return (
+    <div
+      role="status"
+      className="flex flex-col gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-2.5 sm:flex-row sm:items-center"
+    >
+      <p className="flex-1 text-xs text-amber-700 dark:text-amber-500">
+        {cloudflareBindingCopy(error, role)}
+      </p>
+      {role === 'admin' && error === CLOUDFLARE_NOT_READY && (
+        <Button
+          size="sm"
+          variant="outline"
+          nativeButton={false}
+          render={<Link href={projectPath(projectId, 'settings')} />}
+        >
+          Open Settings
+        </Button>
+      )}
+    </div>
+  );
+}
+
 function BulkModelDialog({
   projectId,
   open,
@@ -564,6 +651,8 @@ function BulkModelDialog({
   modelsUnavailable = false,
   evalStatuses,
   onDone,
+  role,
+  cloudflareReady,
 }: {
   projectId: string;
   open: boolean;
@@ -573,6 +662,8 @@ function BulkModelDialog({
   modelsUnavailable?: boolean;
   evalStatuses: Record<string, EvalRunStatus>;
   onDone: () => void;
+  role: ProjectRole;
+  cloudflareReady: boolean;
 }) {
   const uid = useId();
   const [isPending, startTransition] = useTransition();
@@ -583,9 +674,12 @@ function BulkModelDialog({
   // chosen model are excluded — they're skipped server-side, eval untouched.
   const runningEvalKeys = keys.filter((k) => evalStatuses[k.id] === 'running');
   const evalStopKeys = runningEvalKeys.filter((k) => k.model !== model.trim());
+  // The server checks a Workers AI target once for the whole batch (bulkUpdateKeyModel); mirror it.
+  const cloudflareError = cloudflareBindingError(model.trim(), cloudflareReady);
 
   function submit() {
     if (!model.trim()) return toast.error('Pick a model');
+    if (cloudflareError) return toast.error(cloudflareBindingCopy(cloudflareError, role));
     // A model change stops a running eval — never do that silently. Only the
     // keys this dialog NAMES are sent as confirmed stops; a running eval the
     // snapshot didn't know about makes the server skip that key, not cancel it.
@@ -645,7 +739,11 @@ function BulkModelDialog({
               models={models.map((m) => m.id)}
               modelsUnavailable={modelsUnavailable}
               placeholder="anthropic/claude-sonnet-4.6"
+              itemBadges={(id) => cloudflareModelBadges(id, cloudflareReady)}
             />
+            {cloudflareError && (
+              <CloudflareBindingCallout error={cloudflareError} role={role} projectId={projectId} />
+            )}
           </div>
 
           <SelectedKeysList keys={keys} />
@@ -659,7 +757,10 @@ function BulkModelDialog({
           )}
 
           <div className="flex justify-end">
-            <Button onClick={submit} disabled={isPending || keys.length === 0}>
+            <Button
+              onClick={submit}
+              disabled={isPending || keys.length === 0 || cloudflareError !== null}
+            >
               {isPending
                 ? 'Updating…'
                 : `Change model on ${keys.length} key${keys.length === 1 ? '' : 's'}`}
@@ -1012,6 +1113,7 @@ function KeyForm({
   models,
   transcriptProcessorModels,
   modelsUnavailable = false,
+  cloudflareReady,
   role,
   users,
   knowledgebases,
@@ -1026,6 +1128,8 @@ function KeyForm({
   models: AvailableModel[];
   transcriptProcessorModels: AvailableModel[];
   modelsUnavailable?: boolean;
+  /** The project's Cloudflare Workers AI credential is ready (D3). */
+  cloudflareReady: boolean;
   role: ProjectRole;
   users: { id: string; email: string }[];
   knowledgebases: { id: string; name: string }[];
@@ -1074,12 +1178,26 @@ function KeyForm({
   const filteredModels = requiredCaps.length
     ? models.filter((m) => modelHasAllTags(m, requiredCaps))
     : models;
-  const currentModel = models.find((m) => m.id === model);
+  const catalogModel = models.find((m) => m.id === model);
+  const registryEntry = catalogModel ? undefined : getCloudflareModel(model.trim());
+  // Workers AI ids are a code-reviewed allowlist: classify them even when the Vercel catalog is down
+  // (D5), so a Clef or Clairic key never shows, or saves, a stale prompt, schema or KB.
+  const currentModel =
+    catalogModel ?? (registryEntry ? cloudflareAvailableModel(registryEntry) : undefined);
   const isTranscriptionModel = currentModel?.type === 'transcription';
-  // An evaluation key (/v1/evaluate) takes only a state and typed questions:
-  // no system prompt, no sampling params, no output schema, no knowledgebase.
-  // Derived from the same lookup, so a catalog outage degrades to the full form.
+  // Typed native surfaces take structured input only: an evaluation key (/v1/evaluate, state and
+  // questions) and an extraction key (/v1/extract, state and fields). Neither takes a system prompt,
+  // sampling params, an output schema or a knowledgebase. Derived from the same lookup, so a catalog
+  // outage degrades to the full form, except for registry ids.
   const isAssessmentModel = currentModel?.type === 'evaluation';
+  const isExtractionModel = currentModel?.type === 'extraction';
+  const isTypedModel = isAssessmentModel || isExtractionModel;
+  // D3/D4 bind-time rule, mirrored from createKey/updateKey (lib/admin/keys.ts).
+  const cloudflareError = keyFormCloudflareError({
+    model,
+    initialModel: mode === 'create' ? null : (initial?.model ?? null),
+    cloudflareReady,
+  });
   const missingCaps = currentModel
     ? requiredCaps.filter((c) => !currentModel.tags.includes(c))
     : [];
@@ -1087,6 +1205,7 @@ function KeyForm({
   function submit(stopEval = false) {
     if (!name.trim()) return toast.error('Name is required');
     if (!model.trim()) return toast.error('Model is required');
+    if (cloudflareError) return toast.error(cloudflareBindingCopy(cloudflareError, role));
     const transcriptProcessorError = transcriptProcessorSelectionError({
       primaryModel: currentModel,
       systemPrompt,
@@ -1181,20 +1300,20 @@ function KeyForm({
       name: name.trim(),
       model: model.trim(),
       // Hiding a field does not clear it: switching an existing chat key to an
-      // evaluation model must not persist a stale prompt/schema/knowledgebase.
+      // evaluation or extraction model must not persist a stale prompt/schema/knowledgebase.
       // Guarded on currentModel so a catalog outage preserves stored config.
       systemPrompt:
-        currentModel && isAssessmentModel ? null : systemPrompt.trim() ? systemPrompt : null,
+        currentModel && isTypedModel ? null : systemPrompt.trim() ? systemPrompt : null,
       // Spread the original params so any field we don't surface survives an edit;
       // blank UI fields serialize out of the jsonb as undefined.
       params: keyParams,
-      outputSchema: currentModel && isAssessmentModel ? null : outputSchema,
+      outputSchema: currentModel && isTypedModel ? null : outputSchema,
       monthlyCostCapUsd: costCapV,
       rpmLimit: rpmV,
       logContent,
       // Owner is admin-only; the server forces self-ownership for editors regardless.
       ownerUserId: role === 'admin' ? ownerUserId || null : undefined,
-      knowledgebaseId: currentModel && isAssessmentModel ? null : knowledgebaseId || null,
+      knowledgebaseId: currentModel && isTypedModel ? null : knowledgebaseId || null,
     };
     // A model change invalidates the key's running eval — never stop it without
     // asking. The page-load hint triggers the confirmation here; if the hint is
@@ -1262,7 +1381,11 @@ function KeyForm({
           models={filteredModels.map((m) => m.id)}
           modelsUnavailable={modelsUnavailable}
           placeholder="anthropic/claude-sonnet-4.6"
+          itemBadges={(id) => cloudflareModelBadges(id, cloudflareReady)}
         />
+        {cloudflareError && (
+          <CloudflareBindingCallout error={cloudflareError} role={role} projectId={projectId} />
+        )}
         {models.length > 0 && (
           <div className="space-y-1.5 rounded-md border p-2.5">
             <div className="flex items-center justify-between">
@@ -1350,7 +1473,7 @@ function KeyForm({
         </div>
       )}
 
-      {knowledgebases.length > 0 && !isTranscriptionModel && !isAssessmentModel && (
+      {knowledgebases.length > 0 && !isTranscriptionModel && !isTypedModel && (
         <div className="space-y-1">
           <Label htmlFor={`${uid}-kb`} className="text-xs">
             Knowledgebase
@@ -1383,7 +1506,7 @@ function KeyForm({
         </div>
       )}
 
-      {!isAssessmentModel && (
+      {!isTypedModel && (
         <>
           <div className="space-y-1">
             <Label htmlFor={`${uid}-system`} className="text-xs">
@@ -1446,15 +1569,17 @@ function KeyForm({
           <p className="text-xs text-muted-foreground">
             {isAssessmentModel
               ? 'Store the evaluated state, the questions, and the returned answers for 30 days.'
-              : isTranscriptionModel
-                ? 'Store the filename, language hint, raw transcript, and final text for 30 days. Audio bytes are never stored.'
-                : 'Store text and model replies for 30 days. Complete image input values are discarded after 7 days; the log keeps a placeholder.'}
+              : isExtractionModel
+                ? 'Store the input text, the field definitions, and the extracted answers for 30 days. Image bytes are never stored.'
+                : isTranscriptionModel
+                  ? 'Store the filename, language hint, raw transcript, and final text for 30 days. Audio bytes are never stored.'
+                  : 'Store text and model replies for 30 days. Complete image input values are discarded after 7 days; the log keeps a placeholder.'}
           </p>
         </div>
         <Switch id={`${uid}-log`} checked={logContent} onCheckedChange={setLogContent} />
       </div>
 
-      {!isAssessmentModel && (
+      {!isTypedModel && (
         <>
           <button
             type="button"
@@ -1563,7 +1688,7 @@ function KeyForm({
       <div className="flex justify-end gap-2 pt-2">
         {/* () => submit() — passing the handler directly would hand the click
             event to the stopEval param, silently skipping the confirmation. */}
-        <Button onClick={() => submit()} disabled={isPending}>
+        <Button onClick={() => submit()} disabled={isPending || cloudflareError !== null}>
           {isPending ? 'Saving…' : mode === 'create' ? 'Create key' : 'Save changes'}
         </Button>
       </div>

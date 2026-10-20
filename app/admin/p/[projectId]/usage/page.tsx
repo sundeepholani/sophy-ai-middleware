@@ -49,8 +49,10 @@ export default async function UsagePage({
       <div>
         <h1 className="text-2xl font-semibold">Usage</h1>
         <p className="text-sm text-muted-foreground">
-          Gateway usage inside {viewer.projectName}, broken down by Sophy key, model, and source.
-          Cost includes client traffic and Sophy-run eval or knowledgebase work.
+          AI usage inside {viewer.projectName} (Vercel AI Gateway and Cloudflare Workers AI), broken down
+          by Sophy key, model, and source. Cost includes client traffic and Sophy-run eval or knowledgebase
+          work. Cloudflare Workers AI costs are estimates from billed neurons and ignore Cloudflare’s daily
+          free allocation.
         </p>
       </div>
 
