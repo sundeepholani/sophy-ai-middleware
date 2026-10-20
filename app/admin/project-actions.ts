@@ -11,6 +11,7 @@ import {
   evalSamples,
   kbDocuments,
   knowledgebases,
+  projectCloudflareCredentials,
   projectGatewayCredentials,
   projectInvitations,
   projectMemberships,
@@ -26,12 +27,19 @@ import {
 } from '@/lib/auth/viewer';
 import { normalizeEmail, hashToken } from '@/lib/auth/magic-link';
 import {
+  encryptCloudflareCredential,
   encryptGatewayCredential,
 } from '@/lib/gateway/credential-crypto';
+import {
+  normalizeCloudflareAccountId,
+  normalizeCloudflareApiToken,
+  validateCloudflareCredential,
+} from '@/lib/gateway/cloudflare-provider';
 import { validateGatewayCredential } from '@/lib/gateway/project-provider';
 import { sendEmail, escapeHtml } from '@/lib/email/send';
 import { env } from '@/lib/env';
 import { LEGACY_PROJECT_ID } from '@/lib/projects/constants';
+import type { CloudflareCredentialActionResult } from '@/components/admin/project-types';
 
 type Db = ReturnType<typeof getDb>;
 type DbTx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -263,13 +271,25 @@ export async function renameProject(input: {
   revalidateProject(input.projectId);
 }
 
-function isUniqueViolation(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    (error as { code?: unknown }).code === '23505'
-  );
+/**
+ * drizzle-orm 0.45 wraps every driver error in DrizzleQueryError (the pg error is its
+ * `cause`), so the code must be looked for down the cause chain, not only at the top.
+ * With `constraint`, a pg error that names a different constraint does not match.
+ */
+function isUniqueViolation(error: unknown, constraint?: string): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && typeof current === 'object' && current !== null; depth++) {
+    const candidate = current as { code?: unknown; constraint?: unknown; cause?: unknown };
+    if (candidate.code === '23505') {
+      return (
+        constraint === undefined ||
+        candidate.constraint === undefined ||
+        candidate.constraint === constraint
+      );
+    }
+    current = candidate.cause;
+  }
+  return false;
 }
 
 export async function connectProjectGateway(input: {
@@ -437,6 +457,184 @@ export async function disconnectProjectGateway(input: {
     );
   });
   revalidateProject(input.projectId);
+}
+
+const CLOUDFLARE_FINGERPRINT_INDEX = 'project_cloudflare_credentials_fingerprint_idx';
+
+/**
+ * Connect or rotate the project's Cloudflare Workers AI credential (D2). Admin-only:
+ * auth failures still THROW forbidden/unauthorized, like every action; business outcomes
+ * are RETURNED so production Server Action masking cannot hide them (Next's error
+ * handling guide: model expected errors as return values).
+ */
+export async function connectProjectCloudflare(input: {
+  projectId: string;
+  accountId: string;
+  apiToken: string;
+}): Promise<CloudflareCredentialActionResult> {
+  const viewer = await assertProjectAdmin(input.projectId);
+  // The normalisers return null for a non-string too: a crafted payload gets a code, not a throw.
+  const accountId = normalizeCloudflareAccountId(input.accountId);
+  if (!accountId) return { ok: false, code: 'cloudflare_invalid_account_id' };
+  const apiToken = normalizeCloudflareApiToken(input.apiToken);
+  if (!apiToken) return { ok: false, code: 'cloudflare_invalid' };
+
+  // One free, account-scoped check, OUTSIDE any transaction: never hold the project
+  // row lock across a network call (mirrors connectProjectGateway).
+  const validation = await validateCloudflareCredential(accountId, apiToken);
+  if (validation === 'invalid') return { ok: false, code: 'cloudflare_invalid' };
+  if (validation === 'unreachable') return { ok: false, code: 'cloudflare_unreachable' };
+
+  const credentialId = randomUUID();
+  const envelope = encryptCloudflareCredential({
+    projectId: input.projectId,
+    credentialId,
+    accountId,
+    apiToken,
+  });
+  const now = new Date();
+  let outcome: 'ok' | 'not_found';
+  try {
+    outcome = await getDb().transaction(async (tx) => {
+      await lockProject(tx, input.projectId);
+      const [project] = await tx
+        .select({ currentCredentialId: projects.currentCloudflareCredentialId })
+        .from(projects)
+        .where(eq(projects.id, input.projectId))
+        .limit(1);
+      if (!project) return 'not_found' as const;
+
+      if (project.currentCredentialId) {
+        // Retire the old row first so the one-available and fingerprint indexes admit
+        // the new one (even for the same token). Its ciphertext is erased; in-flight
+        // requests keep their own snapshot, and their late 401 can only touch THIS old
+        // row (normalizeProjectCloudflareError compares and sets by row id).
+        await tx
+          .update(projectCloudflareCredentials)
+          .set({
+            lifecycle: 'replaced',
+            encryptedSecret: null,
+            encryptionNonce: null,
+            encryptionTag: null,
+            replacedAt: now,
+          })
+          .where(
+            and(
+              eq(projectCloudflareCredentials.projectId, input.projectId),
+              eq(projectCloudflareCredentials.id, project.currentCredentialId),
+              eq(projectCloudflareCredentials.lifecycle, 'available'),
+            ),
+          );
+      }
+      await tx.insert(projectCloudflareCredentials).values({
+        id: credentialId,
+        projectId: input.projectId,
+        accountId,
+        lifecycle: 'available',
+        health: 'healthy',
+        ...envelope,
+        verifiedAt: now,
+        lastCheckedAt: now,
+        createdByUserId: viewer.userId,
+      });
+      await tx
+        .update(projects)
+        .set({
+          currentCloudflareCredentialId: credentialId,
+          cloudflareCredentialRevision: sql`${projects.cloudflareCredentialRevision} + 1`,
+          updatedAt: now,
+        })
+        .where(eq(projects.id, input.projectId));
+      // Deliberately NOT clearing the kb/eval 'project_gateway_unavailable' markers
+      // that connectProjectGateway clears: those belong to the Vercel credential.
+      await audit(
+        tx,
+        input.projectId,
+        viewer.email,
+        project.currentCredentialId ? 'cloudflare.rotate' : 'cloudflare.connect',
+        credentialId,
+        {
+          lastFour: envelope.secretLastFour,
+          fingerprint: envelope.secretFingerprint,
+        },
+      );
+      return 'ok' as const;
+    });
+  } catch (error) {
+    if (isUniqueViolation(error, CLOUDFLARE_FINGERPRINT_INDEX)) {
+      return { ok: false, code: 'cloudflare_in_use' };
+    }
+    throw error;
+  }
+  if (outcome === 'not_found') return { ok: false, code: 'not_found' };
+  revalidateProject(input.projectId);
+  return { ok: true };
+}
+
+/** Idempotent. Pauses Clef/Clairic for the project; revokes nothing at Cloudflare. */
+export async function disconnectProjectCloudflare(input: {
+  projectId: string;
+}): Promise<CloudflareCredentialActionResult> {
+  const viewer = await assertProjectAdmin(input.projectId);
+  const now = new Date();
+  const outcome = await getDb().transaction(async (tx) => {
+    await lockProject(tx, input.projectId);
+    const [project] = await tx
+      .select({
+        currentCredentialId: projects.currentCloudflareCredentialId,
+        rowId: projectCloudflareCredentials.id,
+        lastFour: projectCloudflareCredentials.secretLastFour,
+        fingerprint: projectCloudflareCredentials.secretFingerprint,
+      })
+      .from(projects)
+      .leftJoin(
+        projectCloudflareCredentials,
+        and(
+          eq(projectCloudflareCredentials.id, projects.currentCloudflareCredentialId),
+          eq(projectCloudflareCredentials.projectId, projects.id),
+        ),
+      )
+      .where(eq(projects.id, input.projectId))
+      .limit(1);
+    if (!project) return 'not_found' as const;
+    if (project.currentCredentialId) {
+      await tx
+        .update(projectCloudflareCredentials)
+        .set({
+          lifecycle: 'disconnected',
+          encryptedSecret: null,
+          encryptionNonce: null,
+          encryptionTag: null,
+          disconnectedAt: now,
+        })
+        .where(
+          and(
+            eq(projectCloudflareCredentials.projectId, input.projectId),
+            eq(projectCloudflareCredentials.id, project.currentCredentialId),
+          ),
+        );
+    }
+    await tx
+      .update(projects)
+      .set({
+        currentCloudflareCredentialId: null,
+        cloudflareCredentialRevision: sql`${projects.cloudflareCredentialRevision} + 1`,
+        updatedAt: now,
+      })
+      .where(eq(projects.id, input.projectId));
+    await audit(
+      tx,
+      input.projectId,
+      viewer.email,
+      'cloudflare.disconnect',
+      project.rowId ?? input.projectId,
+      project.rowId ? { lastFour: project.lastFour, fingerprint: project.fingerprint } : null,
+    );
+    return 'ok' as const;
+  });
+  if (outcome === 'not_found') return { ok: false, code: 'not_found' };
+  revalidateProject(input.projectId);
+  return { ok: true };
 }
 
 async function requestOrigin(): Promise<string | null> {

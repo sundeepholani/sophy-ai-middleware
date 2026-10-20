@@ -9,6 +9,7 @@ import {
   createExplicitTranscriptionGateway,
   projectCredentialFailure,
   projectGatewayUnavailableResponse,
+  ProjectCloudflareUnavailableError,
   ProjectGatewayUnavailableError,
   validateGatewayCredential,
 } from '@/lib/gateway/project-provider';
@@ -179,5 +180,41 @@ describe('project gateway provider invariants', () => {
     const body = await response?.json();
     expect(body.error.code).toBe('project_gateway_unavailable');
     expect(body.error.message).not.toContain('secret account detail');
+  });
+
+  it('tags Vercel and Cloudflare 503s with their provider', () => {
+    const projectId = '00000000-0000-4000-8000-000000000001';
+    const rowA = '00000000-0000-4000-8000-000000000002';
+    expect(new ProjectGatewayUnavailableError(projectId, 'credential_invalid', rowA).provider).toBe('vercel');
+
+    const cloudflare = new ProjectCloudflareUnavailableError(projectId, 'credential_missing', rowA);
+    expect(cloudflare).toMatchObject({
+      name: 'ProjectGatewayUnavailableError',
+      code: 'project_gateway_unavailable',
+      statusCode: 503,
+      provider: 'cloudflare',
+      reason: 'credential_missing',
+      cloudflareCredentialId: rowA,
+    });
+    expect(cloudflare.gatewayCredentialId).toBeUndefined();
+    expect(cloudflare).toBeInstanceOf(ProjectGatewayUnavailableError);
+    expect(ProjectGatewayUnavailableError.isInstance(cloudflare)).toBe(true);
+  });
+
+  it('uses provider-neutral 503 text', async () => {
+    const projectId = '00000000-0000-4000-8000-000000000001';
+    const rowA = '00000000-0000-4000-8000-000000000002';
+    for (const error of [
+      new ProjectCloudflareUnavailableError(projectId, 'credential_invalid', rowA),
+      new ProjectGatewayUnavailableError(projectId, 'credential_invalid', rowA),
+    ]) {
+      const response = projectGatewayUnavailableResponse(error);
+      expect(response?.status).toBe(503);
+      const message: string = (await response!.json()).error.message;
+      expect(message).toBe(
+        'This project is not ready to make AI requests. Ask a project admin to connect or check its AI provider credentials.',
+      );
+      expect(message).not.toMatch(/Vercel|Cloudflare/);
+    }
   });
 });

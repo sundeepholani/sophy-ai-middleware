@@ -75,6 +75,18 @@ describe('languageCapability', () => {
     const { mod } = await freshModels([{ id: 'vendor/untyped' }]);
     await expect(mod.languageCapability('vendor/untyped')).resolves.toBe('language');
   });
+
+  it('classifies Cloudflare ids as not_language without the catalog', async () => {
+    const { mod, fetchMock } = await freshModels([{ id: 'openai/gpt-5-mini', type: 'language' }]);
+    // Fake timers before the calls: vitest's getTimerCount() throws without them,
+    // and a real 1.5s race timer armed earlier would not be counted.
+    vi.useFakeTimers();
+
+    await expect(mod.languageCapability('@cf/cloudflare/clef')).resolves.toBe('not_language');
+    await expect(mod.languageCapability('@cf/cloudflare/nope')).resolves.toBe('not_language');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 describe('catalogCapability — shared by every surface guard', () => {

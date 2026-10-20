@@ -5,7 +5,8 @@ import {
   listAllModels,
   modelSupportsBatchTranscription,
 } from '@/lib/gateway/models';
-import type { AvailableModel } from '@/lib/gateway/capabilities';
+import { MODEL_CAPABILITIES, type AvailableModel } from '@/lib/gateway/capabilities';
+import { CLOUDFLARE_MODELS, cloudflareAvailableModels } from '@/lib/gateway/cloudflare-models';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -31,7 +32,7 @@ describe('public gateway model catalog', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(listAllModels()).resolves.toHaveLength(1);
+    await expect(listAllModels()).resolves.toHaveLength(1 + CLOUDFLARE_MODELS.length);
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 });
@@ -146,5 +147,89 @@ describe('evaluation model normalization', () => {
     expect(jev.outputPerMTok).toBe(0); // free output, not unknown
     expect(jev.inputPerMTok).toBeCloseTo(0.042, 6);
     expect(fresh.keyModelsFromCatalog([jev])).toHaveLength(1);
+  });
+});
+
+describe('Cloudflare Workers AI registry in the catalog', () => {
+  /** A fresh module per case: the catalog memoizes for an hour. */
+  async function freshCatalog(data: unknown[]) {
+    vi.resetModules();
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ data }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const fresh = await import('@/lib/gateway/models');
+    return fresh.listAllModels();
+  }
+
+  it('appends the Cloudflare registry after the sorted gateway rows', async () => {
+    const all = await freshCatalog([
+      { id: 'b/model', type: 'language' },
+      { id: 'a/model', type: 'language' },
+    ]);
+
+    expect(all.map((m) => m.id)).toEqual([
+      'a/model',
+      'b/model',
+      ...CLOUDFLARE_MODELS.map((m) => m.id),
+    ]);
+    const registryRows = all.slice(2);
+    expect(registryRows).toEqual(cloudflareAvailableModels());
+    expect(registryRows.map((m) => m.preview)).toEqual(CLOUDFLARE_MODELS.map((m) => m.preview));
+    expect(registryRows.every((m) => m.provider === 'cloudflare')).toBe(true);
+  });
+
+  it('drops @cf/ rows the gateway lists', async () => {
+    const all = await freshCatalog([
+      { id: 'b/model', type: 'language' },
+      { id: '@cf/cloudflare/clef', pricing: { input: '0.000009' } },
+      { id: '@cf/other/x' },
+    ]);
+
+    const clef = all.filter((m) => m.id === '@cf/cloudflare/clef');
+    expect(clef).toHaveLength(1);
+    expect(clef[0]).toMatchObject({ inputPerMTok: 0.24, type: 'evaluation', provider: 'cloudflare' });
+    expect(all.some((m) => m.id === '@cf/other/x')).toBe(false);
+    expect(all).toHaveLength(1 + CLOUDFLARE_MODELS.length);
+  });
+
+  it('offers Clef as evaluation and Clairic as extraction', () => {
+    const result = keyModelsFromCatalog([
+      model('openai/gpt-5-mini', 'language'),
+      model('typesafe-ai/jev', 'evaluation'),
+      ...cloudflareAvailableModels(),
+    ]);
+
+    expect(result.map((m) => m.type)).toEqual([
+      'language',
+      'evaluation',
+      'evaluation',
+      'evaluation',
+      'evaluation',
+      'extraction',
+    ]);
+    // Display order only: '@cf/' sorts before 'typesafe-ai/' under localeCompare.
+    expect(result.map((m) => m.id)).toEqual([
+      'openai/gpt-5-mini',
+      '@cf/cloudflare/clef',
+      '@cf/cloudflare/clef-flash',
+      '@cf/cloudflare/clef-omni',
+      'typesafe-ai/jev',
+      '@cf/cloudflare/clairic',
+    ]);
+    expect(isKeyBindableType('extraction')).toBe(true);
+    // Every registry tag is a curated capability, so the Models filter offers it.
+    expect(MODEL_CAPABILITIES.find((c) => c.tag === 'extraction')).toEqual({
+      tag: 'extraction',
+      label: 'Extraction',
+      hint: 'Extracts typed values from text and images',
+    });
+    for (const tag of CLOUDFLARE_MODELS.flatMap((m) => m.tags)) {
+      expect(MODEL_CAPABILITIES.map((c) => c.tag as string)).toContain(tag);
+    }
   });
 });

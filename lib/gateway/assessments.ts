@@ -23,7 +23,7 @@
  * have given it — see withRetries.
  */
 import { randomUUID } from 'node:crypto';
-import { APICallError, RetryError } from 'ai';
+import { APICallError } from 'ai';
 import {
   recordUsage,
   recordAssessmentLog,
@@ -47,12 +47,9 @@ import {
   normalizeProjectGatewayError,
   type ProjectGatewaySnapshot,
 } from '@/lib/gateway/project-provider';
+import { NATIVE_UPSTREAM_TIMEOUT_MS, withRetries } from '@/lib/gateway/retries';
+import { ASSET_KEY_PATTERN, STRICT_BASE64, summarizeAssets } from '@/lib/gateway/image-assets';
 
-/**
- * One deadline for the whole upstream call — every attempt and every retry wait
- * — so retrying never raises the worst-case latency. Buffered, never a stream.
- */
-const UPSTREAM_TIMEOUT_MS = 120_000;
 /** Questions are answered in parallel upstream; bound the fan-out we pay for. */
 const MAX_QUESTIONS = 32;
 /** The evaluated state is echoed into request_logs, so cap it before any I/O. */
@@ -70,10 +67,7 @@ const SYSTEMONE_URL = 'https://ai-gateway.vercel.sh/typesafe/v1/systemone';
  */
 const ASSET_PROVIDER = 'typesafe-ai';
 const MAX_ASSETS = 8;
-const ASSET_KEY = /^[A-Za-z0-9_-]{1,64}$/;
 const ASSET_FORMATS = new Set(['png', 'jpg', 'jpeg']);
-/** Standard padded base64 — TypeSafe rejects whitespace, url-safe and `data:` forms. */
-const STRICT_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 // ---- Capability guard -------------------------------------------------------
 
@@ -226,7 +220,7 @@ function parseAssets(
   const assets: Record<string, AssessmentAsset> = {};
   for (const key of keys) {
     const at = `assets.${key}`;
-    if (!ASSET_KEY.test(key)) {
+    if (!ASSET_KEY_PATTERN.test(key)) {
       return bad(
         `Asset keys must be 1-64 characters of letters, digits, "_" or "-".`,
         'invalid_asset_key',
@@ -512,124 +506,8 @@ function liftUpstreamMessage(bodyText: string): string | null {
   }
 }
 
-// ---- Upstream call, retried like the AI SDK ---------------------------------
-
-/**
- * Every other surface calls the gateway through the AI SDK, which retries
- * transient failures by default (ai@6 retryWithExponentialBackoffRespectingRetryHeaders:
- * two retries, 2s then 4s, a provider's retry-after honored when under a minute).
- * That helper isn't exported and this surface calls the gateway by hand, so the
- * policy is mirrored here. Without it a transient upstream 503 reached the client
- * on the first failure, while the same blip on chat was absorbed.
- */
-const MAX_RETRIES = 2;
-const INITIAL_RETRY_DELAY_MS = 2_000;
-const RETRY_BACKOFF_FACTOR = 2;
-const MAX_RETRY_AFTER_MS = 60_000;
-
-/** Mirrors @ai-sdk/provider-utils isAbortError: a cancelled call is never retried. */
-function isAbortError(error: unknown): boolean {
-  return (
-    (error instanceof Error ||
-      (typeof DOMException !== 'undefined' && error instanceof DOMException)) &&
-    (error.name === 'AbortError' || error.name === 'ResponseAborted' || error.name === 'TimeoutError')
-  );
-}
-
-/**
- * Mirrors the AI SDK's getRetryDelayInMs: prefer retry-after-ms, then retry-after
- * (seconds or an HTTP date), when it is non-negative and either under a minute or
- * shorter than the backoff; otherwise fall back to the exponential delay.
- */
-function retryDelayMs(error: unknown, exponentialDelayMs: number): number {
-  const cause = (error as { cause?: unknown } | null)?.cause;
-  const headers = APICallError.isInstance(error)
-    ? error.responseHeaders
-    : APICallError.isInstance(cause)
-      ? cause.responseHeaders
-      : undefined;
-  if (!headers) return exponentialDelayMs;
-  let ms: number | undefined;
-  const retryAfterMs = headers['retry-after-ms'];
-  if (retryAfterMs) {
-    const n = parseFloat(retryAfterMs);
-    if (!Number.isNaN(n)) ms = n;
-  }
-  const retryAfter = headers['retry-after'];
-  if (retryAfter && ms === undefined) {
-    const seconds = parseFloat(retryAfter);
-    ms = Number.isNaN(seconds) ? Date.parse(retryAfter) - Date.now() : seconds * 1000;
-  }
-  if (
-    ms != null &&
-    !Number.isNaN(ms) &&
-    ms >= 0 &&
-    (ms < MAX_RETRY_AFTER_MS || ms < exponentialDelayMs)
-  ) {
-    return ms;
-  }
-  return exponentialDelayMs;
-}
-
-/** A wait that ends early, and releases its timer, if the call's deadline fires. */
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(signal.reason);
-      return;
-    }
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-/**
- * Run `attempt`, retrying exactly as the AI SDK does. Cancellation rethrows at
- * once. A non-retryable failure on the first try rethrows as-is, so credential
- * health handling still sees a bare 401/402. Otherwise the attempts are collected
- * into a RetryError, whose lastError carries the final status — the same shape
- * chat, embeddings and images produce, which upstream-error.ts already unwraps.
- * Exported for unit testing.
- */
-export async function withRetries<T>(attempt: () => Promise<T>, signal: AbortSignal): Promise<T> {
-  const errors: unknown[] = [];
-  let delayMs = INITIAL_RETRY_DELAY_MS;
-  for (;;) {
-    try {
-      return await attempt();
-    } catch (error) {
-      if (isAbortError(error)) throw error;
-      errors.push(error);
-      const tries = errors.length;
-      const message = error instanceof Error ? error.message : String(error);
-      if (tries > MAX_RETRIES) {
-        throw new RetryError({
-          message: `Failed after ${tries} attempts. Last error: ${message}`,
-          reason: 'maxRetriesExceeded',
-          errors,
-        });
-      }
-      if (APICallError.isInstance(error) && error.isRetryable) {
-        await sleep(retryDelayMs(error, delayMs), signal);
-        delayMs *= RETRY_BACKOFF_FACTOR;
-        continue;
-      }
-      if (tries === 1) throw error;
-      throw new RetryError({
-        message: `Failed after ${tries} attempts with non-retryable error: '${message}'`,
-        reason: 'errorNotRetryable',
-        errors,
-      });
-    }
-  }
-}
+// Moved to lib/gateway/retries.ts; re-exported for tests/assessment-handler.test.ts.
+export { withRetries };
 
 /**
  * One authenticated POST. A non-2xx becomes an APICallError whose isRetryable is
@@ -680,26 +558,8 @@ async function postEvaluate(
   return res;
 }
 
-/**
- * What the request log keeps of each image: its format and decoded size, never
- * the bytes — a base64 selfie would blow the log cap and is not ours to retain.
- */
-export function summarizeAssets(
-  assets: Record<string, AssessmentAsset> | undefined,
-): Record<string, { format: string; bytes: number }> | undefined {
-  if (!assets) return undefined;
-  return Object.fromEntries(
-    Object.entries(assets).map(([key, a]) => [
-      key,
-      {
-        format: a.format,
-        bytes:
-          (a.data_base64.length / 4) * 3 -
-          (a.data_base64.endsWith('==') ? 2 : a.data_base64.endsWith('=') ? 1 : 0),
-      },
-    ]),
-  );
-}
+// Moved to lib/gateway/image-assets.ts; re-exported for tests/assessments.test.ts.
+export { summarizeAssets };
 
 /**
  * Run one evaluation and record it. Mirrors the embeddings handler: usage is
@@ -742,7 +602,7 @@ export async function handleAssessment(
             ? { providerOptions: parsed.providerOptions }
             : {}),
         };
-    const signal = AbortSignal.timeout(UPSTREAM_TIMEOUT_MS);
+    const signal = AbortSignal.timeout(NATIVE_UPSTREAM_TIMEOUT_MS);
     const res = await withRetries(
       () => postEvaluate(ctx, upstreamBody, signal, withImages),
       signal,

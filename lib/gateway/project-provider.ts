@@ -45,10 +45,14 @@ export type ProjectGatewayUnavailableReason =
   | 'credential_billing_attention'
   | 'credential_misconfigured';
 
+export type ProjectCredentialProvider = 'vercel' | 'cloudflare';
+
 /** Safe, route-facing 503 for a valid Sophy key whose project cannot make calls. */
 export class ProjectGatewayUnavailableError extends Error {
   readonly statusCode = 503;
   readonly code = 'project_gateway_unavailable';
+  /** Which project credential failed. The reason literals are shared; (provider, reason) is the provider-aware pair. */
+  readonly provider: ProjectCredentialProvider = 'vercel';
 
   constructor(
     readonly projectId: string,
@@ -56,7 +60,7 @@ export class ProjectGatewayUnavailableError extends Error {
     readonly gatewayCredentialId?: string,
     readonly cause?: unknown,
   ) {
-    super('This project is not ready to make AI Gateway requests.');
+    super('This project is not ready to make AI requests.');
     this.name = 'ProjectGatewayUnavailableError';
   }
 
@@ -68,6 +72,25 @@ export class ProjectGatewayUnavailableError extends Error {
         (error as { name?: unknown }).name === 'ProjectGatewayUnavailableError' &&
         (error as { code?: unknown }).code === 'project_gateway_unavailable')
     );
+  }
+}
+
+/**
+ * The Cloudflare Workers AI credential (D3). Same name, code and status, so every existing 503
+ * path — route catches, upstreamErrorResponse (upstream-error.ts:193-195),
+ * safeGatewayErrorMessage (:219) — handles it unchanged. It never carries a Vercel credential id.
+ */
+export class ProjectCloudflareUnavailableError extends ProjectGatewayUnavailableError {
+  // No `this.name` here: isInstance duck-types on the base name across duplicated module instances.
+  override readonly provider = 'cloudflare' as const;
+
+  constructor(
+    projectId: string,
+    reason: ProjectGatewayUnavailableReason,
+    readonly cloudflareCredentialId?: string,
+    cause?: unknown,
+  ) {
+    super(projectId, reason, undefined, cause);
   }
 }
 
@@ -402,7 +425,7 @@ export function projectGatewayUnavailableResponse(error: unknown): Response | nu
   return openAiError(
     503,
     'api_error',
-    'This project is not ready to make AI requests. Ask a project admin to connect or check its Vercel AI Gateway key.',
+    'This project is not ready to make AI requests. Ask a project admin to connect or check its AI provider credentials.',
     { code: error.code },
   );
 }

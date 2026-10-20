@@ -69,13 +69,12 @@ export function extractGatewayRequestId(pm: ProviderMetadataLike): string | null
   return typeof id === 'string' ? id : null;
 }
 
-export interface RecordUsageInput {
+/** Every usage field except the paying credential, which RecordUsageInput adds. */
+interface RecordUsageInputBase {
   /** Optional explicit id; pass it to correlate with a request_logs row. */
   id?: string;
   /** Hard tenant boundary copied from the resolved Sophy key/project. */
   projectId: string;
-  /** Immutable credential snapshot that actually paid for this call. */
-  gatewayCredentialId: string;
   /** Null only for spend with no owning key (kb_ingest from the cron). */
   keyId: string | null;
   /** Defaults to 'proxy' (the one client-request row). A
@@ -95,11 +94,32 @@ export interface RecordUsageInput {
   errorMessage?: string | null;
 }
 
+/**
+ * Exactly one immutable credential snapshot paid for this call (D7). Every
+ * existing call site passes gatewayCredentialId and compiles unchanged;
+ * Cloudflare calls pass cloudflareCredentialId. The DB CHECK
+ * usage_events_single_credential_check backs this.
+ */
+export type RecordUsageInput = RecordUsageInputBase &
+  (
+    | {
+        /** Vercel AI Gateway credential row that paid. */
+        gatewayCredentialId: string;
+        cloudflareCredentialId?: never;
+      }
+    | {
+        /** Cloudflare Workers AI credential row that paid. */
+        cloudflareCredentialId: string;
+        gatewayCredentialId?: never;
+      }
+  );
+
 function usageEventValues(input: RecordUsageInput): typeof usageEvents.$inferInsert {
   return {
     ...(input.id ? { id: input.id } : {}),
     projectId: input.projectId,
-    gatewayCredentialId: input.gatewayCredentialId,
+    gatewayCredentialId: input.gatewayCredentialId ?? null,
+    cloudflareCredentialId: input.cloudflareCredentialId ?? null,
     apiKeyId: input.keyId,
     source: input.source ?? 'proxy',
     provider: input.provider ?? null,
@@ -488,7 +508,104 @@ export async function recordAssessmentLog(
         status: input.status,
       })
       .onConflictDoNothing();
-  } catch (err) {
-    console.error('[request-log] failed to insert assessment request_log', err);
+  } catch {
+    // Drizzle errors embed the bound parameters: here the client's state, question
+    // instructions and answers (Jev and Clef alike). Never pass the error object to
+    // application logging (same rule as recordRequestLog).
+    console.error('[request-log] failed to insert assessment request_log');
+  }
+}
+
+// ---- Extraction (POST /v1/extract) ------------------------------------------
+
+export interface RecordExtractionLogInput {
+  /** Shared with the usage_events row id (the usage row is inserted FIRST). */
+  id: string;
+  projectId: string;
+  keyId: string;
+  state: string;
+  fields: Record<string, unknown>;
+  /** Image format and decoded size only (summarizeAssets). The type has no slot for bytes. */
+  assets?: Record<string, { format: string; bytes: number }>;
+  referenceDate?: string;
+  options?: { include_quantiles?: boolean; return_state_text?: boolean };
+  /** The answers map only. Null on error. Clairic's state_text is NEVER logged. */
+  answers: unknown;
+  truncated?: boolean;
+  status: UsageStatus;
+}
+
+/**
+ * Shape the extraction request for the log. Pure — exported for unit testing.
+ * Rebuilds `assets` and `options` from their known keys, so a caller that passes a
+ * wider object can never smuggle image bytes or other data into request_logs.
+ */
+export function toExtractionLogRequest(
+  input: Pick<
+    RecordExtractionLogInput,
+    'state' | 'fields' | 'assets' | 'referenceDate' | 'options'
+  >,
+): object {
+  const assets = input.assets
+    ? Object.fromEntries(
+        Object.entries(input.assets).map(([key, a]) => [
+          key,
+          { format: String(a.format), bytes: Number(a.bytes) },
+        ]),
+      )
+    : undefined;
+  const options: Record<string, boolean> = {};
+  if (typeof input.options?.include_quantiles === 'boolean') {
+    options.include_quantiles = input.options.include_quantiles;
+  }
+  if (typeof input.options?.return_state_text === 'boolean') {
+    options.return_state_text = input.options.return_state_text;
+  }
+  const request = {
+    state: input.state,
+    fields: input.fields,
+    ...(assets ? { assets } : {}),
+    ...(input.referenceDate !== undefined ? { reference_date: input.referenceDate } : {}),
+    ...(Object.keys(options).length > 0 ? { options } : {}),
+  };
+  const serialized = JSON.stringify(request);
+  return serialized.length > MAX_LOG_CHARS
+    ? { truncated: true, preview: serialized.slice(0, MAX_LOG_CHARS) }
+    : request;
+}
+
+/**
+ * Persist the extraction request and the returned answers when the key opted into
+ * content logging. Mirrors recordAssessmentLog. Never stores image bytes or state_text.
+ */
+export async function recordExtractionLog(input: RecordExtractionLogInput): Promise<void> {
+  try {
+    await getDb()
+      .insert(requestLogs)
+      .values({
+        id: input.id,
+        projectId: input.projectId,
+        apiKeyId: input.keyId,
+        surface: 'extraction',
+        systemPrompt: null,
+        request: toExtractionLogRequest(input),
+        response:
+          input.answers != null
+            ? cap(
+                JSON.stringify(
+                  { answers: input.answers, truncated: input.truncated ?? false },
+                  null,
+                  2,
+                ),
+              )
+            : null,
+        streamed: false,
+        status: input.status,
+      })
+      .onConflictDoNothing();
+  } catch {
+    // Never pass the driver error: DrizzleQueryError embeds the bound parameters,
+    // i.e. the client's state text (same rule as recordRequestLog).
+    console.error('[request-log] failed to insert extraction request_log');
   }
 }

@@ -55,7 +55,11 @@ export const env = {
    * must never fall back to it (or to Vercel OIDC) implicitly.
    */
   aiGatewayApiKey: () => optionalEnv('AI_GATEWAY_API_KEY'),
-  /** AES-256-GCM key used to encrypt project gateway credentials at rest. */
+  /**
+   * AES-256-GCM key that encrypts project provider credentials at rest: Vercel
+   * AI Gateway keys and Cloudflare Workers AI tokens. Each type has its own AAD
+   * domain.
+   */
   projectGatewayEncryptionKey: () => requireEnv('PROJECT_GATEWAY_ENCRYPTION_KEY'),
   /** Version persisted with each ciphertext so a future rotation is explicit. */
   projectGatewayEncryptionKeyVersion: () =>

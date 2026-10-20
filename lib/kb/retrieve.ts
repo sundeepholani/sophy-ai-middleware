@@ -21,6 +21,7 @@ import {
   ProjectGatewayUnavailableError,
   type ProjectGatewaySnapshot,
 } from '@/lib/gateway/project-provider';
+import { providerOf } from '@/lib/gateway/provider-of';
 
 const TOP_K = 6;
 const MAX_QUERY_CHARS = 8000; // bound the query embedding input
@@ -104,7 +105,7 @@ export async function retrieveContext(
         gatewayCredentialId: opts.gateway.gatewayCredentialId,
         keyId: opts?.keyId ?? null,
         source: 'kb_query',
-        provider: kb.embeddingModel.split('/')[0] ?? 'unknown',
+        provider: providerOf(kb.embeddingModel),
         model: kb.embeddingModel,
         usage: {
           inputTokens: tokens ?? 0,

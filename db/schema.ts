@@ -34,16 +34,18 @@ import {
 // ---- Shared TS types --------------------------------------------------------
 
 export type UsageStatus = 'ok' | 'validation_failed' | 'error';
-// 'assessment' is the /v1/evaluate surface. The internal word differs from the
-// wire word on purpose: 'eval'/'evaluation' already names champion-vs-challenger
-// model comparison (eval_runs / eval_samples / UsageSource eval_*).
+// 'assessment' is the /v1/evaluate surface and 'extraction' the /v1/extract
+// surface. The internal word differs from the wire word on purpose:
+// 'eval'/'evaluation' already names champion-vs-challenger model comparison
+// (eval_runs / eval_samples / UsageSource eval_*).
 export type ResponseKind =
   | 'text'
   | 'structured'
   | 'image'
   | 'embedding'
   | 'transcription'
-  | 'assessment';
+  | 'assessment'
+  | 'extraction';
 export type KeyStatus = 'active' | 'revoked';
 /**
  * What kind of gateway call a usage_event records. 'proxy' = the one
@@ -154,6 +156,12 @@ export const projects = pgTable(
     /** Atomic pointer to the one credential future work should capture. */
     currentGatewayCredentialId: uuid('current_gateway_credential_id'),
     gatewayCredentialRevision: integer('gateway_credential_revision').notNull().default(0),
+    /**
+     * Optional pointer to the project's current Cloudflare Workers AI credential
+     * (D1). Never a fallback for anything.
+     */
+    currentCloudflareCredentialId: uuid('current_cloudflare_credential_id'),
+    cloudflareCredentialRevision: integer('cloudflare_credential_revision').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
     suspendedAt: timestamp('suspended_at', { withTimezone: true }),
@@ -162,6 +170,7 @@ export const projects = pgTable(
   (t) => [
     uniqueIndex('projects_slug_idx').on(t.slug),
     uniqueIndex('projects_id_current_gateway_idx').on(t.id, t.currentGatewayCredentialId),
+    uniqueIndex('projects_id_current_cloudflare_idx').on(t.id, t.currentCloudflareCredentialId),
     foreignKey({
       name: 'projects_created_by_user_fk',
       columns: [t.createdByUserId],
@@ -175,6 +184,16 @@ export const projects = pgTable(
       name: 'projects_current_gateway_credential_fk',
       columns: [t.id, t.currentGatewayCredentialId],
       foreignColumns: [projectGatewayCredentials.projectId, projectGatewayCredentials.id],
+    })).onDelete('restrict'),
+    // Lazy, like the gateway pointer: projectCloudflareCredentials is declared below.
+    new ForeignKeyBuilder((): {
+      name: string;
+      columns: PgColumn[];
+      foreignColumns: PgColumn[];
+    } => ({
+      name: 'projects_current_cloudflare_credential_fk',
+      columns: [t.id, t.currentCloudflareCredentialId],
+      foreignColumns: [projectCloudflareCredentials.projectId, projectCloudflareCredentials.id],
     })).onDelete('restrict'),
     check(
       'projects_status_check',
@@ -382,6 +401,85 @@ export const projectGatewayCredentials = pgTable(
   ],
 );
 
+/**
+ * A project's optional Cloudflare Workers AI credential: account id plus API
+ * token (D1). A sibling of project_gateway_credentials with the same lifecycle,
+ * health, envelope and partial unique indexes, but no `source` (there is no
+ * platform or env Cloudflare credential, ever) and no `last_used_at`. Every row is
+ * Admin-created, so the key version, fingerprint, last four and creator are
+ * NOT NULL.
+ */
+export const projectCloudflareCredentials = pgTable(
+  'project_cloudflare_credentials',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    /** Non-secret, Admin-only metadata. Normalised 32 lowercase hex; the CHECK also guards the run-URL path. */
+    accountId: text('account_id').notNull(),
+    lifecycle: text('lifecycle').$type<GatewayCredentialLifecycle>().notNull().default('available'),
+    health: text('health').$type<GatewayCredentialHealth>().notNull().default('unchecked'),
+    encryptedSecret: text('encrypted_secret'),
+    encryptionNonce: text('encryption_nonce'),
+    encryptionTag: text('encryption_tag'),
+    encryptionKeyVersion: text('encryption_key_version').notNull(),
+    secretFingerprint: text('secret_fingerprint').notNull(),
+    secretLastFour: text('secret_last_four').notNull(),
+    verifiedAt: timestamp('verified_at', { withTimezone: true }),
+    lastCheckedAt: timestamp('last_checked_at', { withTimezone: true }),
+    lastFailureCode: text('last_failure_code'),
+    createdByUserId: uuid('created_by_user_id').notNull(),
+    replacedAt: timestamp('replaced_at', { withTimezone: true }),
+    disconnectedAt: timestamp('disconnected_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('project_cloudflare_credentials_project_id_idx').on(t.projectId, t.id),
+    uniqueIndex('project_cloudflare_credentials_one_available_idx')
+      .on(t.projectId)
+      .where(sql`${t.lifecycle} = 'available'`),
+    uniqueIndex('project_cloudflare_credentials_fingerprint_idx')
+      .on(t.secretFingerprint)
+      .where(sql`${t.lifecycle} = 'available'`),
+    index('project_cloudflare_credentials_project_created_idx').on(t.projectId, t.createdAt),
+    foreignKey({
+      name: 'project_cloudflare_credentials_project_fk',
+      columns: [t.projectId],
+      foreignColumns: [projects.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'project_cloudflare_credentials_creator_fk',
+      columns: [t.createdByUserId],
+      foreignColumns: [users.id],
+    }).onDelete('restrict'),
+    check(
+      'project_cloudflare_credentials_account_id_check',
+      sql`${t.accountId} ~ '^[0-9a-f]{32}$'`,
+    ),
+    check(
+      'project_cloudflare_credentials_lifecycle_check',
+      sql`${t.lifecycle} in ('available', 'replaced', 'disconnected')`,
+    ),
+    check(
+      'project_cloudflare_credentials_health_check',
+      sql`${t.health} in ('unchecked', 'healthy', 'invalid', 'billing_attention')`,
+    ),
+    check(
+      'project_cloudflare_credentials_envelope_check',
+      sql`(
+        ${t.lifecycle} = 'available'
+        and ${t.encryptedSecret} is not null
+        and ${t.encryptionNonce} is not null
+        and ${t.encryptionTag} is not null
+      ) or (
+        ${t.lifecycle} in ('replaced', 'disconnected')
+        and ${t.encryptedSecret} is null
+        and ${t.encryptionNonce} is null
+        and ${t.encryptionTag} is null
+      )`,
+    ),
+  ],
+);
+
 export const projectSettings = pgTable(
   'project_settings',
   {
@@ -491,7 +589,10 @@ export const apiKeys = pgTable(
     keyLast4: text('key_last4').notNull(),
 
     // --- per-key configuration ---
-    /** Full AI Gateway model id, e.g. "anthropic/claude-sonnet-4.6". */
+    /**
+     * Model id: a Vercel AI Gateway id (e.g. "anthropic/claude-sonnet-4.6") or a
+     * registered Cloudflare Workers AI id (e.g. "@cf/cloudflare/clef").
+     */
     model: text('model').notNull(),
     /** Master/system prompt injected on every request (nullable = none). */
     systemPrompt: text('system_prompt'),
@@ -549,7 +650,10 @@ export const usageEvents = pgTable(
   {
     id: uuid('id').primaryKey().defaultRandom(),
     projectId: uuid('project_id').notNull(),
+    /** Vercel AI Gateway row that paid. */
     gatewayCredentialId: uuid('gateway_credential_id'),
+    /** Cloudflare Workers AI row that paid (D7). At most one of the two credential ids is set. */
+    cloudflareCredentialId: uuid('cloudflare_credential_id'),
     /** Null for spend not attributable to a key (kb_ingest runs from the cron). */
     apiKeyId: uuid('api_key_id'),
     /** See UsageSource — proxy + transcript_processor are client-attributable usage. */
@@ -575,6 +679,7 @@ export const usageEvents = pgTable(
     uniqueIndex('usage_events_project_id_idx').on(t.projectId, t.id),
     index('usage_events_project_time_idx').on(t.projectId, t.createdAt),
     index('usage_events_gateway_credential_idx').on(t.gatewayCredentialId),
+    index('usage_events_cloudflare_credential_idx').on(t.cloudflareCredentialId),
     index('usage_events_key_time_idx').on(t.apiKeyId, t.createdAt),
     index('usage_events_time_idx').on(t.createdAt),
     foreignKey({
@@ -592,6 +697,15 @@ export const usageEvents = pgTable(
       columns: [t.projectId, t.gatewayCredentialId],
       foreignColumns: [projectGatewayCredentials.projectId, projectGatewayCredentials.id],
     }).onDelete('restrict'),
+    foreignKey({
+      name: 'usage_events_cloudflare_credential_fk',
+      columns: [t.projectId, t.cloudflareCredentialId],
+      foreignColumns: [projectCloudflareCredentials.projectId, projectCloudflareCredentials.id],
+    }).onDelete('restrict'),
+    check(
+      'usage_events_single_credential_check',
+      sql`${t.gatewayCredentialId} is null or ${t.cloudflareCredentialId} is null`,
+    ),
   ],
 );
 
@@ -631,7 +745,7 @@ export const requestLogs = pgTable(
     id: uuid('id').primaryKey(), // == usage_events.id (app-generated, shared)
     projectId: uuid('project_id').notNull(),
     apiKeyId: uuid('api_key_id').notNull(),
-    surface: text('surface'), // 'chat' | 'responses' | 'embedding' | 'transcription' | 'assessment'
+    surface: text('surface'), // 'chat' | 'responses' | 'embedding' | 'transcription' | 'assessment' | 'extraction'
     systemPrompt: text('system_prompt'),
     request: jsonb('request'), // inbound messages sent to the model (embedding: the input strings)
     requestAfterImageExpiry: jsonb('request_after_image_expiry'),

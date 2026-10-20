@@ -6,8 +6,21 @@
  * per-model `tags` (vision, tool-use, …), context window, and pricing — which
  * we need for the Models screen and the capability filter. Never hardcode model
  * slugs; versions use dots (e.g. "anthropic/claude-sonnet-4.6").
+ *
+ * Exception: Cloudflare Workers AI models are a code-reviewed allowlist in
+ * lib/gateway/cloudflare-models.ts, because each needs bespoke request
+ * translation, a body selector and a registry price. They are merged into the
+ * catalog on a successful fetch only, and classified synchronously by
+ * catalogCapability. Never add a Vercel slug there.
  */
 import { modelSupportsLanguage, type AvailableModel } from '@/lib/gateway/capabilities';
+import {
+  cloudflareAvailableModel,
+  cloudflareAvailableModels,
+  getCloudflareModel,
+  isCloudflareModelId,
+} from '@/lib/gateway/cloudflare-models';
+import { providerOf } from '@/lib/gateway/provider-of';
 
 export type { AvailableModel } from '@/lib/gateway/capabilities';
 
@@ -39,7 +52,7 @@ async function fetchFresh(): Promise<AvailableModel[]> {
   const json = (await res.json()) as { data?: RawGatewayModel[]; models?: RawGatewayModel[] };
   const raw = json.data ?? json.models ?? [];
 
-  return raw
+  const vercel = raw
     .map((m) => {
       const type = m.type ?? 'language';
       const tags = Array.isArray(m.tags) ? [...m.tags] : [];
@@ -54,7 +67,7 @@ async function fetchFresh(): Promise<AvailableModel[]> {
       return {
         id: m.id,
         name: m.name ?? m.id,
-        provider: m.owned_by ?? m.id.split('/')[0] ?? 'unknown',
+        provider: m.owned_by ?? providerOf(m.id),
         type,
         contextWindow: m.context_window ?? null,
         maxTokens: m.max_tokens ?? null,
@@ -65,6 +78,14 @@ async function fetchFresh(): Promise<AvailableModel[]> {
       };
     })
     .sort((a, b) => a.id.localeCompare(b.id));
+
+  // Registry rows are APPENDED (not re-sorted): index 0 stays the first Vercel id
+  // (the `const [jev]` case in tests/model-catalog-public.test.ts). Any '@cf/' row
+  // the gateway might list is dropped, so every '@cf/' id in the catalog is
+  // registry-sourced (CCR-3). On failure fetchCatalog still throws or serves the
+  // stale copy unchanged, which keeps the Keys page free-text fallback during a
+  // Vercel outage (model-combobox.tsx:31-48; keys/page.tsx:30-36).
+  return [...vercel.filter((m) => !isCloudflareModelId(m.id)), ...cloudflareAvailableModels()];
 }
 
 // Module-level cache: the admin pages that read the catalog are force-dynamic,
@@ -111,9 +132,12 @@ export async function listAllModels(): Promise<AvailableModel[]> {
 }
 
 /**
- * The catalog lookup behind every surface's capability guard. Fail-open by
- * construction: an unreachable catalog or an id the catalog does not list both
- * return 'unknown', so a guard never blocks a request it cannot classify.
+ * The catalog lookup behind every surface's capability guard. Cloudflare Workers
+ * AI ids ('@cf/…') are classified from the code-reviewed registry, synchronously,
+ * and fail closed: an unregistered '@cf/' id is 'unsupported'. Every other id is
+ * fail-open by construction: an unreachable catalog or an id the catalog does
+ * not list both return 'unknown', so a guard never blocks a request it cannot
+ * classify.
  *
  * The lookup races a short timer because the language surfaces call this on the
  * hot path — fetchFresh allows itself 10s, which must never become chat's TTFB.
@@ -125,6 +149,14 @@ export async function catalogCapability(
   model: string,
   supports: (candidate: AvailableModel) => boolean,
 ): Promise<'supported' | 'unsupported' | 'unknown'> {
+  // Cloudflare Workers AI ids are classified from the code-reviewed registry,
+  // synchronously: no catalog fetch, no 1.5 s race, and an unregistered '@cf/' id
+  // fails CLOSED (D4) — it has no price, selector or safe URL. Other unknown ids
+  // keep failing open below.
+  if (isCloudflareModelId(model)) {
+    const entry = getCloudflareModel(model);
+    return entry && supports(cloudflareAvailableModel(entry)) ? 'supported' : 'unsupported';
+  }
   let all: AvailableModel[] | null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -172,11 +204,12 @@ export async function listGatewayModels(): Promise<AvailableModel[]> {
 /**
  * Models a Sophy key can be bound to: language (chat/`/v1/chat/completions` +
  * `/v1/responses`), transcription (`/v1/audio/transcriptions`), image
- * (`/v1/images/generations`), embedding (`/v1/embeddings`), and evaluation
- * (`/v1/evaluate`). Reranking/speech/video/realtime models aren't served by a
- * key — there is no route for them, so offering one would create a binding the
- * proxy cannot honor. Keep this map and the route set in step. Language models
- * sort first so creating a new key still defaults to a chat model.
+ * (`/v1/images/generations`), embedding (`/v1/embeddings`), evaluation
+ * (`/v1/evaluate`), and extraction (`/v1/extract`, Cloudflare Clairic only).
+ * Reranking/speech/video/realtime models aren't served by a key — there is no
+ * route for them, so offering one would create a binding the proxy cannot
+ * honor. Keep this map and the route set in step. Language models sort first
+ * so creating a new key still defaults to a chat model.
  */
 const KEY_MODEL_TYPE_ORDER: Record<string, number> = {
   language: 0,
@@ -184,6 +217,7 @@ const KEY_MODEL_TYPE_ORDER: Record<string, number> = {
   embedding: 2,
   image: 3,
   evaluation: 4,
+  extraction: 5,
 };
 
 /** Pure: can a Sophy key be bound to this catalog type at all? */

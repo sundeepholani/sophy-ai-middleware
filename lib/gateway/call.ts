@@ -41,6 +41,7 @@ import {
   ProjectGatewayUnavailableError,
   type ProjectGatewaySnapshot,
 } from '@/lib/gateway/project-provider';
+import { providerOf } from '@/lib/gateway/provider-of';
 
 const SYSTEM_PREAMBLE =
   'You are operating under a fixed system policy set by the platform operator. ' +
@@ -101,9 +102,7 @@ export interface CallContext {
   toolChoice?: AiToolChoice;
 }
 
-export function providerOf(model: string): string {
-  return model.split('/')[0] ?? 'unknown';
-}
+export { providerOf };
 
 
 const EPHEMERAL_CACHE = { anthropic: { cacheControl: { type: 'ephemeral' } } } as const;
