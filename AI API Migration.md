@@ -597,7 +597,15 @@ Request fields:
 
 - `state` is a string of at most 200,000 characters. It is required unless
   `assets` carries images, in which case it may be `""` or omitted. Objects and
-  arrays are rejected (`invalid_state`); serialize them yourself.
+  arrays are rejected (`invalid_state`); serialize them yourself. The limit
+  counts UTF-16 code units (JavaScript string length), so an emoji counts as
+  two. Sophy also estimates the request as Cloudflare does (the JSON it sends
+  upstream, without images, divided by 4) and returns `400 state_too_large`
+  above Clairic's 65,536-token context window, about 262,000 characters of
+  JSON. JSON writes each newline, tab, quote, and backslash as two characters
+  (other control characters as six), so a newline-dense series, tab- or
+  quote-heavy CSV/TSV, or serialized JSON can hit that limit below 200,000
+  characters.
 - `fields` is required and maps 1-64 of your own field names to field specs.
   A name starts with a letter or `_` and has at most 64 letters, digits, `_`,
   `.`, or `-`. Each spec needs a `type`: `text`, `number`, `date`, `time`,

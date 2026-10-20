@@ -519,6 +519,19 @@ describe('TypeSafe shape translation', () => {
     });
   });
 
+  it('keeps a question named __proto__ as an own key of the TypeSafe body', () => {
+    const questions = JSON.parse(
+      '{"__proto__":{"type":"boolean","instructions":"Is `photo` a person?"},"groomed":{"type":"boolean","instructions":"Is the person in `photo` well groomed?"}}',
+    ) as Record<string, AssessmentQuestion>;
+    const parsed = parseAssessmentRequest(imageBody({ questions }), MODEL);
+    if (!parsed.ok) throw new Error('expected ok');
+    const sent = toTypeSafeRequest(parsed.value, MODEL);
+    expect(Object.keys(sent.questions as Record<string, unknown>)).toEqual(['__proto__', 'groomed']);
+    expect(JSON.stringify(sent.questions)).toContain(
+      '"__proto__":{"type":"noul","instructions":"Is `photo` a person?"}',
+    );
+  });
+
   it('maps a TypeSafe response onto the evaluate shape, keeping confidence and dropping legend', () => {
     const raw = fromTypeSafeResponse({
       model: MODEL,
@@ -1073,6 +1086,23 @@ describe('toClefRequest', () => {
     if (!parsed.ok) throw new Error('expected ok');
     toClefRequest(parsed.value, getCloudflareModel(CLEF)!);
     expect(parsed.value.questions.refund.type).toBe('boolean');
+  });
+
+  it('keeps a question named __proto__ as an own key of the upstream body', () => {
+    // The Clef id rule admits "__proto__". Dropping it would send Cloudflare a smaller question
+    // set, which it bills, and the missing answer would then fail the request.
+    const parsed = parseAssessmentRequest(
+      JSON.parse(
+        '{"state":"s","questions":{"__proto__":{"type":"boolean","instructions":"x"},"b":{"type":"boolean","instructions":"y"}}}',
+      ) as EvaluationRequest,
+      CLEF,
+    );
+    if (!parsed.ok) throw new Error('expected ok');
+    const sent = toClefRequest(parsed.value, getCloudflareModel(CLEF)!);
+    expect(Object.keys(sent.questions as Record<string, unknown>)).toEqual(['__proto__', 'b']);
+    expect(JSON.stringify(sent.questions)).toContain(
+      '"__proto__":{"type":"noul","instructions":"x"}',
+    );
   });
 });
 

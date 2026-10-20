@@ -605,6 +605,9 @@ export function toAssessmentResponse(
 function toSystemOneQuestions(
   questions: Record<string, AssessmentQuestion>,
 ): Record<string, unknown> {
+  // Object.fromEntries, never out[name] = …: Clef's id rule (and Jev, which has none) admits
+  // "__proto__", and assignment would set the prototype instead, silently dropping that
+  // question from the upstream body. The answer check would then fail a request Cloudflare billed.
   return Object.fromEntries(
     Object.entries(questions).map(([name, q]) => [
       name,

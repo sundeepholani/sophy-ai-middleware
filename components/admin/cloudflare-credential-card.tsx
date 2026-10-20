@@ -234,9 +234,18 @@ export function CloudflareCredentialCard({
         </CardContent>
       </Card>
 
-      <Dialog open={credentialOpen} onOpenChange={setCredentialOpen}>
+      <Dialog
+        open={credentialOpen}
+        onOpenChange={(open) => {
+          // While Cloudflare checks the credential (up to 10 s) the dialog stays open: its inline
+          // error is the only report of a failed connect or rotate, and closing would hide it.
+          // base-ui has no `dismissible` prop, so ignore Escape and backdrop requests (AGENTS.md).
+          if (!open && pending) return;
+          setCredentialOpen(open);
+        }}
+      >
         {/* Explicit width: DialogContent defaults to sm:max-w-sm (AGENTS.md). */}
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="sm:max-w-lg" showCloseButton={!pending}>
           <DialogHeader>
             <DialogTitle>{linked ? 'Rotate' : 'Connect'} Cloudflare Workers AI</DialogTitle>
             <DialogDescription>
@@ -290,7 +299,12 @@ export function CloudflareCredentialCard({
               </p>
             )}
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setCredentialOpen(false)}>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={pending}
+                onClick={() => setCredentialOpen(false)}
+              >
                 Cancel
               </Button>
               <Button type="submit" disabled={pending}>

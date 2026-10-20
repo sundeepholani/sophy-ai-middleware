@@ -132,6 +132,19 @@ describe('POST /v1/evaluate — body parsing', () => {
     expect(mocks.handleAssessment).not.toHaveBeenCalled();
   });
 
+  it('returns the typed 503 for a gateway key without a ready credential, before reading the body', async () => {
+    mocks.resolveProjectGateway.mockRejectedValue(
+      new ProjectGatewayUnavailableError(key.projectId, 'credential_missing'),
+    );
+    const res = await POST(request(undefined, { raw: '{not json' }));
+
+    expect(res.status).toBe(503);
+    await expect(res.json()).resolves.toEqual(NEUTRAL_503);
+    expect(mocks.resolveProjectCloudflare).not.toHaveBeenCalled();
+    expect(mocks.checkRateLimit).not.toHaveBeenCalled();
+    expect(mocks.handleAssessment).not.toHaveBeenCalled();
+  });
+
   it('400s on a non-object JSON body', async () => {
     const res = await POST(request(undefined, { raw: '[1,2,3]' }));
     expect(res.status).toBe(400);
@@ -248,6 +261,20 @@ describe('POST /v1/evaluate — Cloudflare Clef keys', () => {
     expect(mocks.handleAssessment).not.toHaveBeenCalled();
   });
 
+  it('returns the typed 503 for a Clef key without a Cloudflare credential, before reading the body', async () => {
+    mocks.verifyKey.mockResolvedValue(clefKey);
+    mocks.resolveProjectCloudflare.mockRejectedValue(
+      new ProjectCloudflareUnavailableError(key.projectId, 'credential_missing'),
+    );
+    const res = await POST(request(undefined, { raw: '{not json' }));
+
+    expect(res.status).toBe(503);
+    await expect(res.json()).resolves.toEqual(NEUTRAL_503);
+    expect(mocks.resolveProjectGateway).not.toHaveBeenCalled();
+    expect(mocks.checkRateLimit).not.toHaveBeenCalled();
+    expect(mocks.handleAssessment).not.toHaveBeenCalled();
+  });
+
   it.each([
     'project_not_found',
     'project_inactive',
@@ -334,6 +361,54 @@ describe('POST /v1/evaluate — Cloudflare Clef keys', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     },
   );
+
+  // Mirrors /v1/extract: a '@cf/' id that is not a registered evaluation model has no
+  // credential to resolve, so a project without a healthy Cloudflare credential still
+  // gets the documented 400, never the credential 503.
+  it.each(['@cf/cloudflare/clairic', '@cf/cloudflare/unknown', '@cf/cloudflare/CLEF'])(
+    'answers 400 model_not_evaluation for %s without resolving any credential',
+    async (model) => {
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        throw new Error('no network in tests');
+      }));
+      mocks.assessmentCapability.mockImplementation(async (m: string) =>
+        (
+          await vi.importActual<typeof import('@/lib/gateway/assessments')>('@/lib/gateway/assessments')
+        ).assessmentCapability(m),
+      );
+      mocks.resolveProjectCloudflare.mockRejectedValue(
+        new ProjectCloudflareUnavailableError(key.projectId, 'credential_missing'),
+      );
+      mocks.verifyKey.mockResolvedValue({ ...key, model });
+      const res = await POST(request());
+
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toEqual({
+        error: {
+          message: "This key's model is not an evaluation model.",
+          type: 'invalid_request_error',
+          param: null,
+          code: 'model_not_evaluation',
+        },
+      });
+      expect(mocks.resolveProjectCloudflare).not.toHaveBeenCalled();
+      expect(mocks.resolveProjectGateway).not.toHaveBeenCalled();
+      expect(mocks.checkRateLimit).not.toHaveBeenCalled();
+      expect(mocks.handleAssessment).not.toHaveBeenCalled();
+    },
+  );
+
+  it('never reaches the handler without a credential, even if the catalog guard fails open', async () => {
+    // The guard is registry-first for '@cf/' ids; this pins the route's own backstop.
+    mocks.assessmentCapability.mockResolvedValue('unknown');
+    mocks.verifyKey.mockResolvedValue({ ...key, model: '@cf/cloudflare/clairic' });
+    const res = await POST(request());
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({ error: { code: 'model_not_evaluation' } });
+    expect(mocks.resolveProjectCloudflare).not.toHaveBeenCalled();
+    expect(mocks.handleAssessment).not.toHaveBeenCalled();
+  });
 
   it("applies the Clef parse rules with the key's model", async () => {
     mocks.verifyKey.mockResolvedValue(clefKey);

@@ -14,8 +14,10 @@ import { CLOUDFLARE_NOT_READY } from '@/lib/admin/keys';
 /** Returned connect/disconnect codes (CloudflareCredentialActionResult). Exhaustive by type. */
 export const CLOUDFLARE_ERROR_COPY: Record<CloudflareCredentialErrorCode, string> = {
   cloudflare_invalid_account_id: 'Account ID must be 32 hexadecimal characters.',
+  // Neutral on purpose, like the CLI's "was rejected": Sophy's own token check returns this
+  // code before any call to Cloudflare, and so does Cloudflare's 401/403.
   cloudflare_invalid:
-    'Cloudflare rejected that account ID and API token. Use the "Workers AI" token template.',
+    'That account ID and API token weren\'t accepted. Use the "Workers AI" token template.',
   cloudflare_unreachable: "Couldn't reach Cloudflare to check the token. Try again.",
   cloudflare_in_use: 'That API token is already connected to another Sophy project.',
   not_found: 'This project is no longer available.',
@@ -30,13 +32,20 @@ export function cloudflareThrownErrorCopy(error: unknown): string {
   return "Couldn't update the Cloudflare connection. Try again.";
 }
 
-/** Client pre-check mirroring normalizeCloudflareAccountId and the token's non-blank rule. The server
- *  stays authoritative; this only saves a round trip for obvious typos. */
+/** normalizeCloudflareApiToken's rule (lib/gateway/cloudflare-provider.ts), applied after trimming:
+ *  1–512 printable, non-space ASCII characters. Copied, not imported: that module is server-only. */
+const API_TOKEN = /^[\x21-\x7e]{1,512}$/;
+
+/** Client pre-check mirroring normalizeCloudflareAccountId and normalizeCloudflareApiToken, so a
+ *  mis-paste (a "Bearer " prefix, a wrapped line) is named here instead of reaching the server's
+ *  generic cloudflare_invalid. The server stays authoritative. */
 export function cloudflareFormError(accountId: string, apiToken: string): string | null {
   if (!/^[0-9a-f]{32}$/.test(accountId.trim().toLowerCase())) {
     return CLOUDFLARE_ERROR_COPY.cloudflare_invalid_account_id;
   }
-  if (!apiToken.trim()) return 'Enter the API token.';
+  const token = apiToken.trim();
+  if (!token) return 'Enter the API token.';
+  if (!API_TOKEN.test(token)) return 'Paste only the API token: one line, with no spaces.';
   return null;
 }
 

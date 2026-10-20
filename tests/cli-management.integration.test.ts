@@ -30,6 +30,7 @@ import { dispatchCliOperation } from '@/lib/admin/cli-operations';
 import { cliErrorResponse } from '@/lib/admin/cli-http';
 import { withCliIdentity } from '@/lib/auth/cli-session';
 import { issueKey, verifyKey } from '@/lib/auth/api-key';
+import { costUsedThisMonth } from '@/lib/counters';
 import { connectProjectCloudflare, disconnectProjectCloudflare } from '@/app/admin/project-actions';
 import {
   getProjectCloudflareSummary,
@@ -464,6 +465,41 @@ describe.skipIf(!url)('CLI management on real PostgreSQL', () => {
     }))).toMatchObject({ code: '23514', constraint: 'usage_events_single_credential_check' });
     expect(await dbError(db.insert(schema.usageEvents).values({ ...usage, cloudflareCredentialId: foreignRow.id })))
       .toMatchObject({ code: '23503', constraint: 'usage_events_cloudflare_credential_fk' });
+  });
+
+  it('adds the usage_events credential constraints without validating existing rows', async () => {
+    // 0014 adds them NOT VALID (every pre-0014 row is NULL in the new column), so applying it
+    // skips two scans of usage_events under its lock. The case above shows new rows are checked.
+    const { rows } = await pool.query(
+      `select conname, convalidated from pg_constraint
+        where conrelid = 'usage_events'::regclass
+          and conname in ('usage_events_cloudflare_credential_fk', 'usage_events_single_credential_check')
+        order by conname`,
+    );
+    expect(rows).toEqual([
+      { conname: 'usage_events_cloudflare_credential_fk', convalidated: false },
+      { conname: 'usage_events_single_credential_check', convalidated: false },
+    ]);
+  });
+
+  it("counts billed error rows toward the key's monthly cap, and only client sources", async () => {
+    const thisMonth = new Date();
+    const lastMonth = new Date(Date.UTC(thisMonth.getUTCFullYear(), thisMonth.getUTCMonth() - 1, 15));
+    const row = { projectId: projectA, apiKeyId: owned.id };
+    await db.insert(schema.usageEvents).values([
+      { ...row, costUsd: '0.500000' },
+      // A billed but unusable Clef/Clairic 2xx (U1) and a transcription whose processor failed
+      // after paid speech-to-text are error rows that still cost the client.
+      { ...row, status: 'error' as const, costUsd: '0.250000' },
+      { ...row, source: 'transcript_processor' as const, status: 'error' as const, costUsd: '0.125000' },
+      { ...row, status: 'validation_failed' as const, costUsd: '0.062500' },
+      // Sophy-initiated spend and other months never count.
+      { ...row, source: 'eval_judge' as const, costUsd: '1.000000' },
+      { ...row, source: 'kb_query' as const, costUsd: '2.000000' },
+      { ...row, costUsd: '4.000000', createdAt: lastMonth },
+      { projectId: projectA, apiKeyId: unowned.id, costUsd: '8.000000' },
+    ]);
+    await expect(costUsedThisMonth(owned.id)).resolves.toBe(0.9375);
   });
 
   it('connects, rotates and disconnects a Cloudflare credential', async () => {

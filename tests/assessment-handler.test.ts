@@ -991,6 +991,26 @@ describe('handleAssessment — Cloudflare Clef', () => {
     });
   });
 
+  it('sends and answers a question named __proto__ like any other', async () => {
+    // A runner that answers exactly the questions it was sent, as Clef does: a question dropped
+    // on the way up would come back unanswered and turn a billed call into a 502.
+    run.mockImplementation(async (_model, body) => {
+      const sent = (body as { questions: Record<string, unknown> }).questions;
+      const answers = Object.fromEntries(Object.keys(sent).map((name) => [name, { type: 'noul', noul: 0.75 }]));
+      return cfOk({ model: 'clef', answers, usage: { input_tokens: 40, output_tokens: 0 } }, CF_HEADERS)();
+    });
+    const questions = JSON.parse(
+      '{"__proto__":{"type":"boolean","instructions":"x"},"b":{"type":"boolean","instructions":"y"}}',
+    ) as ParsedAssessmentRequest['questions'];
+    const res = await handleAssessment({ ...CF_CTX, model: CLEF }, { ...parsed, questions });
+
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as { answers: Record<string, unknown> };
+    expect(Object.keys(payload.answers)).toEqual(['__proto__', 'b']);
+    expect(JSON.stringify(payload.answers)).toContain('"__proto__":{"type":"boolean","probability":0.75}');
+    expect(usageRow()).toMatchObject({ status: 'ok' });
+  });
+
   it('records upstream_timeout when the deadline fires', async () => {
     run.mockRejectedValue(new DOMException('The operation timed out.', 'TimeoutError'));
     const res = await handleAssessment(CF_CTX, parsed);

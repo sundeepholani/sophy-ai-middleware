@@ -560,7 +560,7 @@ const ERROR_ROWS: { status: string; type: string; code: string; when: string }[]
     status: '402',
     type: 'insufficient_quota',
     code: 'insufficient_quota',
-    when: 'The project’s upstream AI provider account reported insufficient quota or credit.',
+    when: 'Cloudflare Workers AI answered HTTP 402 for the project’s Cloudflare account. A Vercel AI Gateway credit or budget failure instead marks the credential billing-blocked and returns 503 `project_gateway_unavailable`, and a used-up Cloudflare daily free allocation returns 429 `rate_limit_exceeded`.',
   },
   {
     status: '403',
@@ -1877,7 +1877,7 @@ print(resp.json()["answers"])`,
                 {
                   name: 'state',
                   type: 'string',
-                  note: 'The text to read, at most 200,000 characters. Required unless assets carries images; with images it may be "" or omitted. Objects and arrays are not accepted: serialize them first.',
+                  note: 'The text to read, at most 200,000 characters counted as UTF-16 code units (JavaScript string length, so an emoji counts as two), and within the context-window estimate described below. Required unless assets carries images; with images it may be "" or omitted. Objects and arrays are not accepted: serialize them first.',
                 },
                 {
                   name: 'fields',
@@ -1956,6 +1956,15 @@ print(resp.json()["answers"])`,
               range, requires <Code>items</Code> for lists and <Code>min</Code> and{' '}
               <Code>max</Code> for estimates and forecasts, and leaves the rest to Clairic, whose
               rejections return <Code>400 upstream_invalid_request</Code> with its message.
+            </P>
+            <P>
+              Sophy also estimates the request size the way Cloudflare does — the JSON it sends
+              upstream, meaning the state and field specs without images, at four characters per
+              token — and returns <Code>400 state_too_large</Code> when the estimate exceeds
+              Clairic’s 65,536-token context window, about 262,000 characters of JSON. JSON writes
+              each newline, tab, quote, and backslash as two characters (other control characters
+              as six), so a newline-dense series, tab- or quote-heavy CSV/TSV, or serialized JSON
+              can reach that limit below 200,000 characters.
             </P>
             <CodeTabs
               samples={[

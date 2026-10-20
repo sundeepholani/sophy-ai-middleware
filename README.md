@@ -67,7 +67,7 @@ client (OpenAI SDK, baseURL=<sophy>/v1, apiKey=mw_live_...)
 | `POST /v1/audio/transcriptions` | Multipart audio transcription for MP3/MPEG/MPGA, MP4/M4A, WAV, WebM, FLAC, or OGG files up to 4 MiB. Returns raw text when no processing policy is set, or only the policy-processed text when the key has a system prompt plus a language processor model. |
 | `POST /v1/embeddings` | A string or up to 2,048 strings; `float` and `base64` encodings. Token-array inputs are not supported. `dimensions` is supported only for `openai/*` embedding models. |
 | `POST /v1/evaluate` | Native, not OpenAI-compatible: no OpenAI client method reaches evaluation models. Send a `state` (string, object, or array) plus 1-32 named `boolean`, `choice`, or `score` questions and receive one typed answer each with token usage; choice and score answers include `confidence` when the model returns it. `state` is capped at 200,000 serialized characters; the call is buffered, never streamed. TypeSafe Jev keys accept up to 8 PNG/JPEG `assets`, each referenced in the request. Cloudflare Clef keys (`@cf/cloudflare/clef`, `clef-flash`, `clef-omni`) accept up to 4 PNG/JPEG/WebP `assets` that the model sees before the state in key order, and add Cloudflare's limits: question names of 1-100 `[A-Za-z0-9_.-]`, 2-255 choice options, 2-10 score levels, no `providerOptions`, and a request-size estimate within the model's context window. |
-| `POST /v1/extract` | Native research preview for Cloudflare Clairic (`@cf/cloudflare/clairic`) keys. Send a string `state` (up to 200,000 characters; empty only with images) and 1-64 named, typed `fields` (`text`, `number`, `date`, `time`, `datetime`, `duration`, `list`, `estimate`, `forecast`), plus optional `assets` (up to 4 images), `reference_date`, and `options`. Returns Clairic's answer for each field, passed through unchanged, with `truncated`, optional `state_text`, and token usage. Buffered, never streamed. |
+| `POST /v1/extract` | Native research preview for Cloudflare Clairic (`@cf/cloudflare/clairic`) keys. Send a string `state` (up to 200,000 UTF-16 code units, and within Clairic's 65,536-token context window as Sophy estimates the escaped request JSON at four characters per token; empty only with images) and 1-64 named, typed `fields` (`text`, `number`, `date`, `time`, `datetime`, `duration`, `list`, `estimate`, `forecast`), plus optional `assets` (up to 4 images), `reference_date`, and `options`. Returns Clairic's answer for each field, passed through unchanged, with `truncated`, optional `state_text`, and token usage. Buffered, never streamed. |
 | `POST /v1/images/generations` | Uses the key's image model and returns `b64_json` only. Supports 1-10 images and validates `WIDTHxHEIGHT` size strings; provider-specific options still depend on the selected model. Generated images are not stored by Sophy. |
 | `POST /v1/files` | Multipart `file` upload, at most 4 MiB (4,194,304 bytes). Allowed types: PDF, PNG, JPEG, WebP, GIF, plain text, CSV, and JSON. Uploads become eligible for cleanup after 24 hours. |
 | `GET /v1/models` | Returns the model configured on the authenticated key, not the full operator catalog. |
@@ -259,7 +259,17 @@ and iron-session.
    `project_cloudflare_credentials`, adds each project's Cloudflare credential
    pointer and revision, and adds `usage_events.cloudflare_credential_id` with a
    check that a usage row names at most one paying credential. No backfill is
-   needed.
+   needed, but it is not lock-free. It holds `projects` and `usage_events`
+   exclusively and blocks writes to `users` until it commits (taking `users`
+   first, so a concurrent sign-up waits instead of deadlocking), and it builds
+   one index over every
+   `usage_events` row, so API requests, console pages, and sign-ins pause until
+   it finishes. Check the table first
+   (`select pg_size_pretty(pg_total_relation_size('usage_events'))`) and apply
+   it in a quiet window. It waits at most 5 seconds for each lock
+   (`lock_timeout`), then fails without changing anything; run it again. The two
+   new `usage_events` constraints are added `NOT VALID`: every existing row is
+   NULL in the new column, so they check new rows without rescanning old ones.
 
    Deployments that predate 0013 also apply
    [0013_email_otp_cli_sessions.sql](drizzle/0013_email_otp_cli_sessions.sql)

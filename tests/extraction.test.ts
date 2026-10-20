@@ -499,6 +499,28 @@ describe('parseExtractionRequest — rejections', () => {
     });
   });
 
+  // The two limits /docs, the README and the migration guide state for `state`.
+  it('counts the 200,000-character cap in UTF-16 code units, so an emoji counts twice', () => {
+    const atCap = 'x'.repeat(199_998) + '😀'; // 199,999 code points, 200,000 UTF-16 units
+    expect(parseExtractionRequest({ ...BASE, state: atCap } as ExtractionRequest, CLAIRIC).ok).toBe(true);
+    const overCap = 'x'.repeat(199_999) + '😀'; // 200,000 code points, 200,001 UTF-16 units
+    expect(parseExtractionRequest({ ...BASE, state: overCap } as ExtractionRequest, CLAIRIC)).toMatchObject({
+      ok: false,
+      code: 'state_too_large',
+      message: 'state must not exceed 200000 characters.',
+    });
+  });
+
+  it('can reject an escape-heavy state under 200,000 characters at the context pre-cap', () => {
+    // JSON escaping writes each newline as two characters, so 199,998 characters of a
+    // newline-dense series estimate above Clairic's 65,536-token window (about 262,000 JSON characters).
+    const state = '12\n'.repeat(66_666);
+    expect(state.length).toBeLessThan(200_000);
+    const r = parseExtractionRequest({ ...BASE, state } as ExtractionRequest, CLAIRIC);
+    expect(r).toMatchObject({ ok: false, code: 'state_too_large', param: 'state' });
+    if (!r.ok) expect(r.message).toMatch(/^state is too large for Clairic: the request is estimated at \d+ tokens and the model accepts at most 65536\.$/);
+  });
+
   it('estimates the pre-cap over the exact upstream body, images excluded', () => {
     const v = ok({ ...INVOICE_REQUEST, options: { include_quantiles: true }, assets: { r: png() } });
     const upstream = toClairicRequest(v, ENTRY);

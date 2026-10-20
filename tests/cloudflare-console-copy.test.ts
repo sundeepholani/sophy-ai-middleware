@@ -1,4 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// The server normalisers are imported only to pin the client pre-check to them; no query runs.
+vi.mock('@/db/client', () => ({ getDb: vi.fn() }));
+
+import {
+  normalizeCloudflareAccountId,
+  normalizeCloudflareApiToken,
+} from '@/lib/gateway/cloudflare-provider';
 import {
   CLOUDFLARE_ERROR_COPY,
   CLOUDFLARE_TOAST,
@@ -42,9 +50,11 @@ describe('Cloudflare console copy', () => {
     expect(CLOUDFLARE_ERROR_COPY.cloudflare_invalid_account_id).toBe(
       'Account ID must be 32 hexadecimal characters.',
     );
+    // Neutral: Sophy's own token check returns cloudflare_invalid before any call to Cloudflare.
     expect(CLOUDFLARE_ERROR_COPY.cloudflare_invalid).toBe(
-      'Cloudflare rejected that account ID and API token. Use the "Workers AI" token template.',
+      'That account ID and API token weren\'t accepted. Use the "Workers AI" token template.',
     );
+    expect(CLOUDFLARE_ERROR_COPY.cloudflare_invalid).not.toMatch(/cloudflare rejected/i);
     expect(CLOUDFLARE_ERROR_COPY.cloudflare_unreachable).toBe(
       "Couldn't reach Cloudflare to check the token. Try again.",
     );
@@ -137,6 +147,42 @@ describe('Cloudflare console copy', () => {
     expect(cloudflareFormError('0123456789abcdef0123456789abcdef', '   ')).toBe(
       'Enter the API token.',
     );
+    // Surrounding whitespace is trimmed, as on the server.
+    expect(cloudflareFormError('0123456789abcdef0123456789abcdef', '  tok\n')).toBeNull();
+  });
+
+  it.each([
+    ['a "Bearer " prefix', 'Bearer tok'],
+    ['a wrapped line', 'tok\nen'],
+    ['a zero-width space', 'tok​en'],
+    ['a non-ASCII character', 'tök'],
+    ['more than 512 characters', 'x'.repeat(513)],
+  ])('names a mis-pasted token (%s) instead of sending it to the server', (_label, token) => {
+    expect(cloudflareFormError('0123456789abcdef0123456789abcdef', token)).toBe(
+      'Paste only the API token: one line, with no spaces.',
+    );
+  });
+
+  it('accepts exactly the account IDs and tokens the server normalisers accept', () => {
+    const account = '0123456789abcdef0123456789abcdef';
+    const tokens = [
+      'tok', '  tok  ', 'x'.repeat(512), 'x'.repeat(513), 'Bearer tok', 'tok\nen', 'tok\ten',
+      'tök', 'tok​en', ' tok', 'a!~"\\', '', '   ',
+    ];
+    for (const token of tokens) {
+      expect(cloudflareFormError(account, token) === null, JSON.stringify(token)).toBe(
+        normalizeCloudflareApiToken(token) !== null,
+      );
+    }
+    const accounts = [
+      account, account.toUpperCase(), ` ${account} `, account.slice(1), `${account}0`,
+      'g'.repeat(32), '', `${account.slice(0, 16)} ${account.slice(16)}`,
+    ];
+    for (const id of accounts) {
+      expect(cloudflareFormError(id, 'tok') === null, JSON.stringify(id)).toBe(
+        normalizeCloudflareAccountId(id) !== null,
+      );
+    }
   });
 
   it('binding copy depends on the role and passes other text through', () => {
