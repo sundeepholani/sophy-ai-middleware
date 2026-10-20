@@ -2,18 +2,21 @@
 
 Sophy is a multi-project AI control plane. Client applications use Sophy-issued
 keys instead of holding provider credentials. Each project connects its own
-Vercel AI Gateway key, and each Sophy key owns one primary model plus its prompt,
-generation parameters, optional output schema, knowledgebase, rate limit, and
-monthly USD budget. A transcription key can also name a language model that
-applies the key-owned prompt to the raw transcript. Operators can change that
-configuration without changing or redeploying the client.
+Vercel AI Gateway key and, optionally, its own Cloudflare Workers AI credential.
+Each Sophy key owns one primary model plus its prompt, generation parameters,
+optional output schema, knowledgebase, rate limit, and monthly USD budget. A
+transcription key can also name a language model that applies the key-owned
+prompt to the raw transcript. Operators can change that configuration without
+changing or redeploying the client.
 
 Sophy exposes a practical OpenAI-compatible surface for Chat Completions,
 Responses, audio transcription, embeddings, image generation, model discovery,
-and temporary file uploads, plus a native `POST /v1/evaluate` route for
-evaluation models, which no OpenAI client method can reach. Outbound calls use
-Vercel AI Gateway; Sophy owns client keys, policy, usage accounting,
-evaluations, and the admin console.
+and temporary file uploads, plus native `POST /v1/evaluate` and
+`POST /v1/extract` routes for evaluation and extraction models, which no OpenAI
+client method can reach. Outbound calls use Vercel AI Gateway, except
+Cloudflare Workers AI models (`@cf/...`: Clef and Clairic), which Sophy calls
+directly with the project's own Cloudflare credential. Sophy owns client keys,
+policy, usage accounting, evaluations, and the admin console.
 
 > Migrating an application? Give its developers
 > [AI API Migration.md](AI%20API%20Migration.md).
@@ -23,12 +26,15 @@ evaluations, and the admin console.
 ```text
 client (OpenAI SDK, baseURL=<sophy>/v1, apiKey=mw_live_...)
   -> authenticate the Sophy key
-  -> resolve its active project and that project's encrypted Gateway credential
+  -> resolve its active project and the encrypted project credential its model
+     needs: Vercel AI Gateway, or Cloudflare Workers AI for @cf/ models
+     (never a fallback to the other provider or a platform credential)
   -> enforce the key's rate limit and monthly budget
   -> apply the key's model, prompt, parameters, schema, and knowledgebase
-  -> pass supported input/tools through Vercel AI Gateway
+  -> pass supported input/tools through Vercel AI Gateway, or call Cloudflare
+     Workers AI for Clef (/v1/evaluate) and Clairic (/v1/extract)
   -> for configured transcription keys, apply the prompt to the raw transcript
-  -> return an OpenAI-shaped response and record usage
+  -> return the response and record project-attributed usage
 ```
 
 - **The key is the configuration.** A client-sent `model` is ignored on every
@@ -45,7 +51,7 @@ client (OpenAI SDK, baseURL=<sophy>/v1, apiKey=mw_live_...)
   Responses. Sophy returns model tool calls but never executes them; the client
   runs each tool and sends its result in the next request.
 - **One key selects one primary model.** Bind separate keys to language,
-  transcription, image, embedding, or evaluation models as needed. A
+  transcription, image, embedding, evaluation, or extraction models as needed. A
   transcription key can optionally select a language model only for
   post-processing. `GET /v1/models` returns the primary model configured for the
   presented key.
@@ -60,7 +66,8 @@ client (OpenAI SDK, baseURL=<sophy>/v1, apiKey=mw_live_...)
 | `POST /v1/responses` | Buffered or streaming text, multimodal input, function tools, tool-result turns, and key-configured structured output. It is stateless: `previous_response_id` is rejected, so send the full input each time. |
 | `POST /v1/audio/transcriptions` | Multipart audio transcription for MP3/MPEG/MPGA, MP4/M4A, WAV, WebM, FLAC, or OGG files up to 4 MiB. Returns raw text when no processing policy is set, or only the policy-processed text when the key has a system prompt plus a language processor model. |
 | `POST /v1/embeddings` | A string or up to 2,048 strings; `float` and `base64` encodings. Token-array inputs are not supported. `dimensions` is supported only for `openai/*` embedding models. |
-| `POST /v1/evaluate` | Native, not OpenAI-compatible: no OpenAI client method reaches evaluation models. Send a `state` (string, object, or array) plus 1-32 named `boolean`, `choice`, or `score` questions and receive one typed answer each with token usage. `state` is capped at 200,000 serialized characters; the call is buffered, never streamed. |
+| `POST /v1/evaluate` | Native, not OpenAI-compatible: no OpenAI client method reaches evaluation models. Send a `state` (string, object, or array) plus 1-32 named `boolean`, `choice`, or `score` questions and receive one typed answer each with token usage; choice and score answers include `confidence` when the model returns it. `state` is capped at 200,000 serialized characters; the call is buffered, never streamed. TypeSafe Jev keys accept up to 8 PNG/JPEG `assets`, each referenced in the request. Cloudflare Clef keys (`@cf/cloudflare/clef`, `clef-flash`, `clef-omni`) accept up to 4 PNG/JPEG/WebP `assets` that the model sees before the state in key order, and add Cloudflare's limits: question names of 1-100 `[A-Za-z0-9_.-]`, 2-255 choice options, 2-10 score levels, no `providerOptions`, and a request-size estimate within the model's context window. |
+| `POST /v1/extract` | Native research preview for Cloudflare Clairic (`@cf/cloudflare/clairic`) keys. Send a string `state` (up to 200,000 characters; empty only with images) and 1-64 named, typed `fields` (`text`, `number`, `date`, `time`, `datetime`, `duration`, `list`, `estimate`, `forecast`), plus optional `assets` (up to 4 images), `reference_date`, and `options`. Returns Clairic's answer for each field, passed through unchanged, with `truncated`, optional `state_text`, and token usage. Buffered, never streamed. |
 | `POST /v1/images/generations` | Uses the key's image model and returns `b64_json` only. Supports 1-10 images and validates `WIDTHxHEIGHT` size strings; provider-specific options still depend on the selected model. Generated images are not stored by Sophy. |
 | `POST /v1/files` | Multipart `file` upload, at most 4 MiB (4,194,304 bytes). Allowed types: PDF, PNG, JPEG, WebP, GIF, plain text, CSV, and JSON. Uploads become eligible for cleanup after 24 hours. |
 | `GET /v1/models` | Returns the model configured on the authenticated key, not the full operator catalog. |
@@ -77,7 +84,8 @@ monthly budget, `403` for a cross-key file reference, `413` for an oversized fil
 or audio upload, `429` for a rate limit, `502` for a transient upstream
 (including transient transcription or processing) or structured-output failure, and
 `503 project_gateway_unavailable` when the key is valid but its project has no
-usable Vercel Gateway credential.
+usable credential for the key model's provider (Vercel AI Gateway, or Cloudflare
+Workers AI for `@cf/` models).
 A `Retry-After` header is included when available for rate limits. An upstream
 failure after SSE streaming begins ends the stream; it cannot be replaced with a
 JSON error response.
@@ -99,23 +107,35 @@ and evaluations.
 - **Projects** — switch without changing your personal default, set any active
   membership as default, create or rename projects, manage members/invitations,
   and connect, validate, rotate, or disconnect the project-owned Vercel Gateway
-  credential. AI work and Sophy-key creation stay paused until it is healthy.
+  credential. Sophy-key creation and Vercel-model work stay paused until it is
+  healthy. Admins can also connect a Cloudflare Workers AI credential (account
+  ID plus an API token from Cloudflare's "Workers AI" token template), which
+  Sophy validates without running a model. Keys bound to Clef or Clairic need
+  it to be healthy, and only it pays for their calls.
 - **Sophy API Keys** — create, edit, rotate, revoke, search, and bulk-change keys.
   Configure primary model, prompt, optional transcript processor model, generation
   parameters, agent mode, JSON schema, knowledgebase, monthly USD budget, RPM
   limit, ownership, and optional content logging. Secrets are shown once; rotation
   preserves configuration and history.
-- **Models** — search and sort the gateway catalog by provider, type, context
+- **Models** — search and sort the model catalog (Vercel AI Gateway models plus
+  Cloudflare's Clef and Clairic, marked Preview) by provider, type, context
   window, price, and capabilities such as transcription, image input, file input,
   tool use, and reasoning. The key picker can filter by the same capabilities.
 - **Usage** — 7/30/90-day request, token, and estimated-cost analytics with
   key/model filters, absolute/share charts, and breakdowns by key, model, and
-  source. Gateway cost is a real-time estimate, not a billing-grade invoice.
+  source. Costs are estimates, not a billing-grade invoice: Vercel AI Gateway
+  reports each call's cost, and Cloudflare Workers AI cost is estimated from the
+  neurons it reports ($0.011 per 1,000) or the model's input-token price,
+  ignoring Cloudflare's daily free allocation. A response Cloudflare billed but
+  Sophy could not use is still metered from the neurons Cloudflare reports for
+  it; requests Cloudflare rejected record no cost.
 - **Logs** — recent client requests plus transcript-processor, evaluation, and
   knowledgebase component calls, with model, tokens, cost, kind, streaming
   status, and errors. Per-key content logging captures Chat and Responses
-  messages/replies, embedding inputs, transcription text, and evaluation
-  state/questions/answers for 30 days.
+  messages/replies, embedding inputs, transcription text, evaluation
+  state/questions/answers, and extraction state/fields/answers for 30 days.
+  Evaluation and extraction images are logged as format and size only, and
+  Clairic's `state_text` is never logged.
   Complete Chat/Responses image input values use a shorter seven-day window and
   are then replaced by placeholders; inline data URLs include their bytes, while
   an external URL remains only a reference to externally owned content.
@@ -134,8 +154,8 @@ and evaluations.
   attach project knowledgebases to keys they own, and attached keys retrieve
   relevant passages for Chat Completions and Responses requests.
 - **Members / Project settings** — manage per-project Admin/Editor roles, the
-  project name and Gateway connection, and project-specific evaluation judge and
-  summary-email settings.
+  project name, Gateway and Cloudflare connections, and project-specific
+  evaluation judge and summary-email settings.
 
 ## Sophy CLI
 
@@ -166,9 +186,12 @@ required. The CLI stores a local session with a fixed five-day expiry.
 `sophy logout` revokes that session on the server and removes the local session.
 
 The CLI supports key creation, editing, rotation, revocation, bulk model changes,
-and evaluations. It also provides project, Gateway, member, invitation,
-knowledgebase, model catalog, usage, and log commands. Creation and rotation
-return the new key secret once. Existing secrets cannot be retrieved.
+and evaluations. It also provides project, Gateway, Cloudflare, member,
+invitation, knowledgebase, model catalog, usage, and log commands. The
+`cloudflare status`, `connect`, and `disconnect` commands require CLI 0.3.0 or
+later, and `connect` reads the API token only from `--data @file` or `--data -`.
+Creation and rotation return the new key secret once. Existing secrets cannot be
+retrieved.
 
 See [cli/README.md](cli/README.md) for commands, JSON input, file uploads, and
 session storage. The public [Sophy documentation](https://sophy.in/docs#sophy-cli)
@@ -187,8 +210,9 @@ cannot authenticate `/v1/*`.
 ## Stack
 
 Node.js 22 or newer, Next.js 16 (App Router), AI SDK v6 with an isolated v7
-transcription adapter, Vercel AI Gateway, Supabase Postgres (Drizzle), Vercel
-Blob, shadcn/ui, and iron-session.
+transcription adapter, Vercel AI Gateway, the Cloudflare Workers AI REST API
+(per-project credentials), Supabase Postgres (Drizzle), Vercel Blob, shadcn/ui,
+and iron-session.
 
 ## Provision on Vercel
 
@@ -202,7 +226,10 @@ Blob, shadcn/ui, and iron-session.
    The integration supplies pooled and direct Postgres URLs. For manual setup,
    use `DATABASE_URL` for the app and `DATABASE_URL_UNPOOLED` for migrations.
    Enable Vercel Blob and AI Gateway, then configure the required provider
-   credentials in AI Gateway.
+   credentials in AI Gateway. Cloudflare Workers AI needs no deployment setup
+   and no environment variable: each Project Admin connects the project's own
+   Cloudflare account ID and API token in Settings or with
+   `sophy cloudflare connect`.
 
 2. Configure the environment variables documented in `.env.example`:
 
@@ -210,9 +237,10 @@ Blob, shadcn/ui, and iron-session.
    - The canonical production `APP_ORIGIN`
    - `BLOB_READ_WRITE_TOKEN`
    - `PROJECT_GATEWAY_ENCRYPTION_KEY`, `PROJECT_GATEWAY_ENCRYPTION_KEY_VERSION`,
-     and `PROJECT_GATEWAY_FINGERPRINT_KEY` for encrypted project credentials;
-     keep the fingerprint key immutable after first use unless every active
-     credential is re-fingerprinted in one coordinated rotation
+     and `PROJECT_GATEWAY_FINGERPRINT_KEY` for encrypted project credentials
+     (Vercel AI Gateway keys and Cloudflare Workers AI tokens); keep the
+     fingerprint key immutable after first use unless every active credential
+     of both kinds is re-fingerprinted in one coordinated rotation
    - `AI_GATEWAY_API_KEY` only for the time-limited legacy migration bridge
    - ZeptoMail variables for production sign-in codes and optional evaluation
      summaries
@@ -225,7 +253,15 @@ Blob, shadcn/ui, and iron-session.
    pnpm db:migrate
    ```
 
-   Before deployment, apply
+   Before deploying the Cloudflare Workers AI release, apply
+   [0014_project_cloudflare_credentials.sql](drizzle/0014_project_cloudflare_credentials.sql)
+   through the migration command. It is additive: it creates
+   `project_cloudflare_credentials`, adds each project's Cloudflare credential
+   pointer and revision, and adds `usage_events.cloudflare_credential_id` with a
+   check that a usage row names at most one paying credential. No backfill is
+   needed.
+
+   Deployments that predate 0013 also apply
    [0013_email_otp_cli_sessions.sql](drizzle/0013_email_otp_cli_sessions.sql)
    through the migration command. It adds storage for login challenges and
    revocable CLI sessions, plus indexes for retention cleanup.
@@ -288,7 +324,7 @@ const response = await client.chat.completions.create({
 
 See [AI API Migration.md](AI%20API%20Migration.md) for tools, agent mode,
 multimodal input, files, audio transcription, embeddings, image generation,
-evaluation models, limits, and error handling.
+evaluation models, extraction models, limits, and error handling.
 
 ## Verify end to end
 
@@ -297,8 +333,8 @@ evaluation models, limits, and error handling.
 3. Test buffered and streaming Chat/Responses calls.
 4. Pass function tools, execute the returned calls client-side, and send results.
 5. If a schema is configured, verify a non-streaming reply is valid JSON.
-6. Exercise audio transcription, embeddings, image generation, or `/v1/evaluate`
-   with a matching key.
+6. Exercise audio transcription, embeddings, image generation, `/v1/evaluate`,
+   or `/v1/extract` with a matching key.
 7. For a transcription key, verify a blank system prompt returns the raw
    transcript unchanged, then configure a system prompt and language processor
    model and verify the client receives only the processed `text`.
@@ -311,6 +347,12 @@ evaluation models, limits, and error handling.
 12. Test two projects with distinct Vercel Gateway keys and verify live requests,
     structured retries, KB embeddings, and eval work record only the correct
     project and immutable Gateway-credential ID.
+13. Connect a Cloudflare Workers AI credential, call `/v1/evaluate` with a Clef
+    key and `/v1/extract` with a Clairic key, and confirm each usage row records
+    provider `cloudflare`, the project's Cloudflare credential ID with no
+    Gateway credential ID, and a cost. Disconnect it and expect
+    `503 project_gateway_unavailable` from those keys while Vercel-model keys
+    keep working.
 
 ## Deploy
 
@@ -319,8 +361,11 @@ vercel deploy --prod
 ```
 
 Proxy routes use the Node.js runtime. Tenant AI work always uses the explicit,
-encrypted Gateway credential resolved from the Sophy key's project. It never
-falls back to deployment OIDC, a global key, or another project's credential.
+encrypted project credential its model needs, resolved from the Sophy key's
+project: the Vercel AI Gateway credential, or the Cloudflare Workers AI
+credential for `@cf/` models. It never falls back to deployment OIDC, a global
+key, another project's credential, or the other provider. There is no
+deployment-level Cloudflare credential.
 `AI_GATEWAY_API_KEY` exists only for the migration-only legacy bridge and should
 be removed after that project's Admin connects its dedicated project key.
 

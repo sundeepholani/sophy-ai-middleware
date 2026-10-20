@@ -2,17 +2,18 @@
 
 Sophy is a project-scoped AI gateway. Applications authenticate with a
 Sophy-issued `mw_live_...` key instead of a provider key. Each project connects
-its own Vercel AI Gateway credential, and each Sophy key is bound to one primary
-model and carries the operator-owned prompt, generation parameters, optional
-JSON schema, knowledgebase, rate limit, and monthly USD budget. A transcription
-key can also name a language model that applies the operator-owned prompt after
-speech-to-text.
+its own Vercel AI Gateway credential, plus its own Cloudflare Workers AI
+credential when it uses Cloudflare's Clef or Clairic models, and each Sophy key
+is bound to one primary model and carries the operator-owned prompt, generation
+parameters, optional JSON schema, knowledgebase, rate limit, and monthly USD
+budget. A transcription key can also name a language model that applies the
+operator-owned prompt after speech-to-text.
 
 Sophy provides an OpenAI-compatible subset for Chat Completions, Responses,
 audio transcription, embeddings, image generation, model discovery, and
-temporary file uploads. Evaluation models are served by a native
-`POST /v1/evaluate` route instead, because no OpenAI client method reaches
-them.
+temporary file uploads. Evaluation and extraction models are served by native
+`POST /v1/evaluate` and `POST /v1/extract` routes instead, because no OpenAI
+client method reaches them.
 
 ## TL;DR
 
@@ -23,6 +24,8 @@ them.
 | OpenAI SDK: audio transcription | Change `base_url` and `api_key`; keep using `audio.transcriptions.create` with a Sophy key bound to a transcription model. |
 | OpenAI SDK: embeddings or images | Change `base_url` and `api_key`; use a Sophy key bound to the matching model type. |
 | Vercel AI Gateway: evaluation | Change the base URL to `https://sophy.in/v1` and the bearer token to your Sophy key; `POST /v1/evaluate` keeps the same body. There is no OpenAI SDK method for it. |
+| Cloudflare Workers AI: Clef (`@cf/cloudflare/clef`, `clef-flash`, `clef-omni`) | Send Sophy's evaluate body to `https://sophy.in/v1/evaluate` with your Sophy key: `boolean` instead of `noul`, images in `assets` instead of `images`; `model` is ignored. See §9. |
+| Cloudflare Workers AI: Clairic (`@cf/cloudflare/clairic`) | Send the same `state`, `fields`, `reference_date`, and `options` to `https://sophy.in/v1/extract`, with images in `assets` instead of `images`. The response is not wrapped in Cloudflare's `result` envelope. See §10. |
 | Anthropic/Claude SDK | Switch to the OpenAI SDK pointed at Sophy. The key can still select a Claude model. |
 
 - **Base URL:** `https://sophy.in/v1`
@@ -40,8 +43,9 @@ Ask the operator for a key suited to your endpoint:
 - a language model for `/chat/completions` or `/responses`,
 - a transcription model for `/audio/transcriptions`,
 - an embedding model for `/embeddings`,
-- an image model for `/images/generations`, or
-- an evaluation model for `/evaluate`.
+- an image model for `/images/generations`,
+- an evaluation model for `/evaluate`, or
+- an extraction model for `/extract`.
 
 The operator can also configure a system prompt, temperature, top-p, maximum
 output tokens, structured-output schema, knowledgebase, RPM limit, monthly USD
@@ -338,7 +342,8 @@ curl https://sophy.in/v1/audio/transcriptions \
 Evaluation models are **not** reachable through the OpenAI SDK. Vercel documents
 them as unavailable on the OpenAI-, Anthropic- and Cohere-compatible endpoints,
 so Sophy mirrors the AI Gateway's own `POST /v1/evaluate` shape. Use a plain HTTP
-client and a key bound to an evaluation model:
+client and a key bound to an evaluation model. Cloudflare's Clef models use the
+same Sophy request shape; see *Cloudflare Clef models* below.
 
 ```bash
 curl https://sophy.in/v1/evaluate \
@@ -414,12 +419,26 @@ Request fields:
     option.
   - `score` requires a `criteria` array of at least two string labels ordered
     lowest to highest, and answers with a numeric `score` plus probabilities.
+  - On Cloudflare Clef keys, question names must be 1-100 letters, digits, `_`,
+    `.`, or `-`; `choice` takes at most 255 options and `score` at most 10
+    levels.
 - `providerOptions` is optional and may only address the namespace belonging to
-  the key model's provider.
+  the key model's provider. Clef keys reject it.
+- `assets` is optional and carries still images, keyed by a name of 1-64
+  letters, digits, `_`, or `-`. Each entry is
+  `{ "type": "image", "format": "png", "data_base64": "..." }` with standard
+  padded base64 and no `data:` prefix; `format` is `png`, `jpg`, or `jpeg`, or
+  also `webp` on Clef keys. TypeSafe Jev 1.13.0+ keys accept 1-8 images, and
+  each key must appear in `state`, an instruction, or criteria. Cloudflare Clef
+  keys accept 1-4 images, at most 4 MiB each and 8 MiB in total once decoded,
+  with no reference needed. The whole request must stay under 4.5 MB.
 - `model` is accepted and ignored, exactly as on every other surface; the
   evaluation model configured on the key wins and is echoed back.
 
-The response contains the key's model, one answer per question, and token usage:
+The response contains the key's model, one answer per question, and token usage.
+Choice and score answers include `confidence` (0-1) when the model returns one.
+Score `probabilities` are keyed by level index (`"0"` is the lowest label), and
+`score` is probability-weighted, so it can fall between levels:
 
 ```json
 {
@@ -433,8 +452,8 @@ The response contains the key's model, one answer per question, and token usage:
     },
     "helpfulness": {
       "type": "score",
-      "score": 2,
-      "probabilities": { "useless": 0.04, "partial": 0.21, "complete": 0.75 }
+      "score": 1.71,
+      "probabilities": { "0": 0.04, "1": 0.21, "2": 0.75 }
     }
   },
   "usage": { "inputTokens": 412, "outputTokens": 36, "totalTokens": 448 }
@@ -444,16 +463,223 @@ The response contains the key's model, one answer per question, and token usage:
 The call is buffered; there is no streaming, and upstream `providerMetadata` is
 not echoed. One evaluate call consumes one RPM slot and is checked against the
 key's monthly budget before the paid model call. When content logging is enabled
-on the key, Sophy stores the evaluated state, the questions, and the answers.
+on the key, Sophy stores the evaluated state, the questions, and the answers;
+images are logged as format and size only.
 
 Validation failures arrive as `400` with a specific `code`: `missing_state`,
 `state_too_large`, `missing_questions`, `invalid_questions`, `questions_empty`,
 `too_many_questions`, `invalid_question`, `missing_instructions`,
-`unsupported_question_type`, `invalid_criteria`, or
-`unsupported_provider_options`. A key whose model is known to be something other
-than an evaluation model returns `400 model_not_evaluation`.
+`unsupported_question_type`, `invalid_criteria`, `invalid_question_id`,
+`unsupported_provider_options`, or `unsupported_media_field`. Image problems
+return `assets_not_supported`, `invalid_assets`, `too_many_assets`,
+`invalid_asset_key`, `invalid_asset`, `unsupported_asset_format`,
+`invalid_asset_data`, `asset_format_mismatch`, `asset_too_large`,
+`assets_too_large`, or `unreferenced_asset`. A key whose model is known to be
+something other than an evaluation model returns `400 model_not_evaluation`.
 
-## 10. Structured output
+### Cloudflare Clef models
+
+Keys bound to `@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash`, or
+`@cf/cloudflare/clef-omni` use the same request and response as any evaluation
+key. Sophy calls Cloudflare Workers AI with your project's own Cloudflare
+credential; the project's Admin connects it once in Sophy, and your application
+only ever sends its Sophy key. If you call Clef through Cloudflare's API today:
+
+- Use `"type": "boolean"` where Cloudflare uses `noul`; Sophy translates both
+  ways and answers with `probability`. A `noul` question returns
+  `400 unsupported_question_type`.
+- Leave out `model`. The key chooses the Clef model and Sophy sends Cloudflare's
+  selector itself.
+- Send images in `assets` (see the field list above), not `images`. Clef sees
+  every image before the state, in the key order of `assets`, and Sophy does not
+  replace a key with its image, so refer to images by position ("the first
+  image"). As in JavaScript, keys that are plain whole numbers, such as `"2"`,
+  come first in numeric order. Top-level `images`, `audio`, or `videos` return
+  `400 unsupported_media_field`; Cloudflare's video input, and Clef Omni's audio
+  input, are not supported yet. Each image is limited to 4 MiB (8 MiB in total)
+  and, by Cloudflare, to 16 megapixels, which Sophy does not check.
+- Instructions, choice descriptions, and score labels must be non-empty
+  strings. Cloudflare's `null`, object, and array forms return
+  `400 missing_instructions` or `400 invalid_criteria`.
+- `providerOptions` is rejected (`400 unsupported_provider_options`).
+- Responses are not wrapped in Cloudflare's `{ result, success, errors }`
+  envelope. Choice and score answers carry `confidence`; score answers drop
+  Cloudflare's `legend`, so read levels from the `probabilities` keys. Usage is
+  camelCase (`inputTokens`, `outputTokens`, `totalTokens`).
+- Sophy estimates the request size as Cloudflare does (the JSON it sends
+  upstream, without images, divided by 4) and returns `400 state_too_large` when
+  the estimate is above the model's context window: 65,536 tokens for Clef and
+  Clef Omni and 24,576 for Clef Flash (about 98,000 characters of JSON). Dense
+  text can still exceed the real token limit below that estimate. In testing,
+  Clef and Clef Flash rejected such requests instead of shortening the state,
+  and Sophy returns `400 upstream_invalid_request` with Cloudflare's message,
+  such as `Request requires 100819 tokens; the maximum is 65529`. Clef Omni's
+  limit is also its context window, and over-long input is expected to be
+  rejected the same way, but that has not been verified. Keep the state well
+  inside the context window.
+
+A project whose Cloudflare credential is missing or unhealthy returns
+`503 project_gateway_unavailable`, even when its Vercel AI Gateway credential is
+healthy. A Cloudflare account on the Workers Free plan that has used its daily
+free allocation returns `429 rate_limit_exceeded` until 00:00 UTC, and Sophy
+does not retry it.
+
+## 10. Extraction models (preview)
+
+Extraction models read text and images and return typed values instead of free
+text. Sophy serves Cloudflare's Clairic (`@cf/cloudflare/clairic`) on a native
+`POST /v1/extract` route; like evaluation, no OpenAI SDK method reaches it. Use
+a plain HTTP client and a key bound to Clairic. Clairic is a Cloudflare research
+preview: Sophy validates your request, then passes each answer through exactly
+as Clairic returns it, so answer fields can change between releases. Calls use
+the project's own Cloudflare Workers AI credential, never Vercel AI Gateway.
+
+```bash
+curl https://sophy.in/v1/extract \
+  -H "Authorization: Bearer $SOPHY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "state": "Invoice INV-7731 from Blue Harbor Logistics. Issued 14 Oct. Net 15. Freight: 3 pallets at $410.00 each; fuel surcharge $57.50. Contacts: Meera Iyer, Tom Okafor.",
+    "reference_date": "2026-10-20",
+    "fields": {
+      "invoice_number": { "type": "text", "instructions": "Invoice number" },
+      "total": { "type": "number", "unit": "USD", "decimals": 2, "instructions": "Amount due including the surcharge" },
+      "due_date": { "type": "date", "instructions": "Issue date plus the net payment days" },
+      "contacts": { "type": "list", "items": "text", "instructions": "Contact person names" },
+      "po_number": { "type": "text", "instructions": "Purchase order number" },
+      "days_to_pay": { "type": "estimate", "min": 0, "max": 90, "step": 1, "instructions": "Days after issue until this invoice is paid" }
+    }
+  }'
+```
+
+The same request from Python:
+
+```python
+import os
+import httpx
+
+response = httpx.post(
+    "https://sophy.in/v1/extract",
+    headers={"Authorization": f"Bearer {os.environ['SOPHY_API_KEY']}"},
+    json={
+        "state": (
+            "Invoice INV-7731 from Blue Harbor Logistics. Issued 14 Oct. Net 15. "
+            "Freight: 3 pallets at $410.00 each; fuel surcharge $57.50. "
+            "Contacts: Meera Iyer, Tom Okafor."
+        ),
+        "reference_date": "2026-10-20",
+        "fields": {
+            "invoice_number": {"type": "text", "instructions": "Invoice number"},
+            "total": {
+                "type": "number",
+                "unit": "USD",
+                "decimals": 2,
+                "instructions": "Amount due including the surcharge",
+            },
+            "due_date": {"type": "date", "instructions": "Issue date plus the net payment days"},
+            "contacts": {"type": "list", "items": "text", "instructions": "Contact person names"},
+            "po_number": {"type": "text", "instructions": "Purchase order number"},
+            "days_to_pay": {
+                "type": "estimate",
+                "min": 0,
+                "max": 90,
+                "step": 1,
+                "instructions": "Days after issue until this invoice is paid",
+            },
+        },
+    },
+    timeout=120,
+)
+print(response.json()["answers"])
+```
+
+Request fields:
+
+- `state` is a string of at most 200,000 characters. It is required unless
+  `assets` carries images, in which case it may be `""` or omitted. Objects and
+  arrays are rejected (`invalid_state`); serialize them yourself.
+- `fields` is required and maps 1-64 of your own field names to field specs.
+  A name starts with a letter or `_` and has at most 64 letters, digits, `_`,
+  `.`, or `-`. Each spec needs a `type`: `text`, `number`, `date`, `time`,
+  `datetime`, `duration`, `list`, `estimate`, or `forecast`. Optional settings:
+  `instructions` (string), `unit` (a non-empty string; duration fields accept
+  only `seconds`, the default, `minutes`, `hours`, `days`, `weeks`, `months`, or
+  `years`), `integer` (boolean), `decimals` (0-6), `items` (`text`, `number`, or
+  `date`; required for lists), `min` and `max` (required for estimates and
+  forecasts, `min` below `max`; ISO dates only for a date estimate; optional
+  numbers on other types), `step` (a positive number; `"month"` or `"year"` only
+  on a date estimate), `scale` (`linear` or `log`, for estimates and forecasts),
+  `null_threshold` (greater than 0, at most 1), `horizon` (forecast steps, 1-64),
+  and `interval` (`step`, `minute`, `hour`, `day`, `week`, `month`, `quarter`, or
+  `year`). Any other setting is rejected.
+- `assets` is optional: 1-4 PNG, JPEG, or WebP images with the same shape and
+  limits as Clef keys in §9. Clairic sees them before the state, in key order.
+- `reference_date` is an optional `YYYY-MM-DD` date that anchors dates written
+  without a year. Sophy never fills it in; send it whenever a field depends on
+  today's date.
+- `options` may hold `include_quantiles` (adds all 99 percentiles to estimates)
+  and `return_state_text` (adds `state_text`, the text spans index into), both
+  booleans.
+- `model` is accepted and ignored; the key's model wins and is echoed back.
+
+The response holds the key's model, one answer per field, Clairic's
+`truncated` flag, `state_text` when requested, and token usage. Numbers below
+are rounded for reading:
+
+```json
+{
+  "model": "@cf/cloudflare/clairic",
+  "answers": {
+    "invoice_number": { "type": "text", "p_null": 0.0001, "span": [8, 16], "guess": "INV-7731", "confidence": 1, "value": "INV-7731" },
+    "total": { "type": "number", "p_null": 0.0003, "guess": 1287.5, "confidence": 0.8683, "value": 1287.5 },
+    "due_date": { "type": "date", "p_null": 0.00001, "guess": "2026-10-29", "confidence": 0.9999, "value": "2026-10-29" },
+    "contacts": { "type": "list", "value": ["Meera Iyer", "Tom Okafor"], "spans": [[137, 147], [149, 159]], "confidence": 0.9708 },
+    "po_number": { "type": "text", "p_null": 0.999999, "span": [8, 16], "guess": "INV-7731", "confidence": 0.9993, "value": null },
+    "days_to_pay": { "type": "estimate", "value": 18, "mean": 17.58, "median": 16, "p10": 13, "p90": 25, "p_below": 0.000009, "p_above": 0.000009 }
+  },
+  "truncated": false,
+  "usage": { "inputTokens": 715, "outputTokens": 0, "totalTokens": 715 }
+}
+```
+
+Read answers with three rules:
+
+1. **Spans are Unicode code-point offsets**, end-exclusive. `state[start:end]`
+   works in Python. In JavaScript use
+   `Array.from(state).slice(start, end).join("")`; `state.slice()` counts UTF-16
+   units and drifts after an emoji.
+2. **When `value` is `null`, ignore `guess` and `span`**, even when
+   `confidence` is high. `po_number` above has no PO number in the input, yet
+   its guess points at the invoice number. `p_null` is the probability that the
+   input does not determine the field.
+3. **Lists can carry per-item `confidences`** alongside the overall
+   `confidence` (seen on number and date lists); text lists carry per-item
+   `spans`. Check each item before you use it.
+
+Estimates add `mean`, `median`, `p10`, `p90`, `p_below`, and `p_above`
+(`p10`-`p90` is an 80% interval), and `value` can differ from `median`. Forecast
+`value`, `median`, `p10`, and `p90` are arrays with one entry per step, and
+`steps` holds one estimate per step. Clairic may read the state more than once
+(the example above used 3 passes), and `inputTokens` counts every pass, so cost
+is not predictable from the field count alone.
+
+The call is buffered. One extract call consumes one RPM slot and is checked
+against the key's monthly budget before the paid model call. When content
+logging is enabled on the key, Sophy stores the state, field specs, reference
+date, options, and answers; images are logged as format and size only, and
+`state_text` is never logged.
+
+Validation failures arrive as `400` with a specific `code`: `invalid_state`,
+`missing_state`, `state_too_large`, `missing_fields`, `invalid_fields`,
+`fields_empty`, `too_many_fields`, `invalid_field_name`,
+`unsupported_field_type`, `invalid_field`, `invalid_reference_date`,
+`invalid_options`, `unsupported_media_field`, or one of the image codes in §9.
+A key whose model is not an extraction model, a Clef key included, returns
+`400 model_not_extraction`. A project without a healthy Cloudflare credential
+returns `503 project_gateway_unavailable`. Clairic's own rejections return
+`400 upstream_invalid_request` with its message.
+
+## 11. Structured output
 
 Structured output is configured on the key, not per request. Client
 `response_format` or Responses `text.format` does not replace the stored schema.
@@ -465,7 +691,7 @@ JSON. For a streaming call, validation is recorded after completion; bytes that
 were already sent cannot be recalled, so validate streamed JSON in your client
 before using it.
 
-## 11. Moving from the Anthropic SDK
+## 12. Moving from the Anthropic SDK
 
 The Anthropic SDK cannot call Sophy's OpenAI-compatible endpoints directly.
 Switch to the OpenAI SDK and point it at Sophy; the operator can bind the key to
@@ -481,7 +707,7 @@ a Claude model.
 | `msg.content[0].text` | `response.choices[0].message.content` |
 | Anthropic tool use | Convert definitions/results to OpenAI function-tool shapes; tools are supported but execute in your application. |
 
-## 12. Errors and limits
+## 13. Errors and limits
 
 Validation and buffered failures use the OpenAI body shape:
 
@@ -498,27 +724,40 @@ Validation and buffered failures use the OpenAI body shape:
 
 | Status | Typical meaning |
 |---|---|
-| `400` | Invalid input, unsupported field or feature, a model that does not match the endpoint, invalid audio/multipart data, missing transcription processor configuration, malformed media URL, an invalid `/v1/evaluate` state or question set, or upstream input rejection. |
+| `400` | Invalid input, unsupported field or feature, a model that does not match the endpoint, invalid audio/multipart data, missing transcription processor configuration, malformed media URL, an invalid `/v1/evaluate` state or question set, an invalid `/v1/extract` state or field set, or upstream input rejection. |
 | `401` | Missing, invalid, expired, or revoked Sophy key, or a key whose project is inactive. |
 | `402` | The Sophy key's monthly USD budget is exhausted. |
 | `403` | A Sophy-hosted file belongs to another key. |
 | `413` | A `/v1/files` or `/v1/audio/transcriptions` upload exceeds 4 MiB (4,194,304 bytes). |
 | `429` | Sophy RPM limit or upstream provider rate/quota limit; honor `Retry-After` when present. |
 | `502` | A transient upstream service failure or buffered structured-output failure. |
-| `503` | The Sophy key is valid, but its project has no usable Vercel AI Gateway credential (`project_gateway_unavailable`). |
+| `503` | The Sophy key is valid, but its project has no usable credential for the key model's provider: Vercel AI Gateway, or Cloudflare Workers AI for `@cf/` models (`project_gateway_unavailable`). |
 
-Usage and cost in the console are real-time gateway estimates, not a provider
-invoice. A monthly budget is checked before a request; the request that reaches
-the remaining budget can still add its final cost. If an upstream failure occurs
-after SSE streaming begins, the stream ends instead of changing into a JSON
-error response; clients should treat an incomplete stream as failed.
+Usage and cost in the console are estimates, not a provider invoice. Cloudflare
+Workers AI calls are estimated from the neurons Cloudflare reports ($0.011 per
+1,000) or the model's input-token price, ignoring Cloudflare's daily free
+allocation. A response Cloudflare billed but Sophy could not use is still
+metered from the neurons Cloudflare reports for it, while requests Cloudflare
+rejected record no cost. A monthly budget is checked before a request; the
+request that reaches the remaining budget can still add its final cost. If an
+upstream failure occurs after SSE streaming begins, the stream ends instead of
+changing into a JSON error response; clients should treat an incomplete stream
+as failed.
 
 For evaluation-specific failures, check the error `code`: `model_not_evaluation`
 means the key's primary model is not an evaluation model, while `missing_state`,
 `state_too_large`, `missing_questions`, `invalid_questions`, `questions_empty`,
 `too_many_questions`, `invalid_question`, `missing_instructions`,
-`unsupported_question_type`, `invalid_criteria`, and
-`unsupported_provider_options` describe a malformed request body.
+`unsupported_question_type`, `invalid_criteria`, `invalid_question_id`,
+`unsupported_provider_options`, and `unsupported_media_field` describe a
+malformed request body. Image problems use the asset codes listed in §9.
+
+For extraction-specific failures, `model_not_extraction` means the key's
+primary model is not an extraction model, while `invalid_state`,
+`missing_state`, `state_too_large`, `missing_fields`, `invalid_fields`,
+`fields_empty`, `too_many_fields`, `invalid_field_name`,
+`unsupported_field_type`, `invalid_field`, `invalid_reference_date`, and
+`invalid_options` describe a malformed request body.
 
 For transcription-specific setup failures, check the error `code`:
 `model_not_transcription` means the key's primary model cannot transcribe;
@@ -528,7 +767,7 @@ language model. Invalid multipart/audio requests use codes such as
 `missing_file`, `empty_file`, `unsupported_audio_format`, or
 `unsupported_transcription_option`.
 
-## 13. Smoke test
+## 14. Smoke test
 
 ```bash
 curl https://sophy.in/v1/chat/completions \
@@ -556,7 +795,12 @@ shape; your application validates, authorizes, executes, and returns results.
 **Can I use `previous_response_id`?** No. Sophy's Responses endpoint is stateless;
 send the complete input and tool history every time.
 
-**Do Chat, Responses, audio transcription, embeddings, images, and evaluation use
-different base URLs?** No. They share `https://sophy.in/v1`; choose the SDK method
-— or, for `/evaluate`, a plain HTTP request — and a key whose configured primary
-model matches that endpoint.
+**Do I need a Cloudflare account to use Clef or Clairic?** Your application
+does not: it sends only its Sophy key. A project Admin connects the project's
+Cloudflare account ID and Workers AI API token in Sophy, and that Cloudflare
+account is billed for the calls.
+
+**Do Chat, Responses, audio transcription, embeddings, images, evaluation, and
+extraction use different base URLs?** No. They share `https://sophy.in/v1`;
+choose the SDK method — or, for `/evaluate` and `/extract`, a plain HTTP
+request — and a key whose configured primary model matches that endpoint.

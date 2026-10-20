@@ -5,6 +5,13 @@ application, migration, console, API isolation, onboarding, and public docs now
 match the project experience below. Production rollout still requires the
 coordinated migration procedure and operational checks in sections 10 and 12.
 
+Update (2026-10-20): a project may also connect one Cloudflare Workers AI
+credential for Sophy's registered Cloudflare models (Clef on `/v1/evaluate`,
+Clairic on `/v1/extract`). Every credential invariant in this plan applies to it
+through the sibling table `project_cloudflare_credentials`; sections 1-5, 7, and
+12-14 note where it differs. In this plan, "Gateway credential" still means the
+Vercel AI Gateway credential.
+
 ## 1. Goal
 
 Turn Sophy from one shared enterprise console into a project-based multi-tenant product where:
@@ -13,7 +20,7 @@ Turn Sophy from one shared enterprise console into a project-based multi-tenant 
 - A person can belong to multiple projects.
 - Their role is assigned independently in each project.
 - Every Sophy API key and every related resource belongs to exactly one project.
-- Every AI-enabled project must connect one Admin-managed, project-owned Vercel AI Gateway credential for all AI work and upstream usage.
+- Every AI-enabled project must connect one Admin-managed, project-owned Vercel AI Gateway credential for its gateway AI work and upstream usage, and may connect one Admin-managed, project-owned Cloudflare Workers AI credential for Cloudflare models.
 - A person can choose which accessible project Sophy opens after sign-in.
 - A person who signs up independently receives a renameable project named `My Project`, becomes its Admin, and lands there by default.
 - A person whose first entry is an invitation joins the invited project with the invited role and uses that project as their default.
@@ -32,9 +39,21 @@ These decisions define the shipped UX:
 8. **Key ownership remains useful but is not the tenant boundary.** A project owns the key; an active member of the same project may be assigned as its operational owner.
 9. **The two key types stay distinct.** A _Gateway credential_ is the project-level upstream Vercel secret. A _Sophy API key_ is the client-facing bearer key issued inside Sophy.
 10. **Each project has at most one current healthy Gateway credential.** Any Project Admin can add or safely replace it; it remains owned by the project if that Admin later leaves.
-11. **Gateway setup is a readiness gate.** Members, invitations, rename, and switching work before setup, but Sophy API-key creation and every AI operation stay blocked until the project credential is active.
+11. **Gateway setup is a readiness gate.** Members, invitations, rename, and switching work before setup, but Sophy API-key creation and every AI operation stay blocked until the project credential is active. (Once created, keys bound to Cloudflare models depend only on the Cloudflare credential; see decision 14.)
 12. **Tenant AI traffic never falls back.** Live proxy calls, embeddings, images, KB work, evaluations, and structured-output retries must use the current project credential, never Sophy deployment OIDC, a global `AI_GATEWAY_API_KEY`, or another project’s credential.
 13. **A Vercel Gateway key is dedicated to one Sophy project.** Sophy rejects a matching active HMAC fingerprint in another project so Vercel-side usage and budgets remain attributable to one tenant. The fingerprint HMAC key is immutable after first use unless every active credential is re-fingerprinted in one coordinated rotation.
+14. **Provider credentials are siblings.** A project may also connect one
+    Cloudflare Workers AI credential (an account ID plus an API token) for the
+    code-reviewed Cloudflare models Sophy registers. It lives in
+    `project_cloudflare_credentials`, which mirrors `project_gateway_credentials`:
+    the same lifecycle and health values, AEAD envelope, key version, HMAC
+    fingerprint, last four, same-project pointer and foreign keys, and the same
+    one-available-row-per-project and one-available-row-per-fingerprint indexes,
+    so one Cloudflare token cannot serve two Sophy projects. It has no
+    `platform_env` source and no fallback. Keys bound to `@cf/` models resolve
+    only this credential, so a Vercel outage, invalid key, or `402` never blocks
+    them, and a Cloudflare failure never touches the Vercel row. Creating any
+    Sophy key still requires the healthy Vercel credential (decision 11).
 
 ## 3. User journeys
 
@@ -97,7 +116,27 @@ These decisions define the shipped UX:
 5. An invalid first candidate leaves the project in `setup_required`. An invalid replacement leaves the previous current healthy credential untouched.
 6. A successful rotation atomically switches future work while requests already in flight may finish with the immutable credential row they captured at start.
 7. Existing Sophy API keys, memberships, KBs, and evaluation definitions remain unchanged.
-8. Disconnecting pauses all AI work but does not delete or revoke Sophy API keys. It also does not revoke the Vercel key; an Admin must do that in Vercel.
+8. Disconnecting pauses all AI work that uses the Gateway credential (keys bound to Cloudflare models keep using the Cloudflare credential) but does not delete or revoke Sophy API keys. It also does not revoke the Vercel key; an Admin must do that in Vercel.
+
+### Connect or rotate a project Cloudflare credential
+
+1. The credential is optional. Without it the project is fully usable, but keys
+   cannot bind Cloudflare models; the console says "Optional · Not connected".
+2. A Project Admin enters the 32-character account ID and an API token made
+   from Cloudflare's "Workers AI" token template, in Settings or with
+   `sophy cloudflare connect`.
+3. Sophy normalises both, then validates them outside any transaction with one
+   account-scoped, non-generation call:
+   `GET /client/v4/accounts/{account_id}/ai/models/search?search=clef&per_page=1`.
+   A `401` or `403` means invalid; any other failure means "try again".
+4. A valid pair is envelope-encrypted and becomes current in one transaction
+   that replaces any previous row. A token already connected to another project
+   is rejected (`cloudflare_in_use`).
+5. Connect, rotate, and disconnect are audited as `cloudflare.connect`,
+   `cloudflare.rotate`, and `cloudflare.disconnect` with only the last four and
+   the fingerprint.
+6. Disconnecting pauses only Cloudflare-model keys. It revokes no Sophy key and
+   does not revoke the Cloudflare token; an Admin does that in Cloudflare.
 
 ### Create a project-scoped Sophy API key
 
@@ -117,6 +156,9 @@ These decisions define the shipped UX:
 | Invite, remove, or change member roles | Yes | No |
 | View Gateway connection health | Yes | Yes |
 | Add, test, replace, or disconnect the Gateway credential | Yes | No |
+| View Cloudflare connection readiness | Yes | Yes |
+| Connect, replace, or disconnect the Cloudflare credential | Yes | No |
+| Bind a key to a Cloudflare model once Cloudflare is ready | Yes | Yes (own keys) |
 | Create Sophy API keys once the Gateway is active | Yes | Yes |
 | Manage every project key | Yes | No |
 | Manage keys they own | Yes | Yes |
@@ -154,6 +196,8 @@ Remove global `users.role` after the project-aware authorization rollout is comp
 - `status` — `active | suspended | archived`
 - `current_gateway_credential_id` — nullable; a same-project reference used for atomic replacement. Null means no current credential.
 - `gateway_credential_revision` — increments on each compare-and-set replacement or disconnect
+- `current_cloudflare_credential_id` — nullable; same-project pointer to the current Cloudflare Workers AI credential.
+- `cloudflare_credential_revision` — increments on each Cloudflare connect, rotation, or disconnect.
 - `created_at`
 - `updated_at`
 - lifecycle timestamps such as `suspended_at` and `archived_at`
@@ -219,6 +263,22 @@ For `encrypted_api_key`, require ciphertext/AEAD fields and a non-null creating 
 
 Encrypt with envelope encryption backed by KMS, or AES-256-GCM with a separate versioned production encryption key. Bind the project ID, credential ID, credential type, and key version as authenticated associated data. Do not reuse `KEY_HASH_PEPPER`, `SESSION_PASSWORD`, or an application signing secret. Never return ciphertext or plaintext after save. Safely erase replaced ciphertext while retaining non-secret audit history.
 
+### `project_cloudflare_credentials`
+
+The Cloudflare Workers AI sibling of `project_gateway_credentials`. It has the
+same columns except `source` and `last_used_at`, plus `account_id`, a
+non-secret, Admin-only value stored as 32 lowercase hexadecimal characters (a
+CHECK enforces the format). Every row is Admin-created, so the key version,
+fingerprint, last four, and creator are never null. The same lifecycle, health,
+envelope, partial unique, and composite same-project foreign-key rules apply.
+
+The token is encrypted with the same AES-256-GCM key and version as Gateway
+credentials but under its own associated-data domain,
+`sophy.project-cloudflare-credential`, which binds the project ID, credential
+row ID, key version, and account ID. A Gateway ciphertext replayed as a
+Cloudflare row, or a row moved to another account ID, fails authentication. The
+fingerprint HMAC is domain-separated the same way.
+
 ### `auth_intents`
 
 The current `login_tokens.user_id` is required, so it cannot represent a verified self-signup before a user exists. Add a separate email-bound intent table, or evolve the token schema equivalently:
@@ -240,7 +300,7 @@ Add mandatory `project_id` to every tenant-owned or job-facing table:
 
 - `api_keys`
 - `knowledgebases`
-- `usage_events`, including keyless KB spend and the immutable non-secret Gateway credential row ID for each successful upstream call after cutover; null is allowed for work blocked before an upstream call and for historical rows that cannot be attributed safely
+- `usage_events`, including keyless KB spend and the immutable non-secret credential row ID that paid for each successful upstream call after cutover — `gateway_credential_id` or `cloudflare_credential_id`, never both (a CHECK enforces it); null is allowed for work blocked before an upstream call and for historical rows that cannot be attributed safely
 - `usage_rollups`
 - `request_logs`
 - `blob_uploads`
@@ -321,6 +381,14 @@ Fail closed:
 - Network errors, rate limits, and upstream `5xx` responses do not automatically invalidate a credential.
 - Gateway account IDs, balances, secret identifiers, top-up links, and raw upstream bodies never appear in client errors.
 - Background jobs enter a retryable `blocked_gateway_credential` or `billing_attention` state instead of failing permanently or consuming every cron slot.
+- The same rules hold for the Cloudflare Workers AI credential. A missing,
+  disconnected, invalid, unchecked, or undecryptable Cloudflare credential
+  returns the same typed `503 project_gateway_unavailable`, with
+  provider-neutral client text. A Cloudflare `401`, or `403` with error code
+  `10000`, marks only that Cloudflare row invalid, by compare-and-set on the
+  captured row ID. Cloudflare's daily-allocation `429` (code `3036`), capacity
+  `429` (`3040`), and other `403`s never change credential health. The Cloudflare
+  account ID never appears in a client error.
 
 Managed Sophy Blob URLs must fail closed when no matching project-owned `blob_uploads` row exists. KB source blobs need an explicit allowed path instead of relying on the current “unknown URL is acceptable” behavior.
 
@@ -451,6 +519,8 @@ Project suspension is enforced on both console access and public API-key verific
 
 Gateway validation and secret management enforce Project-Admin authorization, use the authenticated non-generation `getCredits` check, and write only the actor, project, HMAC fingerprint, last four, and lifecycle classification to the audit trail. A failed replacement never displaces the current healthy credential. A recent-authentication challenge and a dedicated Gateway-validation attempt limiter are launch hardening items if the deployment's session and abuse policy require them.
 
+Cloudflare validation enforces Project-Admin authorization, uses the account-scoped, non-generation `models/search` check, and audits only the actor, project, fingerprint, last four, and lifecycle event. A failed replacement leaves the current Cloudflare credential untouched.
+
 Tenant isolation tests are release blockers. Include cross-project IDs for keys, owners, KBs, logs, evals, usage, files, settings, invitations, and audit records, and assert that no response exposes another project’s data.
 
 ## 13. Acceptance criteria
@@ -474,10 +544,10 @@ Tenant isolation tests are release blockers. Include cross-project IDs for keys,
 - Concurrent Admin replacements commit exactly one current healthy credential row.
 - One request and all of its structured retries use one snapped immutable credential row ID.
 - Removing the Admin who supplied a credential does not disconnect it from the project.
-- Disconnecting revokes neither Sophy API keys nor the Vercel key; it pauses AI work until reconnection.
+- Disconnecting revokes neither Sophy API keys nor the Vercel key; it pauses the AI work that uses the Gateway credential until reconnection.
 - Project suspension or archival makes zero upstream calls even when a credential and Sophy API key are active.
 - Gateway authentication failure marks the current credential invalid; network failure, ordinary rate limiting, and upstream `5xx` do not.
-- Gateway-key budget exhaustion marks `billing_attention` and blocks every live and background AI operation in that project without fallback.
+- Gateway-key budget exhaustion marks `billing_attention` and blocks every live and background AI operation in that project that uses the Gateway credential, without fallback.
 - Missing, invalid, disconnected, budget-blocked, or undecryptable credentials never shift cost to Sophy or another tenant.
 - Raw Gateway secrets are encrypted at rest, are never returned after save or retained in browser storage, and never appear in logs, analytics, audit events, or client errors.
 - Every successful upstream call after cutover records the project and immutable non-secret Gateway credential row ID used for reconciliation; work blocked before an upstream call and unverifiable historical rows may be null.
@@ -487,6 +557,14 @@ Tenant isolation tests are release blockers. Include cross-project IDs for keys,
 - Concurrent signup and invitation acceptance is idempotent.
 - Existing Sophy API keys continue to authenticate after migration.
 - A person who loses their final membership receives an explicit recovery path: an eligible user can create `My Project`; an ineligible user sees a stable access-recovery screen rather than a broken account.
+- Two projects with distinct Cloudflare credentials route Clef and Clairic
+  calls only through their own credential, and each successful call records
+  that project's `cloudflare_credential_id` and no `gateway_credential_id`.
+- A Vercel credential that is missing, invalid, or `billing_attention` does not
+  block Cloudflare-model keys, and a Cloudflare authentication failure never
+  changes the Vercel credential.
+- No tenant Cloudflare call uses a deployment or platform credential; none
+  exists.
 
 ## 14. Resolved decisions and operational policy
 
@@ -497,4 +575,6 @@ Tenant isolation tests are release blockers. Include cross-project IDs for keys,
 - Eval judge and notification settings are project-specific.
 - Each project has one current credential; no automatic cross-project or platform failover exists.
 - Candidate credentials are validated with the authenticated, non-generation Gateway `getCredits` operation.
+- Cloudflare Workers AI credentials are per project only; there is no platform Cloudflare credential and no cross-provider fallback.
+- Candidate Cloudflare credentials are validated with the account-scoped, non-generation `GET /ai/models/search` call.
 - Sophy-side commercial quotas, approval rules, and platform support procedures remain deployment policy. They do not weaken the tenant or Gateway isolation implemented here.
