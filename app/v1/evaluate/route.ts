@@ -3,10 +3,12 @@
  *
  * Same key-owned model contract as every other surface: the client's `model` is
  * IGNORED — the key's evaluation model wins. Pipeline mirrors embeddings:
- * authenticate the key -> resolve the project gateway -> parse JSON -> verify
- * the key's model is an evaluation model -> validate the request -> rate limit
- * -> quota pre-check -> evaluate via the AI Gateway -> record usage -> return
- * the typed answers.
+ * authenticate the key -> resolve the credential for the key's model (the
+ * project's Vercel AI Gateway credential, or its Cloudflare Workers AI credential
+ * for `@cf/` models) -> parse JSON -> verify the key's model is an evaluation
+ * model -> validate the request -> rate limit -> quota pre-check -> evaluate
+ * upstream (AI Gateway, or Cloudflare Workers AI for Clef) -> record usage ->
+ * return the typed answers.
  *
  * Vercel documents evaluation as unavailable through the OpenAI-compatible
  * endpoints, so this path mirrors the gateway's own POST /v1/evaluate rather
@@ -23,7 +25,13 @@ import {
 import {
   projectGatewayUnavailableResponse,
   resolveProjectGateway,
+  type ProjectGatewaySnapshot,
 } from '@/lib/gateway/project-provider';
+import {
+  resolveProjectCloudflare,
+  type ProjectCloudflareSnapshot,
+} from '@/lib/gateway/cloudflare-provider';
+import { isCloudflareModelId } from '@/lib/gateway/cloudflare-models';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -41,13 +49,22 @@ export async function POST(req: Request): Promise<Response> {
   if (!key) {
     return openAiError(401, 'authentication_error', 'Invalid API key.', { code: 'invalid_api_key' });
   }
-  let gateway;
+  // The key's model picks the ONE credential this request may use: the project's
+  // own Cloudflare Workers AI credential for '@cf/' models, the project's Vercel AI
+  // Gateway credential for everything else. A '@cf/' key never resolves Vercel, so
+  // a Vercel outage or 402 cannot block Clef (and vice versa).
+  let upstream: { gateway: ProjectGatewaySnapshot } | { cloudflare: ProjectCloudflareSnapshot };
   try {
-    gateway = await resolveProjectGateway(key.projectId);
+    upstream = isCloudflareModelId(key.model)
+      ? { cloudflare: await resolveProjectCloudflare(key.projectId) }
+      : { gateway: await resolveProjectGateway(key.projectId) };
   } catch (error) {
     const unavailable = projectGatewayUnavailableResponse(error);
     if (unavailable) return unavailable;
-    console.error('[gateway] project provider resolution failed', { projectId: key.projectId });
+    console.error('[gateway] project provider resolution failed', {
+      projectId: key.projectId,
+      provider: isCloudflareModelId(key.model) ? 'cloudflare' : 'vercel',
+    });
     return openAiError(503, 'api_error', 'This project is temporarily unable to make AI requests.', {
       code: 'project_gateway_unavailable',
     });
@@ -69,7 +86,9 @@ export async function POST(req: Request): Promise<Response> {
   // positively known to the catalog as something else → clean 400. Unknown /
   // uncatalogued ids fall through and, if truly invalid, fail at the provider
   // as a 502 — evaluation models are new, so a stale warm catalog must not
-  // reject a freshly bound key.
+  // reject a freshly bound key. A `@cf/` id is classified synchronously from the
+  // code-reviewed Cloudflare registry and fails closed when it is not a registered
+  // evaluation model; only non-`@cf/` ids fail open.
   if ((await assessmentCapability(key.model)) === 'not_assessment') {
     return openAiError(
       400,
@@ -108,7 +127,7 @@ export async function POST(req: Request): Promise<Response> {
 
   // 6) Evaluate + record usage (+ content when the key logs it) + respond.
   return handleAssessment(
-    { keyId: key.id, gateway, model: key.model, logContent: key.logContent },
+    { keyId: key.id, ...upstream, model: key.model, logContent: key.logContent },
     parsed.value,
   );
 }
