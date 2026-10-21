@@ -21,9 +21,16 @@
  * majors. The credential itself never leaves lib/gateway/project-provider.ts.
  * Because it bypasses the SDK, it also has to supply the retries the SDK would
  * have given it — see withRetries.
+ *
+ * Keys bound to a registered Cloudflare Workers AI evaluation model (Clef,
+ * `@cf/cloudflare/clef*`) call the project's own Cloudflare credential instead,
+ * through `callCloudflareModel` (lib/gateway/cloudflare-call.ts). They get the
+ * same retries, the same single deadline, and the same usage and log rows,
+ * attributed to the Cloudflare credential row. Neither token ever leaves its
+ * provider module.
  */
 import { randomUUID } from 'node:crypto';
-import { APICallError, RetryError } from 'ai';
+import { APICallError } from 'ai';
 import {
   recordUsage,
   recordAssessmentLog,
@@ -47,16 +54,47 @@ import {
   normalizeProjectGatewayError,
   type ProjectGatewaySnapshot,
 } from '@/lib/gateway/project-provider';
+import { NATIVE_UPSTREAM_TIMEOUT_MS, withRetries } from '@/lib/gateway/retries';
+import {
+  ASSET_KEY_PATTERN,
+  isStrictBase64,
+  parseCloudflareImageAssets,
+  summarizeAssets,
+  toCloudflareImages,
+} from '@/lib/gateway/image-assets';
+import {
+  cloudflareInputTokenEstimate,
+  getCloudflareModel,
+  isCloudflareModelId,
+  requireCloudflareModel,
+  type CloudflareModelEntry,
+} from '@/lib/gateway/cloudflare-models';
+import {
+  callCloudflareModel,
+  cloudflareCostUsd,
+  cloudflareErrorInfo,
+  cloudflareErrorRequestId,
+  cloudflareRunUrlForLogs,
+  type CloudflareErrorInfo,
+} from '@/lib/gateway/cloudflare-call';
+import {
+  normalizeProjectCloudflareError,
+  type ProjectCloudflareSnapshot,
+} from '@/lib/gateway/cloudflare-provider';
 
-/**
- * One deadline for the whole upstream call — every attempt and every retry wait
- * — so retrying never raises the worst-case latency. Buffered, never a stream.
- */
-const UPSTREAM_TIMEOUT_MS = 120_000;
 /** Questions are answered in parallel upstream; bound the fan-out we pay for. */
 const MAX_QUESTIONS = 32;
 /** The evaluated state is echoed into request_logs, so cap it before any I/O. */
 const MAX_STATE_CHARS = 200_000;
+
+/** Clef question ids (Cloudflare schema: letters, digits, '_', '.', '-'; at most 100). Clef keys only (D8). */
+const CLEF_QUESTION_ID = /^[A-Za-z0-9_.-]{1,100}$/;
+/** Clef's per-question ceilings. Cloudflare 422s an 11-level score (cf-live/clef-invalid-score11). */
+const CLEF_MAX_CHOICE_OPTIONS = 255;
+const CLEF_MAX_SCORE_LEVELS = 10;
+/** Cloudflare-native media fields. Sophy accepts images only through the keyed `assets`. */
+const CLEF_MEDIA_FIELDS = ['images', 'audio', 'videos'] as const;
+type ClefMediaField = (typeof CLEF_MEDIA_FIELDS)[number];
 
 const EVALUATE_URL = 'https://ai-gateway.vercel.sh/v1/evaluate';
 const SYSTEMONE_URL = 'https://ai-gateway.vercel.sh/typesafe/v1/systemone';
@@ -67,13 +105,12 @@ const SYSTEMONE_URL = 'https://ai-gateway.vercel.sh/typesafe/v1/systemone';
  * carrying assets go to the gateway's TypeSafe-compatible endpoint instead.
  * TypeSafe's own per-image limit is 16 MiB, but Vercel caps a function request
  * body at 4.5 MB, which binds first; the count cap just bounds the fan-out.
+ * Clef keys use parseCloudflareImageAssets instead: up to 4 png/jpg/jpeg/webp
+ * images, no reference rule, sent as an ordered `images[]`.
  */
 const ASSET_PROVIDER = 'typesafe-ai';
 const MAX_ASSETS = 8;
-const ASSET_KEY = /^[A-Za-z0-9_-]{1,64}$/;
 const ASSET_FORMATS = new Set(['png', 'jpg', 'jpeg']);
-/** Standard padded base64 — TypeSafe rejects whitespace, url-safe and `data:` forms. */
-const STRICT_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 // ---- Capability guard -------------------------------------------------------
 
@@ -111,7 +148,11 @@ export interface ParsedAssessmentRequest {
   questions: Record<string, AssessmentQuestion>;
   /** Namespaced provider options: provider-specific knobs only. */
   providerOptions: Record<string, Record<string, unknown>>;
-  /** Images keyed by the string `state`/questions use to refer to them. */
+  /**
+   * Images keyed by the string `state`/questions use to refer to them (Jev).
+   * Clef shows them to the model in key order, before the state, with no
+   * substitution.
+   */
   assets?: Record<string, AssessmentAsset>;
 }
 
@@ -201,9 +242,48 @@ function checkQuestion(
 }
 
 /**
+ * Clef-only rules (D8), run after every question has passed checkQuestion, so a
+ * choice's criteria is already a plain object of >= 2 non-empty string
+ * descriptions and a score's an array of >= 2 non-empty string labels.
+ */
+function checkClefQuestion(
+  name: string,
+  q: AssessmentQuestion,
+): ReturnType<typeof bad> | null {
+  const at = `questions.${name}`;
+  if (!CLEF_QUESTION_ID.test(name)) {
+    return bad(
+      'Question ids for this model must be 1-100 letters, digits, "_", "." or "-".',
+      'invalid_question_id',
+      at,
+    );
+  }
+  if (q.type === 'choice') {
+    const ids = Object.keys(q.criteria);
+    if (ids.length > CLEF_MAX_CHOICE_OPTIONS || ids.some((id) => id === '')) {
+      return bad(
+        `${at}.criteria must map 2 to ${CLEF_MAX_CHOICE_OPTIONS} non-empty option ids to descriptions for this model.`,
+        'invalid_criteria',
+        `${at}.criteria`,
+      );
+    }
+  }
+  if (q.type === 'score' && q.criteria.length > CLEF_MAX_SCORE_LEVELS) {
+    return bad(
+      `${at}.criteria must have 2 to ${CLEF_MAX_SCORE_LEVELS} levels for this model.`,
+      'invalid_criteria',
+      `${at}.criteria`,
+    );
+  }
+  return null;
+}
+
+/**
  * Validate `assets`. Each must be a base64 PNG/JPEG whose bytes match its
  * declared format, and each key must appear somewhere in state/questions —
  * TypeSafe 400s an unreferenced asset, so failing here gives a clearer error.
+ * Clef keys use parseCloudflareImageAssets instead: up to 4 png/jpg/jpeg/webp
+ * images, no reference rule, sent as an ordered `images[]`.
  */
 function parseAssets(
   raw: unknown,
@@ -213,7 +293,7 @@ function parseAssets(
   if (!isPlainObject(raw)) return bad('assets must be an object.', 'invalid_assets', 'assets');
   if (providerOf(model) !== ASSET_PROVIDER) {
     return bad(
-      "Image assets are only supported for TypeSafe Jev keys; this key's model cannot accept them.",
+      "Image assets are only supported for TypeSafe Jev and Cloudflare Clef keys; this key's model cannot accept them.",
       'assets_not_supported',
       'assets',
     );
@@ -223,10 +303,12 @@ function parseAssets(
   if (keys.length > MAX_ASSETS) {
     return bad(`assets must not contain more than ${MAX_ASSETS} entries.`, 'too_many_assets', 'assets');
   }
-  const assets: Record<string, AssessmentAsset> = {};
+  // Entries + Object.fromEntries, never assets[key] = …: ASSET_KEY_PATTERN admits
+  // '__proto__', and plain assignment would set the prototype and drop that image.
+  const entries: [string, AssessmentAsset][] = [];
   for (const key of keys) {
     const at = `assets.${key}`;
-    if (!ASSET_KEY.test(key)) {
+    if (!ASSET_KEY_PATTERN.test(key)) {
       return bad(
         `Asset keys must be 1-64 characters of letters, digits, "_" or "-".`,
         'invalid_asset_key',
@@ -242,7 +324,9 @@ function parseAssets(
       return bad(`${at}.format must be "png", "jpg" or "jpeg".`, 'unsupported_asset_format', `${at}.format`);
     }
     const data = a.data_base64;
-    if (typeof data !== 'string' || data.length === 0 || !STRICT_BASE64.test(data)) {
+    // isStrictBase64, not the STRICT_BASE64 regex: that overflows V8's regexp stack
+    // (RangeError) on a ~3.4 MB image, which fits under Vercel's body cap.
+    if (typeof data !== 'string' || data.length === 0 || !isStrictBase64(data)) {
       return bad(
         `${at}.data_base64 must be standard padded base64 with no "data:" prefix or whitespace.`,
         'invalid_asset_data',
@@ -266,19 +350,36 @@ function parseAssets(
         at,
       );
     }
-    assets[key] = { type: 'image', format: format as AssessmentAsset['format'], data_base64: data };
+    entries.push([key, { type: 'image', format: format as AssessmentAsset['format'], data_base64: data }]);
   }
-  return { ok: true, value: assets };
+  return { ok: true, value: Object.fromEntries(entries) };
 }
 
 /**
  * Pure: validate and normalize an evaluate request. No I/O. The client's
  * `model` is deliberately not read — the key owns the model.
+ *
+ * Keys bound to a registered Cloudflare Clef model get Clef's own rules on top
+ * (D8): question ids, option and level ceilings, no providerOptions, images only
+ * through the keyed `assets`, and a pre-cap against the model's context window.
+ * Every other model's result is unchanged.
  */
 export function parseAssessmentRequest(
   body: EvaluationRequest,
   model: string,
 ): ParseAssessmentResult {
+  // A `@cf/` key must be a registered Clef (evaluation) entry. Anything else fails
+  // closed, exactly as the route guard does, so the handler can never be asked
+  // to call a Cloudflare model it cannot price or address (D4).
+  let clef: CloudflareModelEntry | null = null;
+  if (isCloudflareModelId(model)) {
+    const entry = getCloudflareModel(model);
+    if (!entry || entry.type !== 'evaluation') {
+      return bad("This key's model is not an evaluation model.", 'model_not_evaluation');
+    }
+    clef = entry;
+  }
+
   if (body.state === undefined || body.state === null) {
     return bad('Missing required parameter: state.', 'missing_state', 'state');
   }
@@ -311,10 +412,24 @@ export function parseAssessmentRequest(
     const problem = checkQuestion(name, body.questions[name]);
     if (problem) return problem;
   }
+  if (clef) {
+    for (const name of names) {
+      const problem = checkClefQuestion(name, body.questions[name]);
+      if (problem) return problem;
+    }
+  }
 
   // No gateway user/tags metadata: attribution lives in Sophy's own
   // usage_events, and the gateway bills a per-request surcharge for tags.
   const providerOptions: Record<string, Record<string, unknown>> = {};
+  if (clef && body.providerOptions !== undefined) {
+    // Clef has no providerOptions, and the Cloudflare body never carries any (D8).
+    return bad(
+      "providerOptions are not supported for this key's model.",
+      'unsupported_provider_options',
+      'providerOptions',
+    );
+  }
   if (body.providerOptions !== undefined) {
     if (!isPlainObject(body.providerOptions)) {
       return bad(
@@ -343,26 +458,53 @@ export function parseAssessmentRequest(
     }
   }
 
+  if (clef) {
+    // Cloudflare's own images/audio/videos would otherwise be dropped silently.
+    const media = body as EvaluationRequest & Partial<Record<ClefMediaField, unknown>>;
+    for (const field of CLEF_MEDIA_FIELDS) {
+      if (media[field] !== undefined) {
+        return bad(
+          `Send images in the keyed "assets" field; "${field}" is not accepted.`,
+          'unsupported_media_field',
+          field,
+        );
+      }
+    }
+  }
+
   let assets: Record<string, AssessmentAsset> | undefined;
   if (body.assets !== undefined && body.assets !== null) {
-    const parsedAssets = parseAssets(
-      body.assets,
-      model,
-      JSON.stringify([body.state, body.questions]),
-    );
+    const parsedAssets = clef
+      ? parseCloudflareImageAssets(body.assets)
+      : parseAssets(body.assets, model, JSON.stringify([body.state, body.questions]));
     if (!parsedAssets.ok) return parsedAssets;
     assets = parsedAssets.value;
   }
 
-  return {
-    ok: true,
-    value: {
-      state: body.state,
-      questions: body.questions,
-      providerOptions,
-      ...(assets ? { assets } : {}),
-    },
+  const value: ParsedAssessmentRequest = {
+    state: body.state,
+    questions: body.questions,
+    providerOptions,
+    ...(assets ? { assets } : {}),
   };
+
+  if (clef) {
+    // Cloudflare pre-checks every call as compact input JSON length / 4 against the
+    // context window, with base64 image bytes excluded (cf-live/clef-flash-long:
+    // 232,684 chars → 58,171; clef-image-large: images not counted). Measure the
+    // exact upstream body minus images, so a request it would 413 never costs a
+    // round trip. A real-token 422 can still occur below this (clef-flash-mid).
+    const estimate = cloudflareInputTokenEstimate(toClefRequest({ ...value, assets: undefined }, clef));
+    if (estimate > clef.contextWindow) {
+      return bad(
+        `state is too large for ${clef.name}: the request is estimated at ${estimate} tokens and the model accepts at most ${clef.contextWindow}.`,
+        'state_too_large',
+        'state',
+      );
+    }
+  }
+
+  return { ok: true, value };
 }
 
 // ---- Response mapping (pure) ------------------------------------------------
@@ -376,6 +518,17 @@ interface RawAssessmentResponse {
 
 function finite(v: unknown): number {
   return Number.isFinite(v) ? (v as number) : 0;
+}
+
+/**
+ * Choice and score answers keep upstream `confidence` (0–1) when it is a finite
+ * number: Clef always sends it, and Jev does on the TypeSafe image path. It is
+ * optional and additive on the wire, so a missing or non-finite value is omitted
+ * rather than coerced to 0. `legend` is still dropped, because it only restates
+ * the request's own criteria.
+ */
+function confidenceOf(raw: Record<string, unknown>): { confidence?: number } {
+  return Number.isFinite(raw.confidence) ? { confidence: raw.confidence as number } : {};
 }
 
 /** Whitelist one upstream answer to its discriminated shape, or null. */
@@ -394,6 +547,7 @@ function toAnswer(raw: unknown): AssessmentAnswer | null {
               Object.entries(raw.probabilities).map(([k, v]) => [k, finite(v)]),
             )
           : {},
+        ...confidenceOf(raw),
       };
     case 'score':
       return {
@@ -404,6 +558,7 @@ function toAnswer(raw: unknown): AssessmentAnswer | null {
               Object.entries(raw.probabilities).map(([k, v]) => [k, finite(v)]),
             )
           : {},
+        ...confidenceOf(raw),
       };
     default:
       return null;
@@ -424,12 +579,17 @@ export function toAssessmentResponse(
   asked: string[],
 ): EvaluationResponse | null {
   if (!isPlainObject(raw.answers)) return null;
-  const answers: Record<string, AssessmentAnswer> = {};
+  const entries: [string, AssessmentAnswer][] = [];
   for (const name of asked) {
+    // Own keys only: a missing "__proto__" (or "constructor") answer must not read Object.prototype.
+    if (!Object.hasOwn(raw.answers, name)) return null;
     const answer = toAnswer(raw.answers[name]);
     if (!answer) return null;
-    answers[name] = answer;
+    entries.push([name, answer]);
   }
+  // Object.fromEntries, never answers[name] = …: a question named "__proto__"
+  // would set the prototype and silently drop its answer from the 200 and the log.
+  const answers: Record<string, AssessmentAnswer> = Object.fromEntries(entries);
   const inputTokens = finite(raw.usage?.inputTokens);
   const outputTokens = finite(raw.usage?.outputTokens);
   return {
@@ -441,6 +601,21 @@ export function toAssessmentResponse(
 
 // ---- TypeSafe shape translation (pure) --------------------------------------
 
+/** System One (TypeSafe and Clef) calls a boolean question `noul`; the rest carry over unchanged. */
+function toSystemOneQuestions(
+  questions: Record<string, AssessmentQuestion>,
+): Record<string, unknown> {
+  // Object.fromEntries, never out[name] = …: Clef's id rule (and Jev, which has none) admits
+  // "__proto__", and assignment would set the prototype instead, silently dropping that
+  // question from the upstream body. The answer check would then fail a request Cloudflare billed.
+  return Object.fromEntries(
+    Object.entries(questions).map(([name, q]) => [
+      name,
+      q.type === 'boolean' ? { ...q, type: 'noul' } : q,
+    ]),
+  );
+}
+
 /**
  * Pure: the TypeSafe System One body for an image request. TypeSafe calls a
  * boolean question `noul`; everything else, `providerOptions` included (the
@@ -450,12 +625,7 @@ export function toTypeSafeRequest(
   parsed: ParsedAssessmentRequest,
   model: string,
 ): Record<string, unknown> {
-  const questions = Object.fromEntries(
-    Object.entries(parsed.questions).map(([name, q]) => [
-      name,
-      q.type === 'boolean' ? { ...q, type: 'noul' } : q,
-    ]),
-  );
+  const questions = toSystemOneQuestions(parsed.questions);
   return {
     model,
     state: parsed.state,
@@ -464,6 +634,26 @@ export function toTypeSafeRequest(
     ...(Object.keys(parsed.providerOptions).length > 0
       ? { providerOptions: parsed.providerOptions }
       : {}),
+  };
+}
+
+/**
+ * Pure: the Cloudflare Workers AI input for a Clef key (D8). `model` is the
+ * registry's short selector, never the key id or anything client-supplied:
+ * Cloudflare 422s a selector that differs from the path model
+ * (cf-live/clef-path-flash-selector). No providerOptions and no `assets`: images
+ * travel as an ordered `images[]`, which Clef shows before the state with no
+ * key substitution.
+ */
+export function toClefRequest(
+  parsed: ParsedAssessmentRequest,
+  entry: CloudflareModelEntry,
+): Record<string, unknown> {
+  return {
+    model: entry.selector,
+    state: parsed.state,
+    questions: toSystemOneQuestions(parsed.questions),
+    ...(parsed.assets ? { images: toCloudflareImages(parsed.assets) } : {}),
   };
 }
 
@@ -489,14 +679,34 @@ export function fromTypeSafeResponse(raw: unknown): RawAssessmentResponse {
 
 // ---- Orchestrator (side-effectful) ------------------------------------------
 
-export interface AssessmentCallContext {
-  keyId: string;
-  gateway: ProjectGatewaySnapshot;
-  /** Full AI Gateway evaluation-model id, e.g. "typesafe-ai/jev". */
-  model: string;
-  /** When true, capture state/questions/answers to request_logs. */
-  logContent: boolean;
-}
+/**
+ * Exactly one upstream per call, chosen by the route from the key's model (D3):
+ * the project's Vercel AI Gateway snapshot, or, for a registered `@cf/` Clef
+ * model, the project's own Cloudflare Workers AI snapshot. The other member is
+ * absent, so a Cloudflare failure can never reach the Vercel credential's health.
+ */
+export type AssessmentCallContext =
+  | {
+      keyId: string;
+      /** Full AI Gateway evaluation-model id, e.g. "typesafe-ai/jev". */
+      model: string;
+      /** When true, capture state/questions/answers to request_logs. */
+      logContent: boolean;
+      gateway: ProjectGatewaySnapshot;
+      cloudflare?: undefined;
+    }
+  | {
+      keyId: string;
+      /** The key's registered Cloudflare evaluation model, e.g. "@cf/cloudflare/clef". */
+      model: string;
+      /** When true, capture state/questions/answers to request_logs. */
+      logContent: boolean;
+      cloudflare: ProjectCloudflareSnapshot;
+      gateway?: undefined;
+    };
+
+/** The Vercel member, for the gateway-only helpers. */
+type GatewayAssessmentContext = Extract<AssessmentCallContext, { gateway: ProjectGatewaySnapshot }>;
 
 /** Lift a human-readable message out of a non-2xx gateway body, if present. */
 function liftUpstreamMessage(bodyText: string): string | null {
@@ -512,124 +722,8 @@ function liftUpstreamMessage(bodyText: string): string | null {
   }
 }
 
-// ---- Upstream call, retried like the AI SDK ---------------------------------
-
-/**
- * Every other surface calls the gateway through the AI SDK, which retries
- * transient failures by default (ai@6 retryWithExponentialBackoffRespectingRetryHeaders:
- * two retries, 2s then 4s, a provider's retry-after honored when under a minute).
- * That helper isn't exported and this surface calls the gateway by hand, so the
- * policy is mirrored here. Without it a transient upstream 503 reached the client
- * on the first failure, while the same blip on chat was absorbed.
- */
-const MAX_RETRIES = 2;
-const INITIAL_RETRY_DELAY_MS = 2_000;
-const RETRY_BACKOFF_FACTOR = 2;
-const MAX_RETRY_AFTER_MS = 60_000;
-
-/** Mirrors @ai-sdk/provider-utils isAbortError: a cancelled call is never retried. */
-function isAbortError(error: unknown): boolean {
-  return (
-    (error instanceof Error ||
-      (typeof DOMException !== 'undefined' && error instanceof DOMException)) &&
-    (error.name === 'AbortError' || error.name === 'ResponseAborted' || error.name === 'TimeoutError')
-  );
-}
-
-/**
- * Mirrors the AI SDK's getRetryDelayInMs: prefer retry-after-ms, then retry-after
- * (seconds or an HTTP date), when it is non-negative and either under a minute or
- * shorter than the backoff; otherwise fall back to the exponential delay.
- */
-function retryDelayMs(error: unknown, exponentialDelayMs: number): number {
-  const cause = (error as { cause?: unknown } | null)?.cause;
-  const headers = APICallError.isInstance(error)
-    ? error.responseHeaders
-    : APICallError.isInstance(cause)
-      ? cause.responseHeaders
-      : undefined;
-  if (!headers) return exponentialDelayMs;
-  let ms: number | undefined;
-  const retryAfterMs = headers['retry-after-ms'];
-  if (retryAfterMs) {
-    const n = parseFloat(retryAfterMs);
-    if (!Number.isNaN(n)) ms = n;
-  }
-  const retryAfter = headers['retry-after'];
-  if (retryAfter && ms === undefined) {
-    const seconds = parseFloat(retryAfter);
-    ms = Number.isNaN(seconds) ? Date.parse(retryAfter) - Date.now() : seconds * 1000;
-  }
-  if (
-    ms != null &&
-    !Number.isNaN(ms) &&
-    ms >= 0 &&
-    (ms < MAX_RETRY_AFTER_MS || ms < exponentialDelayMs)
-  ) {
-    return ms;
-  }
-  return exponentialDelayMs;
-}
-
-/** A wait that ends early, and releases its timer, if the call's deadline fires. */
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(signal.reason);
-      return;
-    }
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-/**
- * Run `attempt`, retrying exactly as the AI SDK does. Cancellation rethrows at
- * once. A non-retryable failure on the first try rethrows as-is, so credential
- * health handling still sees a bare 401/402. Otherwise the attempts are collected
- * into a RetryError, whose lastError carries the final status — the same shape
- * chat, embeddings and images produce, which upstream-error.ts already unwraps.
- * Exported for unit testing.
- */
-export async function withRetries<T>(attempt: () => Promise<T>, signal: AbortSignal): Promise<T> {
-  const errors: unknown[] = [];
-  let delayMs = INITIAL_RETRY_DELAY_MS;
-  for (;;) {
-    try {
-      return await attempt();
-    } catch (error) {
-      if (isAbortError(error)) throw error;
-      errors.push(error);
-      const tries = errors.length;
-      const message = error instanceof Error ? error.message : String(error);
-      if (tries > MAX_RETRIES) {
-        throw new RetryError({
-          message: `Failed after ${tries} attempts. Last error: ${message}`,
-          reason: 'maxRetriesExceeded',
-          errors,
-        });
-      }
-      if (APICallError.isInstance(error) && error.isRetryable) {
-        await sleep(retryDelayMs(error, delayMs), signal);
-        delayMs *= RETRY_BACKOFF_FACTOR;
-        continue;
-      }
-      if (tries === 1) throw error;
-      throw new RetryError({
-        message: `Failed after ${tries} attempts with non-retryable error: '${message}'`,
-        reason: 'errorNotRetryable',
-        errors,
-      });
-    }
-  }
-}
+// Moved to lib/gateway/retries.ts; re-exported for tests/assessment-handler.test.ts.
+export { withRetries };
 
 /**
  * One authenticated POST. A non-2xx becomes an APICallError whose isRetryable is
@@ -638,7 +732,7 @@ export async function withRetries<T>(attempt: () => Promise<T>, signal: AbortSig
  * does for Node's "fetch failed". Neither ever carries state or questions.
  */
 async function postEvaluate(
-  ctx: AssessmentCallContext,
+  ctx: GatewayAssessmentContext,
   body: unknown,
   signal: AbortSignal,
   withImages: boolean,
@@ -680,25 +774,21 @@ async function postEvaluate(
   return res;
 }
 
+// Moved to lib/gateway/image-assets.ts; re-exported for tests/assessments.test.ts.
+export { summarizeAssets };
+
 /**
- * What the request log keeps of each image: its format and decoded size, never
- * the bytes — a base64 selfie would blow the log cap and is not ours to retain.
+ * U1: a 2xx that Cloudflare billed but Sophy could not use (an unusable envelope or
+ * answer, or a body the deadline cut off) still cost the project's account, so its
+ * error row is metered from cf-ai-neurons and counts toward the key's monthly cap.
+ * Responses Cloudflare rejected (4xx, 5xx, network) carry no neurons and keep a
+ * NULL cost. cloudflareCostUsd cannot throw here: neurons only exist once a call
+ * was made, and requireCloudflareModel proved the id registered before it.
  */
-export function summarizeAssets(
-  assets: Record<string, AssessmentAsset> | undefined,
-): Record<string, { format: string; bytes: number }> | undefined {
-  if (!assets) return undefined;
-  return Object.fromEntries(
-    Object.entries(assets).map(([key, a]) => [
-      key,
-      {
-        format: a.format,
-        bytes:
-          (a.data_base64.length / 4) * 3 -
-          (a.data_base64.endsWith('==') ? 2 : a.data_base64.endsWith('=') ? 1 : 0),
-      },
-    ]),
-  );
+function billedErrorCost(model: string, err: unknown): { costUsd?: number } {
+  const neurons = cloudflareErrorInfo(err)?.neurons;
+  if (typeof neurons !== 'number' || !Number.isFinite(neurons)) return {};
+  return { costUsd: cloudflareCostUsd({ model, neurons, inputTokens: 0, outputTokens: 0 }) };
 }
 
 /**
@@ -707,7 +797,10 @@ export function summarizeAssets(
  * usage row goes in BEFORE the log — request_logs carries a foreign key onto
  * usage_events, and recordUsage swallows its own failures, so the reverse order
  * would silently drop the log row. Retries happen inside withRetries, so a call
- * that succeeds on a retry still records exactly one usage row.
+ * that succeeds on a retry still records exactly one usage row. Clef keys call
+ * the project's own Cloudflare Workers AI credential; the usage row is
+ * attributed to that credential row, and a Cloudflare failure is classified
+ * against that row only.
  */
 export async function handleAssessment(
   ctx: AssessmentCallContext,
@@ -716,11 +809,13 @@ export async function handleAssessment(
   const startedAt = Date.now();
   const provider = providerOf(ctx.model);
   const eventId = randomUUID();
+  // The tenant boundary comes from whichever snapshot this call holds.
+  const projectId = ctx.cloudflare ? ctx.cloudflare.projectId : ctx.gateway.projectId;
   const logAssessment = (status: 'ok' | 'error', answers: unknown) =>
     ctx.logContent
       ? recordAssessmentLog({
           id: eventId,
-          projectId: ctx.gateway.projectId,
+          projectId,
           keyId: ctx.keyId,
           state: parsed.state,
           questions: parsed.questions,
@@ -731,6 +826,73 @@ export async function handleAssessment(
       : Promise.resolve();
 
   try {
+    // Clef on the project's Cloudflare Workers AI credential (D8).
+    if (ctx.cloudflare) {
+      // 1) The registry entry (fail closed) and ONE deadline for every attempt and wait.
+      const entry = requireCloudflareModel(ctx.model, 'evaluation');
+      const signal = AbortSignal.timeout(NATIVE_UPSTREAM_TIMEOUT_MS);
+      // 2) Retried like the AI SDK (withRetries inside callCloudflareModel).
+      const run = await callCloudflareModel(
+        ctx.cloudflare,
+        ctx.model,
+        toClefRequest(parsed, entry),
+        signal,
+      );
+      // 3) Clef speaks System One: noul → boolean, snake_case usage → camelCase.
+      const payload = toAssessmentResponse(
+        fromTypeSafeResponse(run.result),
+        ctx.model,
+        Object.keys(parsed.questions),
+      );
+      if (!payload) {
+        // Billed but unusable: the error row keeps the request id and is metered (U1).
+        const data: CloudflareErrorInfo = {
+          provider: 'cloudflare',
+          code: null,
+          message: null,
+          requestId: run.upstreamRequestId,
+          neurons: run.neurons,
+        };
+        throw new APICallError({
+          message: 'Cloudflare Workers AI returned an unusable evaluation response.',
+          url: cloudflareRunUrlForLogs(ctx.model),
+          requestBodyValues: { model: ctx.model },
+          statusCode: 502,
+          isRetryable: false,
+          data,
+        });
+      }
+      // 4) Usage BEFORE the log (request_logs has the FK), paid by the Cloudflare row (D6, D7).
+      await recordUsage({
+        id: eventId,
+        projectId,
+        cloudflareCredentialId: ctx.cloudflare.cloudflareCredentialId,
+        keyId: ctx.keyId,
+        provider,
+        model: ctx.model,
+        usage: {
+          ...ZERO_USAGE,
+          inputTokens: payload.usage.inputTokens,
+          outputTokens: payload.usage.outputTokens,
+          totalTokens: payload.usage.totalTokens,
+        },
+        // Never throws: requireCloudflareModel proved the id is registered and priced.
+        costUsd: cloudflareCostUsd({
+          model: ctx.model,
+          neurons: run.neurons,
+          inputTokens: payload.usage.inputTokens,
+          outputTokens: payload.usage.outputTokens,
+        }),
+        latencyMs: Date.now() - startedAt,
+        status: 'ok',
+        responseKind: 'assessment',
+        gatewayRequestId: run.upstreamRequestId, // cf-ai-req-id ?? cf-ray ?? null
+      });
+      await logAssessment('ok', payload.answers);
+      return Response.json(payload, { headers: { 'cache-control': 'no-store' } });
+    }
+
+    // Vercel AI Gateway. ctx is narrowed to the gateway member from here on.
     const withImages = parsed.assets !== undefined;
     const upstreamBody = withImages
       ? toTypeSafeRequest(parsed, ctx.model)
@@ -742,7 +904,7 @@ export async function handleAssessment(
             ? { providerOptions: parsed.providerOptions }
             : {}),
         };
-    const signal = AbortSignal.timeout(UPSTREAM_TIMEOUT_MS);
+    const signal = AbortSignal.timeout(NATIVE_UPSTREAM_TIMEOUT_MS);
     const res = await withRetries(
       () => postEvaluate(ctx, upstreamBody, signal, withImages),
       signal,
@@ -791,11 +953,22 @@ export async function handleAssessment(
 
     return Response.json(payload, { headers: { 'cache-control': 'no-store' } });
   } catch (err) {
-    const normalizedError = await normalizeProjectGatewayError(ctx.gateway, err);
+    // Classify a failure only against the credential that made the call. A
+    // Workers AI 401 must never mark the project's Vercel key invalid (D3, D8).
+    const normalizedError = ctx.cloudflare
+      ? await normalizeProjectCloudflareError(ctx.cloudflare, err)
+      : await normalizeProjectGatewayError(ctx.gateway, err);
     await recordUsage({
       id: eventId,
-      projectId: ctx.gateway.projectId,
-      gatewayCredentialId: ctx.gateway.gatewayCredentialId,
+      projectId,
+      ...(ctx.cloudflare
+        ? {
+            cloudflareCredentialId: ctx.cloudflare.cloudflareCredentialId,
+            // cf-ai-req-id ?? cf-ray ?? the message uuid; NULL when no Cloudflare response was read.
+            gatewayRequestId: cloudflareErrorRequestId(err),
+            ...billedErrorCost(ctx.model, err),
+          }
+        : { gatewayCredentialId: ctx.gateway.gatewayCredentialId }),
       keyId: ctx.keyId,
       provider,
       model: ctx.model,

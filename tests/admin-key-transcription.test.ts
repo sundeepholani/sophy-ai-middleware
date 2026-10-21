@@ -85,4 +85,19 @@ describe('transcript processor key configuration', () => {
       }),
     ).toBeNull();
   });
+
+  it('rejects a Workers AI transcript processor even when the catalog does not list it', () => {
+    // `models` has no '@cf/' rows: a registered Clef id and an unregistered
+    // Workers AI id are both rejected from the prefix alone.
+    for (const processor of ['@cf/cloudflare/clef', '@cf/meta/llama-3.1-8b-instruct']) {
+      expect(
+        transcriptProcessorSelectionError({
+          primaryModel: transcription,
+          systemPrompt: 'Summarize.',
+          transcriptProcessorModel: processor,
+          models,
+        }),
+      ).toBe('Transcript processor must be a language model.');
+    }
+  });
 });

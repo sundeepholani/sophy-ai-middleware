@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CLOUDFLARE_MODELS } from '@/lib/gateway/cloudflare-models';
 
 /**
  * The chat and responses surfaces now consult the catalog on every request, so
@@ -36,7 +37,7 @@ describe('fetchCatalog', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(results).toHaveLength(50);
-    expect(results.every((r) => r.length === 1)).toBe(true);
+    expect(results.every((r) => r.length === 1 + CLOUDFLARE_MODELS.length)).toBe(true);
   });
 
   it('serves the memo without re-fetching inside the TTL', async () => {
@@ -67,7 +68,7 @@ describe('fetchCatalog', () => {
     // Expire the memo, then break the endpoint.
     vi.setSystemTime(Date.now() + 61 * 60 * 1000);
     fail = true;
-    await expect(mod.listAllModels()).resolves.toHaveLength(1);
+    await expect(mod.listAllModels()).resolves.toHaveLength(1 + CLOUDFLARE_MODELS.length);
   });
 
   it('backs off after a failure instead of re-attempting on every request', async () => {
@@ -107,5 +108,17 @@ describe('fetchCatalog', () => {
     await expect(mod.listAllModels()).rejects.toThrow();
     // The classifier converts that throw into a fail-open verdict.
     await expect(mod.languageCapability('openai/gpt-5-mini')).resolves.toBe('unknown');
+  });
+
+  it('classifies Cloudflare ids without touching a never-settling catalog', async () => {
+    vi.resetModules();
+    const fetchMock = vi.fn(() => new Promise<Response>(() => {}));
+    vi.stubGlobal('fetch', fetchMock);
+    const mod = await import('@/lib/gateway/models');
+
+    await expect(
+      mod.catalogCapability('@cf/cloudflare/clef', (m) => m.type === 'evaluation'),
+    ).resolves.toBe('supported');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

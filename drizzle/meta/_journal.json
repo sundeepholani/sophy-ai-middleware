@@ -99,6 +99,13 @@
       "when": 1790084855796,
       "tag": "0013_email_otp_cli_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1792515923950,
+      "tag": "0014_project_cloudflare_credentials",
+      "breakpoints": true
     }
   ]
 }

@@ -9,6 +9,7 @@ import {
   modelHasAllTags,
 } from '@/lib/gateway/capabilities';
 import { CapabilityCheckboxes } from '@/components/admin/capability-checkboxes';
+import { fmtUsd } from '@/components/admin/models-format';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -28,11 +29,6 @@ function fmtTokens(n: number | null): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
   if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
   return String(n);
-}
-function fmtUsd(n: number | null): string {
-  if (n == null) return '—';
-  // $ per 1M tokens; trim trailing zeros (e.g. $3, $0.25, $1.50→$1.5).
-  return `$${n.toFixed(2).replace(/\.?0+$/, '')}`;
 }
 
 const PRIMARY_TAGS = MODEL_CAPABILITIES.map((c) => c.tag);
@@ -138,7 +134,15 @@ export function ModelsExplorer({ models }: { models: AvailableModel[] }) {
             {rows.map((m) => (
               <TableRow key={m.id}>
                 <TableCell>
-                  <div className="font-medium">{m.name}</div>
+                  <div className="flex items-center gap-1.5 font-medium">
+                    {m.name}
+                    {/* Research preview (D9): set only by the Cloudflare registry (Clairic). */}
+                    {m.preview && (
+                      <Badge variant="outline" className="text-xs font-normal">
+                        Preview
+                      </Badge>
+                    )}
+                  </div>
                   <div className="font-mono text-xs text-muted-foreground">{m.id}</div>
                 </TableCell>
                 <TableCell className="text-sm text-muted-foreground">{m.provider}</TableCell>

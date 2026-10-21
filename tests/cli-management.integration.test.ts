@@ -10,7 +10,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as schema from '@/db/schema';
-import previousSnapshot from '../drizzle/meta/0012_snapshot.json';
+import previousSnapshot from '../drizzle/meta/0013_snapshot.json';
 
 const fixture = vi.hoisted(() => ({ db: undefined as unknown }));
 // The client facade points to a real, isolated PostgreSQL connection. Queries,
@@ -25,9 +25,21 @@ vi.mock('@/lib/gateway/models', async (original) => ({
   ...await original<typeof import('@/lib/gateway/models')>(),
   listAllModels: async () => [],
 }));
+import { APICallError } from 'ai';
 import { dispatchCliOperation } from '@/lib/admin/cli-operations';
+import { cliErrorResponse } from '@/lib/admin/cli-http';
 import { withCliIdentity } from '@/lib/auth/cli-session';
 import { issueKey, verifyKey } from '@/lib/auth/api-key';
+import { costUsedThisMonth } from '@/lib/counters';
+import { connectProjectCloudflare, disconnectProjectCloudflare } from '@/app/admin/project-actions';
+import {
+  getProjectCloudflareSummary,
+  getProjectGatewaySummary,
+  redactProjectCloudflareSummary,
+} from '@/lib/projects/repository';
+import { normalizeProjectCloudflareError, resolveProjectCloudflare } from '@/lib/gateway/cloudflare-provider';
+import { cloudflareRunUrlForLogs, type CloudflareErrorInfo } from '@/lib/gateway/cloudflare-call';
+import { ProjectCloudflareUnavailableError } from '@/lib/gateway/project-provider';
 
 const url = process.env.SOPHY_TEST_DATABASE_URL;
 const schemaName = `cli_management_${randomUUID().replaceAll('-', '')}`;
@@ -35,6 +47,7 @@ const tableNames = [
   'users', 'projects', 'project_memberships', 'project_invitations',
   'project_gateway_credentials', 'project_settings', 'knowledgebases',
   'kb_documents', 'api_keys', 'eval_runs', 'audit_log', 'usage_events', 'eval_samples',
+  'login_challenges', 'cli_sessions',
 ];
 let pool: Pool;
 let db: ReturnType<typeof drizzle<typeof schema>>;
@@ -68,6 +81,87 @@ async function keyRecord(id: string) {
   return key;
 }
 
+/** drizzle-orm 0.45 wraps driver errors in DrizzleQueryError; the pg error is `.cause`. */
+async function dbError(run: Promise<unknown>): Promise<{ code?: string; constraint?: string }> {
+  try { await run; } catch (error) {
+    return ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
+  }
+  throw new Error('expected the database to reject the statement');
+}
+
+const CF_ACCOUNT = '0123456789abcdef0123456789abcdef';
+async function cloudflareRow(projectId: string, creator: string,
+  overrides: Partial<typeof schema.projectCloudflareCredentials.$inferInsert> = {}) {
+  const [row] = await db.insert(schema.projectCloudflareCredentials).values({
+    projectId, accountId: CF_ACCOUNT, lifecycle: 'available', health: 'healthy',
+    encryptedSecret: 'synthetic-ciphertext', encryptionNonce: 'synthetic-nonce', encryptionTag: 'synthetic-tag',
+    encryptionKeyVersion: 'test', secretFingerprint: randomUUID(), secretLastFour: 'abcd', createdByUserId: creator,
+    ...overrides,
+  }).returning();
+  return row;
+}
+const RETIRED_ENVELOPE = {
+  lifecycle: 'replaced', encryptedSecret: null, encryptionNonce: null, encryptionTag: null,
+} as const;
+
+const CF_TOKEN_ONE = 'cf_integration_token_one_0001';
+const CF_TOKEN_TWO = 'cf_integration_token_two_0002';
+
+/** Run a server action as `user`, exactly as the CLI scopes its identity. */
+function asUser<T>(user: User, fn: () => Promise<T>): Promise<T> {
+  return withCliIdentity({
+    userId: user.id, email: user.email, sessionId: randomUUID(),
+    expiresAt: new Date(Date.now() + 60_000),
+  }, fn);
+}
+
+/** Cloudflare's free validation call answers ok; the SAME forbidden fetch mock is restored after. */
+async function withValidCloudflare<T>(fn: () => Promise<T>): Promise<T> {
+  const forbidden = globalThis.fetch;
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ success: true, result: [] })));
+  try { return await fn(); } finally { vi.stubGlobal('fetch', forbidden); }
+}
+
+function connectCloudflare(user: User, projectId: string, apiToken: string, accountId = CF_ACCOUNT) {
+  return withValidCloudflare(() => asUser(user, () => connectProjectCloudflare({ projectId, accountId, apiToken })));
+}
+
+async function projectRecord(id: string) {
+  const [project] = await db.select().from(schema.projects).where(eq(schema.projects.id, id));
+  return project;
+}
+
+async function credentialRecord(id: string) {
+  const [row] = await db.select().from(schema.projectCloudflareCredentials).where(eq(schema.projectCloudflareCredentials.id, id));
+  return row;
+}
+
+/** A Cloudflare 401 exactly as postCloudflareOnce lifts it. */
+function cloudflare401() {
+  return new APICallError({
+    message: 'Authentication error', url: cloudflareRunUrlForLogs('@cf/cloudflare/clef'), requestBodyValues: {},
+    statusCode: 401, isRetryable: false,
+    data: { provider: 'cloudflare', code: 10000, message: 'Authentication error', requestId: null, neurons: null } satisfies CloudflareErrorInfo,
+  });
+}
+
+// CLI-layer Cloudflare cases. The file's fetch stub forbids every request; a test
+// that lets connect reach it queues a synthetic answer and resets it in a finally.
+const CF_SEARCH_URL = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/models/search?search=clef&per_page=1`;
+const cfOk = () => Promise.resolve(Response.json({ success: true, result: [], errors: [], messages: [] }));
+/** Every Admin-only summary field, as an Editor (or a project with no credential) sees it. */
+const CF_NULLS = {
+  credentialId: null, accountId: null, lifecycle: null, health: null, lastFour: null,
+  connectedAt: null, verifiedAt: null, lastCheckedAt: null, lastFailureCode: null,
+};
+
+/** A directly seeded current Cloudflare credential: the row plus the project's pointer to it. */
+async function seedCloudflare(projectId: string, creator: string) {
+  const row = await cloudflareRow(projectId, creator, { verifiedAt: new Date(), lastCheckedAt: new Date() });
+  await db.update(schema.projects).set({ currentCloudflareCredentialId: row.id }).where(eq(schema.projects.id, projectId));
+  return row;
+}
+
 describe.skipIf(!url)('CLI management on real PostgreSQL', () => {
   beforeAll(async () => {
     const target = new URL(url!);
@@ -75,6 +169,11 @@ describe.skipIf(!url)('CLI management on real PostgreSQL', () => {
       throw new Error('Management integration tests require a local synthetic sophy_test database');
     }
     vi.stubEnv('KEY_HASH_PEPPER', 'synthetic-management-test-pepper');
+    // Project credential crypto (golden values). Stubbed here, never per test: an
+    // afterEach unstub would also drop the pepper that beforeEach's issueKey needs.
+    vi.stubEnv('PROJECT_GATEWAY_ENCRYPTION_KEY', 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=');
+    vi.stubEnv('PROJECT_GATEWAY_ENCRYPTION_KEY_VERSION', 'test-v1');
+    vi.stubEnv('PROJECT_GATEWAY_FINGERPRINT_KEY', 'fingerprint-test-key-material-32-bytes-minimum');
     vi.stubGlobal('fetch', vi.fn(() => { throw new Error('External requests are forbidden in this test'); }));
     const bootstrap = new Pool({ connectionString: url });
     try { await bootstrap.query(`create schema ${q(schemaName)}`); }
@@ -100,12 +199,12 @@ describe.skipIf(!url)('CLI management on real PostgreSQL', () => {
       if (!tableNames.includes(fk.tableTo)) throw new Error(`Missing fixture table for ${fk.name}`);
       await pool.query(`alter table ${q(fk.tableFrom)} add constraint ${q(fk.name)} foreign key (${fk.columnsFrom.map(q).join(',')}) references ${q(fk.tableTo)} (${fk.columnsTo.map(q).join(',')}) on delete ${fk.onDelete}`);
     }
-    const migration = readFileSync(new URL('../drizzle/0013_email_otp_cli_sessions.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../drizzle/0014_project_cloudflare_credentials.sql', import.meta.url), 'utf8');
     await pool.query(migration.replaceAll('"public".', `${q(schemaName)}.`));
   });
 
   beforeEach(async () => {
-    await pool.query(`truncate ${[...tableNames, 'login_challenges', 'cli_sessions'].map(q).join(',')} cascade`);
+    await pool.query(`truncate ${[...tableNames, 'project_cloudflare_credentials'].map(q).join(',')} cascade`);
     [admin, editor, peer, outsider] = await db.insert(schema.users).values(
       ['admin', 'editor', 'peer', 'outsider'].map((name) => ({ email: `${name}@example.test` })),
     ).returning();
@@ -298,5 +397,344 @@ describe.skipIf(!url)('CLI management on real PostgreSQL', () => {
       expect(results[index]).toEqual([expect.objectContaining({ id: viewers[index].id === editor.id ? owned.id : unowned.id })]);
     }
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('allows one available Cloudflare credential per project', async () => {
+    await cloudflareRow(projectA, admin.id);
+    expect(await dbError(cloudflareRow(projectA, admin.id))).toMatchObject({
+      code: '23505', constraint: 'project_cloudflare_credentials_one_available_idx',
+    });
+    await expect(cloudflareRow(projectA, admin.id, { ...RETIRED_ENVELOPE, replacedAt: new Date() }))
+      .resolves.toMatchObject({ projectId: projectA, lifecycle: 'replaced', encryptedSecret: null });
+  });
+
+  it('rejects one available Cloudflare token in two projects', async () => {
+    const secretFingerprint = randomUUID();
+    const first = await cloudflareRow(projectA, admin.id, { secretFingerprint });
+    expect(await dbError(cloudflareRow(projectB, outsider.id, { secretFingerprint }))).toMatchObject({
+      code: '23505', constraint: 'project_cloudflare_credentials_fingerprint_idx',
+    });
+    await db.update(schema.projectCloudflareCredentials)
+      .set({ ...RETIRED_ENVELOPE, replacedAt: new Date() })
+      .where(eq(schema.projectCloudflareCredentials.id, first.id));
+    await expect(cloudflareRow(projectB, outsider.id, { secretFingerprint }))
+      .resolves.toMatchObject({ projectId: projectB, lifecycle: 'available' });
+  });
+
+  it('rejects a cross-project Cloudflare pointer', async () => {
+    const foreignRow = await cloudflareRow(projectB, outsider.id);
+    expect(await dbError(db.update(schema.projects)
+      .set({ currentCloudflareCredentialId: foreignRow.id })
+      .where(eq(schema.projects.id, projectA)))).toMatchObject({
+      code: '23503', constraint: 'projects_current_cloudflare_credential_fk',
+    });
+    // The same pointer is fine on the row's own project.
+    await db.update(schema.projects)
+      .set({ currentCloudflareCredentialId: foreignRow.id })
+      .where(eq(schema.projects.id, projectB));
+  });
+
+  it('rejects a malformed Cloudflare account id', async () => {
+    for (const accountId of ['0123456789ABCDEF0123456789ABCDEF', '0123', '../../workers/scripts']) {
+      expect(await dbError(cloudflareRow(projectA, admin.id, { accountId }))).toMatchObject({
+        code: '23514', constraint: 'project_cloudflare_credentials_account_id_check',
+      });
+    }
+  });
+
+  it('requires the envelope on available rows only', async () => {
+    expect(await dbError(cloudflareRow(projectA, admin.id, { encryptedSecret: null }))).toMatchObject({
+      code: '23514', constraint: 'project_cloudflare_credentials_envelope_check',
+    });
+    expect(await dbError(cloudflareRow(projectA, admin.id, { lifecycle: 'replaced' }))).toMatchObject({
+      code: '23514', constraint: 'project_cloudflare_credentials_envelope_check',
+    });
+  });
+
+  it('attributes a usage row to at most one credential', async () => {
+    const row = await cloudflareRow(projectA, admin.id);
+    const foreignRow = await cloudflareRow(projectB, outsider.id);
+    const [project] = await db.select().from(schema.projects).where(eq(schema.projects.id, projectA));
+    const usage = {
+      projectId: projectA, apiKeyId: owned.id, provider: 'cloudflare', model: '@cf/cloudflare/clef', costUsd: '0.000008',
+    };
+    await expect(db.insert(schema.usageEvents).values({ ...usage, cloudflareCredentialId: row.id }).returning())
+      .resolves.toEqual([expect.objectContaining({ cloudflareCredentialId: row.id, gatewayCredentialId: null, costUsd: '0.000008' })]);
+    expect(await dbError(db.insert(schema.usageEvents).values({
+      ...usage, cloudflareCredentialId: row.id, gatewayCredentialId: project.currentGatewayCredentialId,
+    }))).toMatchObject({ code: '23514', constraint: 'usage_events_single_credential_check' });
+    expect(await dbError(db.insert(schema.usageEvents).values({ ...usage, cloudflareCredentialId: foreignRow.id })))
+      .toMatchObject({ code: '23503', constraint: 'usage_events_cloudflare_credential_fk' });
+  });
+
+  it('adds the usage_events credential constraints without validating existing rows', async () => {
+    // 0014 adds them NOT VALID (every pre-0014 row is NULL in the new column), so applying it
+    // skips two scans of usage_events under its lock. The case above shows new rows are checked.
+    const { rows } = await pool.query(
+      `select conname, convalidated from pg_constraint
+        where conrelid = 'usage_events'::regclass
+          and conname in ('usage_events_cloudflare_credential_fk', 'usage_events_single_credential_check')
+        order by conname`,
+    );
+    expect(rows).toEqual([
+      { conname: 'usage_events_cloudflare_credential_fk', convalidated: false },
+      { conname: 'usage_events_single_credential_check', convalidated: false },
+    ]);
+  });
+
+  it("counts billed error rows toward the key's monthly cap, and only client sources", async () => {
+    const thisMonth = new Date();
+    const lastMonth = new Date(Date.UTC(thisMonth.getUTCFullYear(), thisMonth.getUTCMonth() - 1, 15));
+    const row = { projectId: projectA, apiKeyId: owned.id };
+    await db.insert(schema.usageEvents).values([
+      { ...row, costUsd: '0.500000' },
+      // A billed but unusable Clef/Clairic 2xx (U1) and a transcription whose processor failed
+      // after paid speech-to-text are error rows that still cost the client.
+      { ...row, status: 'error' as const, costUsd: '0.250000' },
+      { ...row, source: 'transcript_processor' as const, status: 'error' as const, costUsd: '0.125000' },
+      { ...row, status: 'validation_failed' as const, costUsd: '0.062500' },
+      // Sophy-initiated spend and other months never count.
+      { ...row, source: 'eval_judge' as const, costUsd: '1.000000' },
+      { ...row, source: 'kb_query' as const, costUsd: '2.000000' },
+      { ...row, costUsd: '4.000000', createdAt: lastMonth },
+      { projectId: projectA, apiKeyId: unowned.id, costUsd: '8.000000' },
+    ]);
+    await expect(costUsedThisMonth(owned.id)).resolves.toBe(0.9375);
+  });
+
+  it('connects, rotates and disconnects a Cloudflare credential', async () => {
+    await expect(connectCloudflare(admin, projectA, CF_TOKEN_ONE, ' 0123456789ABCDEF0123456789ABCDEF '))
+      .resolves.toEqual({ ok: true });
+    const connected = await projectRecord(projectA);
+    expect(connected.cloudflareCredentialRevision).toBe(1);
+    const rowA = await credentialRecord(connected.currentCloudflareCredentialId!);
+    expect(rowA).toMatchObject({
+      projectId: projectA, accountId: CF_ACCOUNT, lifecycle: 'available', health: 'healthy',
+      encryptionKeyVersion: 'test-v1', secretLastFour: '0001', createdByUserId: admin.id, lastFailureCode: null,
+    });
+    expect(rowA.verifiedAt).toBeInstanceOf(Date);
+    for (const part of [rowA.encryptedSecret, rowA.encryptionNonce, rowA.encryptionTag]) expect(part).toEqual(expect.any(String));
+    expect(rowA.encryptedSecret).not.toContain(CF_TOKEN_ONE);
+    const ready = await getProjectCloudflareSummary(projectA);
+    expect(ready).toMatchObject({ state: 'ready', isReady: true, credentialId: rowA.id, accountId: CF_ACCOUNT, lastFour: '0001' });
+    expect(redactProjectCloudflareSummary(ready, 'editor')).toEqual({
+      projectId: projectA, state: 'ready', isReady: true, credentialId: null, accountId: null, lifecycle: null,
+      health: null, lastFour: null, connectedAt: null, verifiedAt: null, lastCheckedAt: null, lastFailureCode: null,
+    });
+
+    await expect(connectCloudflare(admin, projectA, CF_TOKEN_TWO)).resolves.toEqual({ ok: true });
+    const rotated = await projectRecord(projectA);
+    expect(rotated.cloudflareCredentialRevision).toBe(2);
+    const rowB = await credentialRecord(rotated.currentCloudflareCredentialId!);
+    expect(rowB.id).not.toBe(rowA.id);
+    expect(rowB).toMatchObject({ lifecycle: 'available', health: 'healthy', secretLastFour: '0002' });
+    expect(await credentialRecord(rowA.id)).toMatchObject({ ...RETIRED_ENVELOPE, replacedAt: expect.any(Date) });
+
+    await expect(asUser(admin, () => disconnectProjectCloudflare({ projectId: projectA }))).resolves.toEqual({ ok: true });
+    expect(await projectRecord(projectA)).toMatchObject({ currentCloudflareCredentialId: null, cloudflareCredentialRevision: 3 });
+    expect(await credentialRecord(rowB.id)).toMatchObject({
+      lifecycle: 'disconnected', encryptedSecret: null, encryptionNonce: null, encryptionTag: null,
+      disconnectedAt: expect.any(Date),
+    });
+    await expect(resolveProjectCloudflare(projectA)).rejects.toMatchObject({ provider: 'cloudflare', reason: 'credential_missing' });
+
+    // Idempotent: nothing connected, still audited.
+    await expect(asUser(admin, () => disconnectProjectCloudflare({ projectId: projectA }))).resolves.toEqual({ ok: true });
+    const audits = await db.select().from(schema.auditLog)
+      .where(eq(schema.auditLog.projectId, projectA)).orderBy(schema.auditLog.createdAt);
+    expect(audits.map((entry) => [entry.actor, entry.action, entry.target, entry.after])).toEqual([
+      [admin.email, 'cloudflare.connect', rowA.id, { lastFour: '0001', fingerprint: rowA.secretFingerprint }],
+      [admin.email, 'cloudflare.rotate', rowB.id, { lastFour: '0002', fingerprint: rowB.secretFingerprint }],
+      [admin.email, 'cloudflare.disconnect', rowB.id, { lastFour: '0002', fingerprint: rowB.secretFingerprint }],
+      [admin.email, 'cloudflare.disconnect', projectA, null],
+    ]);
+    for (const secret of [CF_TOKEN_ONE, CF_TOKEN_TWO, CF_ACCOUNT]) expect(JSON.stringify(audits)).not.toContain(secret);
+  });
+
+  it('a 401 that lands after a rotation invalidates only the old row', async () => {
+    await connectCloudflare(admin, projectA, CF_TOKEN_ONE);
+    const snapshotA = await resolveProjectCloudflare(projectA);
+    await connectCloudflare(admin, projectA, CF_TOKEN_TWO);
+    const rowB = (await projectRecord(projectA)).currentCloudflareCredentialId!;
+    expect(rowB).not.toBe(snapshotA.cloudflareCredentialId);
+
+    // The in-flight call made with row A's snapshot fails only now, after the rotation.
+    const late = cloudflare401();
+    const normalized = await normalizeProjectCloudflareError(snapshotA, late);
+    expect(normalized).toBeInstanceOf(ProjectCloudflareUnavailableError);
+    expect(normalized).toMatchObject({
+      provider: 'cloudflare', reason: 'credential_invalid', cloudflareCredentialId: snapshotA.cloudflareCredentialId, cause: late,
+    });
+    expect(await credentialRecord(snapshotA.cloudflareCredentialId)).toMatchObject({
+      health: 'invalid', lastFailureCode: 'cloudflare_authentication_failed', lifecycle: 'replaced',
+    });
+    expect(await credentialRecord(rowB)).toMatchObject({ health: 'healthy', lifecycle: 'available', lastFailureCode: null });
+    expect((await projectRecord(projectA)).currentCloudflareCredentialId).toBe(rowB);
+    expect((await resolveProjectCloudflare(projectA)).cloudflareCredentialId).toBe(rowB);
+
+    // The same failure on a fresh snapshot of the current row takes it out of service.
+    const snapshotB = await resolveProjectCloudflare(projectA);
+    await normalizeProjectCloudflareError(snapshotB, cloudflare401());
+    expect(await credentialRecord(rowB)).toMatchObject({ health: 'invalid', lastFailureCode: 'cloudflare_authentication_failed' });
+    await expect(resolveProjectCloudflare(projectA)).rejects.toMatchObject({
+      provider: 'cloudflare', reason: 'credential_invalid', cloudflareCredentialId: rowB,
+    });
+    expect(await getProjectCloudflareSummary(projectA)).toMatchObject({ state: 'attention', isReady: false, health: 'invalid' });
+  });
+
+  it('refuses a token another project already uses', async () => {
+    await expect(connectCloudflare(admin, projectA, CF_TOKEN_ONE)).resolves.toEqual({ ok: true });
+    // The real DrizzleQueryError → pg 23505 cause chain (CCR-1), not a hand-built one.
+    await expect(connectCloudflare(outsider, projectB, CF_TOKEN_ONE)).resolves.toEqual({ ok: false, code: 'cloudflare_in_use' });
+    expect(await projectRecord(projectB)).toMatchObject({ currentCloudflareCredentialId: null, cloudflareCredentialRevision: 0 });
+    expect(await db.select().from(schema.projectCloudflareCredentials)
+      .where(eq(schema.projectCloudflareCredentials.projectId, projectB))).toHaveLength(0);
+    expect(await db.select().from(schema.auditLog).where(eq(schema.auditLog.projectId, projectB))).toHaveLength(0);
+
+    // Rotating projectA to the same token works: the old row leaves 'available' first.
+    await expect(connectCloudflare(admin, projectA, CF_TOKEN_ONE)).resolves.toEqual({ ok: true });
+    const rows = await db.select().from(schema.projectCloudflareCredentials)
+      .where(eq(schema.projectCloudflareCredentials.projectId, projectA));
+    expect(rows.map((row) => row.lifecycle).sort()).toEqual(['available', 'replaced']);
+    expect(new Set(rows.map((row) => row.secretFingerprint)).size).toBe(1);
+  });
+
+  it('never consults the Vercel credential', async () => {
+    await db.update(schema.projectGatewayCredentials).set({ health: 'invalid' })
+      .where(eq(schema.projectGatewayCredentials.projectId, projectA));
+    await expect(connectCloudflare(admin, projectA, CF_TOKEN_ONE)).resolves.toEqual({ ok: true });
+
+    await expect(resolveProjectCloudflare(projectA)).resolves.toMatchObject({ projectId: projectA, accountId: CF_ACCOUNT });
+    expect(await getProjectCloudflareSummary(projectA)).toMatchObject({ state: 'ready', isReady: true });
+    expect(await getProjectGatewaySummary(projectA)).toMatchObject({ state: 'attention', isReady: false });
+  });
+
+  it('keeps connect and disconnect Admin-only', async () => {
+    await expect(connectCloudflare(editor, projectA, CF_TOKEN_ONE)).rejects.toThrow('forbidden');
+    await expect(asUser(editor, () => disconnectProjectCloudflare({ projectId: projectA }))).rejects.toThrow('forbidden');
+    expect(await db.select().from(schema.projectCloudflareCredentials)).toHaveLength(0);
+    expect(await projectRecord(projectA)).toMatchObject({ currentCloudflareCredentialId: null, cloudflareCredentialRevision: 0 });
+  });
+
+  it('shows Cloudflare credential metadata to Admins and only readiness to Editors through the CLI', async () => {
+    const row = await seedCloudflare(projectA, admin.id);
+    expect(await call(admin, 'cloudflare.status')).toMatchObject({
+      projectId: projectA, state: 'ready', isReady: true, credentialId: row.id, accountId: CF_ACCOUNT,
+      lifecycle: 'available', health: 'healthy', lastFour: 'abcd',
+    });
+    expect(await call(editor, 'cloudflare.status')).toEqual({ projectId: projectA, state: 'ready', isReady: true, ...CF_NULLS });
+    // admin is only an Editor of project B, which has no Cloudflare credential.
+    expect(await call(admin, 'cloudflare.status', {}, projectB)).toEqual({ projectId: projectB, state: 'not_connected', isReady: false, ...CF_NULLS });
+    await expect(call(outsider, 'cloudflare.status')).rejects.toThrow('forbidden');
+    await db.update(schema.projectCloudflareCredentials)
+      .set({ health: 'invalid', lastFailureCode: 'cloudflare_authentication_failed' })
+      .where(eq(schema.projectCloudflareCredentials.id, row.id));
+    expect(await call(editor, 'cloudflare.status')).toEqual({ projectId: projectA, state: 'attention', isReady: false, ...CF_NULLS });
+    expect(await call(admin, 'cloudflare.status')).toMatchObject({
+      state: 'attention', isReady: false, health: 'invalid', lastFailureCode: 'cloudflare_authentication_failed',
+    });
+  });
+
+  it('keeps Cloudflare connect and disconnect Admin-only through the CLI', async () => {
+    const row = await seedCloudflare(projectA, admin.id);
+    await expect(call(editor, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_ONE })).rejects.toThrow('forbidden');
+    await expect(call(editor, 'cloudflare.disconnect')).rejects.toThrow('forbidden');
+    // admin is only an Editor of project B.
+    await expect(call(admin, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_ONE }, projectB)).rejects.toThrow('forbidden');
+    await expect(call(admin, 'cloudflare.disconnect', {}, projectB)).rejects.toThrow('forbidden');
+    expect(await db.select().from(schema.projectCloudflareCredentials)).toEqual([expect.objectContaining({ id: row.id, lifecycle: 'available' })]);
+    expect((await projectRecord(projectA)).currentCloudflareCredentialId).toBe(row.id);
+    expect(await db.select().from(schema.auditLog)).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('saves nothing through the CLI when the account id is malformed, the token is rejected, or Cloudflare cannot be reached', async () => {
+    const fetchMock = vi.mocked(fetch);
+    try {
+      await expect(call(admin, 'cloudflare.connect', { accountId: 'not-a-cloudflare-account-id', apiToken: CF_TOKEN_ONE }))
+        .rejects.toThrow('cloudflare_invalid_account_id');
+      expect(fetchMock).not.toHaveBeenCalled(); // normalised before any network call
+      // The file's forbid-all stub throws synchronously; validateCloudflareCredential never throws.
+      const error = await call(admin, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_ONE }).catch((e: unknown) => e);
+      expect((error as Error).message).toBe('cloudflare_unreachable');
+      const response = cliErrorResponse(error);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: { code: 'cloudflare_unreachable', message: 'Cloudflare could not be reached to validate the credential. Try again.' } });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0][0])).toBe(CF_SEARCH_URL);
+      // A real-world network failure (a rejected promise) maps the same way.
+      fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
+      await expect(call(admin, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_ONE })).rejects.toThrow('cloudflare_unreachable');
+      // Cloudflare refusing the token is cloudflare_invalid (anchored: the account-id code shares the prefix).
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 401 }));
+      await expect(call(admin, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_ONE })).rejects.toThrow(/^cloudflare_invalid$/);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(await db.select().from(schema.projectCloudflareCredentials)).toEqual([]);
+      expect(await projectRecord(projectA)).toMatchObject({ currentCloudflareCredentialId: null, cloudflareCredentialRevision: 0 });
+      expect(await db.select().from(schema.auditLog)).toEqual([]);
+    } finally {
+      fetchMock.mockReset();
+    }
+  });
+
+  it('connects, rotates and disconnects Cloudflare through the CLI without storing or auditing the token', async () => {
+    // The crypto env (key version test-v1) is stubbed once in beforeAll.
+    const fetchMock = vi.mocked(fetch);
+    try {
+      fetchMock.mockImplementationOnce(cfOk);
+      expect(await call(admin, 'cloudflare.connect', { accountId: ` ${CF_ACCOUNT.toUpperCase()} `, apiToken: ` ${CF_TOKEN_ONE} ` })).toEqual({ ok: true });
+      const [first] = await db.select().from(schema.projectCloudflareCredentials);
+      expect(first).toMatchObject({
+        projectId: projectA, accountId: CF_ACCOUNT, lifecycle: 'available', health: 'healthy',
+        secretLastFour: '0001', encryptionKeyVersion: 'test-v1', createdByUserId: admin.id,
+      });
+      expect(first.secretFingerprint).toMatch(/^[0-9a-f]{64}$/);
+      expect(await projectRecord(projectA)).toMatchObject({ currentCloudflareCredentialId: first.id, cloudflareCredentialRevision: 1 });
+      expect(await call(editor, 'cloudflare.status')).toEqual({ projectId: projectA, state: 'ready', isReady: true, ...CF_NULLS });
+
+      fetchMock.mockImplementationOnce(cfOk); // rotate
+      expect(await call(admin, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_TWO })).toEqual({ ok: true });
+      const rows = await db.select().from(schema.projectCloudflareCredentials);
+      expect(rows).toHaveLength(2);
+      const replaced = rows.find((row) => row.id === first.id)!;
+      const current = rows.find((row) => row.id !== first.id)!;
+      expect(replaced).toMatchObject({ lifecycle: 'replaced', encryptedSecret: null, encryptionNonce: null, encryptionTag: null });
+      expect(replaced.replacedAt).toBeInstanceOf(Date);
+      expect(current).toMatchObject({ lifecycle: 'available', secretLastFour: '0002' });
+
+      fetchMock.mockImplementationOnce(cfOk); // the same token on project B, whose Admin is outsider
+      const inUse = await call(outsider, 'cloudflare.connect', { accountId: CF_ACCOUNT, apiToken: CF_TOKEN_TWO }, projectB).catch((e: unknown) => e);
+      expect((inUse as Error).message).toBe('cloudflare_in_use');
+      const response = cliErrorResponse(inUse);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: { code: 'cloudflare_in_use', message: 'This Cloudflare API token is already in use by another project.' } });
+      expect(await db.select().from(schema.projectCloudflareCredentials).where(eq(schema.projectCloudflareCredentials.projectId, projectB))).toEqual([]);
+      expect(await db.select().from(schema.auditLog).where(eq(schema.auditLog.projectId, projectB))).toEqual([]);
+
+      expect(await call(admin, 'cloudflare.disconnect')).toEqual({ ok: true });
+      const disconnected = await credentialRecord(current.id);
+      expect(disconnected).toMatchObject({ lifecycle: 'disconnected', encryptedSecret: null, encryptionNonce: null, encryptionTag: null });
+      expect(disconnected.disconnectedAt).toBeInstanceOf(Date);
+      expect(await projectRecord(projectA)).toMatchObject({ currentCloudflareCredentialId: null, cloudflareCredentialRevision: 3 });
+      expect(await call(admin, 'cloudflare.disconnect')).toEqual({ ok: true }); // idempotent
+      expect(await call(admin, 'cloudflare.status')).toMatchObject({ state: 'not_connected', isReady: false, credentialId: null });
+
+      const audits = await db.select().from(schema.auditLog).where(eq(schema.auditLog.projectId, projectA));
+      expect(audits.map((entry) => entry.action).sort()).toEqual(['cloudflare.connect', 'cloudflare.disconnect', 'cloudflare.disconnect', 'cloudflare.rotate']);
+      expect(audits).toEqual(expect.arrayContaining([
+        expect.objectContaining({ action: 'cloudflare.connect', actor: admin.email, target: first.id, after: { lastFour: '0001', fingerprint: first.secretFingerprint } }),
+        expect.objectContaining({ action: 'cloudflare.rotate', target: current.id, after: { lastFour: '0002', fingerprint: current.secretFingerprint } }),
+        expect.objectContaining({ action: 'cloudflare.disconnect', target: current.id, after: { lastFour: '0002', fingerprint: current.secretFingerprint } }),
+        expect.objectContaining({ action: 'cloudflare.disconnect', target: projectA, after: null }),
+      ]));
+      const stored = JSON.stringify([await db.select().from(schema.projectCloudflareCredentials), await db.select().from(schema.auditLog)]);
+      for (const secret of [CF_TOKEN_ONE, CF_TOKEN_TWO]) expect(stored).not.toContain(secret);
+
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      for (const [url] of fetchMock.mock.calls) expect(String(url)).toBe(CF_SEARCH_URL);
+      expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('authorization')).toBe(`Bearer ${CF_TOKEN_ONE}`);
+    } finally {
+      fetchMock.mockReset();
+    }
   });
 });

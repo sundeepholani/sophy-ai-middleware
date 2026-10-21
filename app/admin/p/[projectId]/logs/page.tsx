@@ -48,8 +48,8 @@ export default async function LogsPage({
       <div>
         <h1 className="text-2xl font-semibold">Request logs</h1>
         <p className="text-sm text-muted-foreground">
-          The most recent client requests and component Gateway calls in {viewer.projectName},
-          including transcript processing and Sophy’s eval and knowledgebase work.
+          The most recent client requests and component AI calls in {viewer.projectName}, including
+          transcript processing and Sophy’s eval and knowledgebase work.
         </p>
       </div>
 

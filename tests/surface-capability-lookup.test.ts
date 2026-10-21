@@ -99,5 +99,24 @@ for (const s of SURFACES) {
       await vi.advanceTimersByTimeAsync(1_500);
       await expect(verdict).resolves.toBe('unknown');
     });
+
+    it('classifies @cf/ ids from the registry, never the catalog', async () => {
+      vi.resetModules();
+      // A catalog request that never settles: only the registry can answer.
+      const fetchMock = vi.fn(() => new Promise<Response>(() => {}));
+      vi.stubGlobal('fetch', fetchMock);
+      const guard = await s.load();
+
+      // Fake timers and no advance: a verdict that needed the 1.5s race would never resolve.
+      vi.useFakeTimers();
+      const isAssessments = s.name === 'assessments';
+      await expect(guard('@cf/cloudflare/clef')).resolves.toBe(isAssessments ? s.yes : s.no);
+      await expect(guard('@cf/cloudflare/nope')).resolves.toBe(s.no);
+      if (isAssessments) {
+        await expect(guard('@cf/cloudflare/clairic')).resolves.toBe('not_assessment');
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 }

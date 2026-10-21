@@ -5,7 +5,9 @@
  *
  * Capabilities come from the AI Gateway's per-model `tags` (e.g. "vision",
  * "tool-use") — see lib/gateway/models.ts. `vision` means image *analysis*
- * (image input), distinct from `image-generation` (image output).
+ * (image input), distinct from `image-generation` (image output). Cloudflare
+ * Workers AI models (registry) carry the tags `evaluation`/`extraction` and
+ * `vision`.
  */
 export interface AvailableModel {
   id: string;
@@ -21,6 +23,8 @@ export interface AvailableModel {
   description: string | null;
   /** Raw capability tags from the gateway. */
   tags: string[];
+  /** True for research-preview models. Set only by the Cloudflare registry (lib/gateway/cloudflare-models.ts). */
+  preview?: boolean;
 }
 
 /** The capabilities operators can filter on (a curated subset of the gateway tags). */
@@ -36,6 +40,7 @@ export const MODEL_CAPABILITIES = [
     label: 'Evaluation',
     hint: 'Answers structured questions about a state',
   },
+  { tag: 'extraction', label: 'Extraction', hint: 'Extracts typed values from text and images' },
 ] as const;
 
 /** Friendly label for any tag (falls back to the raw tag, title-cased-ish). */

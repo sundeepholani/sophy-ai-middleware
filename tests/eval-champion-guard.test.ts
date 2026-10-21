@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { evalChampionBlocked } from '@/lib/admin/keys';
 import type { AvailableModel } from '@/lib/gateway/capabilities';
+import { CLOUDFLARE_MODELS } from '@/lib/gateway/cloudflare-models';
 
 /**
  * Champion-vs-challenger eval compares text outputs, so only a language key can
@@ -63,5 +64,19 @@ describe('evalChampionBlocked', () => {
   it('fails open when the catalog is unavailable', () => {
     // Both callers pass [] after a catalog fetch failure.
     expect(evalChampionBlocked('openai/gpt-4o-transcribe', [])).toBe(false);
+  });
+
+  it('blocks every Workers AI champion, with or without a catalog', () => {
+    // Clef serves /v1/evaluate and Clairic /v1/extract; neither generates text.
+    // The registry classifies them, so a catalog outage ([]) must not reopen them.
+    expect(CLOUDFLARE_MODELS.length).toBeGreaterThan(0);
+    for (const { id } of CLOUDFLARE_MODELS) {
+      expect(evalChampionBlocked(id, CATALOG)).toBe(true);
+      expect(evalChampionBlocked(id, [])).toBe(true);
+    }
+  });
+
+  it('fails closed for an unregistered Workers AI id', () => {
+    expect(evalChampionBlocked('@cf/meta/llama-3.1-8b-instruct', [])).toBe(true);
   });
 });

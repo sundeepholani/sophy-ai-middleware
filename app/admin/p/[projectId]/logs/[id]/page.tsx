@@ -34,6 +34,14 @@ export default async function LogDetailPage({
 
   const { event, content } = detail;
   const messages = Array.isArray(content?.request) ? (content!.request as InboundMessage[]) : null;
+  // The typed native surfaces log structured input, not a message array: /v1/evaluate
+  // ('assessment') logs a state and questions, /v1/extract ('extraction') a state and fields.
+  const inboundTitle =
+    content?.surface === 'assessment'
+      ? 'Inbound — state & questions'
+      : content?.surface === 'extraction'
+        ? 'Inbound — state & fields'
+        : 'Inbound — messages';
 
   // Build the metadata line from whatever is present so absent parts (e.g. a
   // challenger call has no token counts) never leave an orphan separator.
@@ -135,7 +143,7 @@ export default async function LogDetailPage({
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Inbound — messages</CardTitle>
+              <CardTitle className="text-base">{inboundTitle}</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               {messages ? (

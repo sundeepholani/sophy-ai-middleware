@@ -121,10 +121,15 @@ test('nested key configuration and partial updates reach the management API unch
 test('management commands map IDs and named flags to the server contract', async (t) => {
   const f = await fixture(t);
   await f.session({ projectId: 'project-1' });
+  const tokenFile = join(f.directory, 'cloudflare-token.json');
+  await writeFile(tokenFile, JSON.stringify({ apiToken: 'synthetic-cloudflare-token' }));
   const cases = [
     [['whoami'], 'identity.get', {}, false],
     [['projects', 'list'], 'projects.list', {}, false],
     [['gateway', 'status'], 'gateway.status', {}],
+    [['cloudflare', 'status'], 'cloudflare.status', {}],
+    [['cloudflare', 'connect', '--account-id', '0123456789abcdef0123456789abcdef', '--data', `@${tokenFile}`], 'cloudflare.connect', { accountId: '0123456789abcdef0123456789abcdef', apiToken: 'synthetic-cloudflare-token' }],
+    [['cloudflare', 'disconnect', '--yes'], 'cloudflare.disconnect', {}],
     [['keys', 'get', 'key-1'], 'keys.get', { id: 'key-1' }],
     [['evals', 'get', 'run-1'], 'evals.get', { runId: 'run-1' }],
     [['evals', 'start', 'key-1', '--challenger-model', 'vendor/model'], 'evals.start', { apiKeyId: 'key-1', challengerModel: 'vendor/model', targetN: 100 }],
@@ -152,6 +157,7 @@ test('destructive commands and explicit evaluation stops require confirmation be
     ['keys', 'update', 'key-1', '--stop-running-eval'],
     ['evals', 'bulk-start', '--data', '{"ids":["key-1"],"challengerModel":"model","stopEvalIds":["key-1"]}'],
     ['gateway', 'disconnect'],
+    ['cloudflare', 'disconnect'],
   ]) {
     const result = await cli(f, args);
     assert.equal(result.code, 1);
@@ -160,6 +166,8 @@ test('destructive commands and explicit evaluation stops require confirmation be
   assert.equal(f.calls.length, 0);
   success(await cli(f, ['keys', 'rotate', 'key-1', '--yes']));
   assert.equal(f.calls.at(-1).json.operation, 'keys.rotate');
+  success(await cli(f, ['cloudflare', 'disconnect', '--yes']));
+  assert.deepEqual(f.calls.at(-1).json, { operation: 'cloudflare.disconnect', projectId: 'project-1', input: {} });
 });
 
 test('sessions and pending challenges cannot cross server origins', async (t) => {
@@ -252,6 +260,77 @@ test('gateway credentials must come from a file or stdin, never an inline flag',
   assert.equal(f.calls.length, 0);
   success(await cli(f, ['gateway', 'connect', '--data', '-'], '{"apiKey":"synthetic-secret"}'));
   assert.equal(f.calls[0].json.input.apiKey, 'synthetic-secret');
+});
+
+test('Cloudflare API tokens come only from a file or stdin and the CLI never prints them', async (t) => {
+  const secret = 'synthetic-cloudflare-secret';
+  const account = '0123456789abcdef0123456789abcdef';
+  const f = await fixture(t, (call) => (call.json?.operation === 'cloudflare.connect' ? { ok: true, data: { ok: true } } : undefined));
+  await f.session({ projectId: 'project-1' });
+  const inline = await cli(f, ['cloudflare', 'connect', '--data', JSON.stringify({ accountId: account, apiToken: secret })]);
+  assert.equal(inline.code, 1);
+  assert.match(inline.stderr, /Read credential secrets with --data @file or --data -/);
+  assert.equal(inline.stderr.includes(secret), false);
+  for (const args of [
+    ['cloudflare', 'connect', '--account-id', account, '--api-token', secret],
+    ['cloudflare', 'connect', '--account-id', account, `--api-token=${secret}`],
+  ]) {
+    const flag = await cli(f, args);
+    assert.equal(flag.code, 1);
+    assert.match(flag.stderr, /Unknown option --api-token/);
+    assert.equal(flag.stderr.includes(secret), false);
+  }
+  const missing = await cli(f, ['cloudflare', 'connect', '--account-id', account]);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /Missing apiToken/);
+  assert.equal(f.calls.length, 0);
+
+  const piped = await cli(f, ['cloudflare', 'connect', '--data', '-', '--json'], JSON.stringify({ accountId: account, apiToken: secret }));
+  assert.deepEqual(success(piped), { ok: true });
+  assert.equal(piped.stdout.includes(secret), false);
+  assert.equal(piped.stderr, '');
+  assert.deepEqual(f.calls[0].json, { operation: 'cloudflare.connect', projectId: 'project-1', input: { accountId: account, apiToken: secret } });
+  assert.equal(f.calls[0].headers.authorization, `Bearer ${token}`);
+
+  const file = join(f.directory, 'cloudflare.json');
+  await writeFile(file, JSON.stringify({ apiToken: secret }));
+  success(await cli(f, ['cloudflare', 'connect', '--account-id', account, '--data', `@${file}`]));
+  assert.deepEqual(f.calls[1].json.input, { accountId: account, apiToken: secret });
+  const twice = await cli(f, ['cloudflare', 'connect', '--account-id', account, '--data', '-'], JSON.stringify({ accountId: account, apiToken: secret }));
+  assert.equal(twice.code, 1);
+  assert.match(twice.stderr, /Supply accountId only once/);
+  assert.equal(f.calls.length, 2);
+});
+
+test('Cloudflare help documents file-or-stdin token input and needs no session', async (t) => {
+  const f = await fixture(t);
+  const connect = await cli(f, ['cloudflare', 'connect', '--help']);
+  assert.equal(connect.code, 0);
+  assert.match(connect.stdout, /^sophy cloudflare connect --project <project-id>$/m);
+  assert.match(connect.stdout, /--account-id string \(required\)/);
+  assert.match(connect.stdout, /apiToken: secret \(required\) — JSON field through --data @file or --data -/);
+  assert.doesNotMatch(connect.stdout, /--api-token|--yes/);
+  assert.match((await cli(f, ['cloudflare', 'disconnect', '--help'])).stdout, /--yes\s+Confirm this action/);
+  const group = await cli(f, ['cloudflare', '--help']);
+  assert.equal(group.code, 0);
+  for (const name of ['cloudflare status', 'cloudflare connect', 'cloudflare disconnect']) assert.match(group.stdout, new RegExp(`^  ${name} `, 'm'));
+  const top = await cli(f, ['--help']);
+  assert.match(top.stdout, /OTP codes and credential secrets are never accepted as command-line flags\./);
+  assert.doesNotMatch(top.stdout, /gateway secrets/);
+  assert.equal(f.calls.length, 0);
+});
+
+test('a Cloudflare validation outage stays machine readable, is sent once, and never echoes the token', async (t) => {
+  const secret = 'synthetic-cloudflare-secret';
+  const message = 'Cloudflare could not be reached to validate the credential. Try again.';
+  const f = await fixture(t, (_call, res) => { res.statusCode = 503; return { error: { code: 'cloudflare_unreachable', message } }; });
+  await f.session({ projectId: 'project-1' });
+  const result = await cli(f, ['cloudflare', 'connect', '--data', '-', '--json'], JSON.stringify({ accountId: '0123456789abcdef0123456789abcdef', apiToken: secret }));
+  assert.equal(result.code, 1);
+  assert.deepEqual(JSON.parse(result.stderr), { error: { code: 'cloudflare_unreachable', message } });
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr.includes(secret), false);
+  assert.equal(f.calls.length, 1); // transport.mjs never retries
 });
 
 test('logout revokes the current token before removing its local session', async (t) => {

@@ -104,6 +104,7 @@ const SURFACES = [
   { method: 'POST', path: '/audio/transcriptions', label: 'Raw or policy-processed text' },
   { method: 'POST', path: '/embeddings', label: 'Float or base64 vectors' },
   { method: 'POST', path: '/evaluate', label: 'Scored model judgements' },
+  { method: 'POST', path: '/extract', label: 'Typed extraction (preview)' },
   { method: 'POST', path: '/images/generations', label: 'Inline image output' },
   { method: 'POST', path: '/files', label: 'Key-scoped uploads' },
   { method: 'GET', path: '/models', label: 'The key’s bound model' },
@@ -113,7 +114,7 @@ const FEATURES: { icon: typeof Plug; title: string; body: string }[] = [
   {
     icon: Plug,
     title: 'A familiar API surface',
-    body: 'Use supported OpenAI SDK methods for Chat Completions, Responses, audio transcription, embeddings, image generation, models, and files, plus a native route for evaluation models, including image input for TypeSafe Jev.',
+    body: 'Use supported OpenAI SDK methods for Chat Completions, Responses, audio transcription, embeddings, image generation, models, and files, plus native routes for evaluation models, with image input for TypeSafe Jev and Cloudflare Clef, and for typed extraction with Cloudflare Clairic (preview).',
   },
   {
     icon: KeyRound,
@@ -138,7 +139,7 @@ const FEATURES: { icon: typeof Plug; title: string; body: string }[] = [
   {
     icon: Boxes,
     title: 'A searchable model catalog',
-    body: 'Compare supported language, transcription, image, embedding, and evaluation models by provider, capability, context window, and estimated pricing.',
+    body: 'Compare supported language, transcription, image, embedding, evaluation, and extraction models by provider, capability, context window, and estimated pricing.',
   },
   {
     icon: Gauge,
@@ -166,7 +167,7 @@ const OPERATIONS: { icon: typeof FlaskConical; title: string; body: string }[] =
   {
     icon: UsersRound,
     title: 'Project-isolated teams and spend',
-    body: 'Give one identity an Admin or Editor role per project. Each project keeps its own members, Sophy keys, knowledgebases, telemetry, and Vercel Gateway credential.',
+    body: 'Give one identity an Admin or Editor role per project. Each project keeps its own members, Sophy keys, knowledgebases, telemetry, and provider credentials: a Vercel AI Gateway key and, optionally, a Cloudflare Workers AI token.',
   },
   {
     icon: RotateCw,
@@ -203,8 +204,8 @@ const PROJECT_FEATURES: { icon: typeof House; title: string; body: string }[] = 
   },
   {
     icon: KeyRound,
-    title: 'Bring a Gateway per project',
-    body: 'Every project connects its own Vercel AI Gateway credential before its Sophy keys can make paid model calls.',
+    title: 'Bring your own provider credentials',
+    body: 'Every project connects its own Vercel AI Gateway credential before it creates Sophy keys, and can add its own Cloudflare Workers AI credential, which alone pays for its Clef and Clairic calls.',
   },
 ];
 
@@ -212,7 +213,7 @@ const STEPS: { n: string; title: string; body: string }[] = [
   {
     n: '1',
     title: 'Connect your project',
-    body: 'A Project Admin adds the project’s Vercel AI Gateway key. Sophy validates it without making a generation call and stores it encrypted.',
+    body: 'A Project Admin adds the project’s Vercel AI Gateway key, plus an optional Cloudflare Workers AI account ID and token for Clef and Clairic. Sophy validates each without running a model and stores it encrypted.',
   },
   {
     n: '2',
@@ -303,16 +304,17 @@ export default function HomePage() {
         <div className="mx-auto grid w-full max-w-7xl items-center gap-12 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:gap-10 lg:px-8 lg:py-28">
           <div className="space-y-6">
             <Badge variant="secondary" className="rounded-full px-3 py-1 text-xs">
-              Multi-project · OpenAI-compatible · Language, audio, image, embedding, and
-              evaluation models
+              Multi-project · OpenAI-compatible · Language, audio, image, embedding, evaluation,
+              and extraction models
             </Badge>
             <h1 className="font-heading text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-6xl">
               One governed API for your AI stack.
             </h1>
             <p className="max-w-xl text-lg text-muted-foreground text-pretty">
               Sophy puts supported models behind project-scoped keys. Each project brings its own
-              Vercel AI Gateway credential while its team governs prompts, models, schemas,
-              knowledge, logging, and limits from the console or CLI.
+              Vercel AI Gateway credential, and optionally its own Cloudflare Workers AI
+              credential, while its team governs prompts, models, schemas, knowledge, logging, and
+              limits from the console or CLI.
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <Link href="/docs" className={cn(buttonVariants({ size: 'lg' }), 'h-11 px-6 text-base')}>
@@ -348,7 +350,7 @@ export default function HomePage() {
         <div className="mx-auto w-full max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <p className="text-sm font-medium text-primary">Eight supported API routes</p>
+              <p className="text-sm font-medium text-primary">Nine supported API routes</p>
               <h2 id="surfaces-title" className="font-heading mt-1 text-2xl font-semibold tracking-tight">
                 One base URL, purpose-built surfaces
               </h2>

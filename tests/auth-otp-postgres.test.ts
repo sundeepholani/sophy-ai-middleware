@@ -1,15 +1,16 @@
 /**
  * Real PostgreSQL locking tests. Opt in with SOPHY_TEST_DATABASE_URL pointing to
  * a localhost database named sophy_test. Each run uses and drops its own schema.
+ * Builds the auth tables from the checked-in 0014 snapshot; irrelevant AI/vector
+ * tables are omitted.
  */
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { Pool } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as schema from '@/db/schema';
-import previousSnapshot from '../drizzle/meta/0012_snapshot.json';
+import schemaSnapshot from '../drizzle/meta/0014_snapshot.json';
 
 const dbRef = vi.hoisted(() => ({ current: undefined as unknown }));
 vi.mock('@/db/client', () => ({ getDb: () => dbRef.current }));
@@ -57,10 +58,13 @@ describe.skipIf(!url)('email OTP and CLI sessions on real PostgreSQL', () => {
     pool = new Pool({ connectionString: url, max: 12, options: `-c search_path=${schemaName}` });
     db = drizzle(pool, { schema });
     dbRef.current = db;
-    const names = ['users', 'projects', 'project_memberships', 'project_settings', 'project_invitations', 'audit_log'];
-    const tables = names.map((name) => (previousSnapshot.tables as unknown as Record<string, SnapshotTable>)[`public.${name}`]);
-    // Use the actual previous schema metadata; irrelevant AI/vector tables are
-    // omitted so these auth tests do not depend on a pgvector installation.
+    const names = [
+      'users', 'projects', 'project_memberships', 'project_settings', 'project_invitations', 'audit_log',
+      'login_challenges', 'cli_sessions',
+    ];
+    const tables = names.map((name) => (schemaSnapshot.tables as unknown as Record<string, SnapshotTable>)[`public.${name}`]);
+    // Build the auth tables from the checked-in 0014 snapshot; irrelevant AI/vector
+    // tables are omitted so these auth tests do not depend on a pgvector installation.
     for (const table of tables) {
       const definitions = Object.values(table.columns).map((c) => `${q(c.name)} ${c.type}${c.default === undefined ? '' : ` default ${c.default}`}${c.notNull ? ' not null' : ''}${c.primaryKey ? ' primary key' : ''}`);
       for (const pk of Object.values(table.compositePrimaryKeys)) definitions.push(`primary key (${pk.columns.map(q).join(',')})`);
@@ -73,8 +77,6 @@ describe.skipIf(!url)('email OTP and CLI sessions on real PostgreSQL', () => {
     for (const table of tables) for (const fk of Object.values(table.foreignKeys)) {
       if (names.includes(fk.tableTo)) await pool.query(`alter table ${q(fk.tableFrom)} add constraint ${q(fk.name)} foreign key (${fk.columnsFrom.map(q).join(',')}) references ${q(fk.tableTo)} (${fk.columnsTo.map(q).join(',')}) on delete ${fk.onDelete}`);
     }
-    const migration = readFileSync(new URL('../drizzle/0013_email_otp_cli_sessions.sql', import.meta.url), 'utf8');
-    await pool.query(migration.replaceAll('"public".', `${q(schemaName)}.`));
   });
   afterAll(async () => {
     if (pool) { await pool.query(`drop schema ${q(schemaName)} cascade`); await pool.end(); }

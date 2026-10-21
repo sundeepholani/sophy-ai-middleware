@@ -31,14 +31,23 @@ import { recordedEvalSpendUsd } from '@/lib/eval/spend';
 import { normalizeOutputSchema } from '@/lib/gateway/schema-normalize';
 import { schemaCompileError } from '@/lib/gateway/openai-map';
 import { getSettings } from '@/lib/admin/settings';
-import { evalChampionBlocked, transcriptProcessorSelectionError } from '@/lib/admin/keys';
+import {
+  cloudflareBindingError,
+  evalChampionBlocked,
+  transcriptProcessorSelectionError,
+} from '@/lib/admin/keys';
 import { getKeyEvals, type KeyEval } from '@/lib/admin/queries';
+import {
+  cloudflareAvailableModel,
+  getCloudflareModel,
+  isCloudflareModelId,
+} from '@/lib/gateway/cloudflare-models';
 import {
   isKeyBindableType,
   listAllModels,
   modelSupportsBatchTranscription,
 } from '@/lib/gateway/models';
-import { getProjectGatewaySummary } from '@/lib/projects/repository';
+import { getProjectCloudflareSummary, getProjectGatewaySummary } from '@/lib/projects/repository';
 
 /** The drizzle client, or a transaction executor — both expose the same query API. */
 type Db = ReturnType<typeof getDb>;
@@ -241,6 +250,15 @@ function validateKeyInput(input: KeyFormInput): void {
  * call if required processor configuration is absent.
  */
 async function validateKeyModelInput(input: KeyFormInput): Promise<void> {
+  // Workers AI ids are a code-reviewed allowlist (lib/gateway/cloudflare-models.ts). The registry is
+  // authoritative and needs no catalog fetch, so this also holds during a Vercel catalog outage (D4, D5).
+  // A registered entry is 'evaluation' or 'extraction', both key-bindable, and no transcription rule
+  // applies to it. Readiness is checked separately by assertCloudflareReady (it needs the project).
+  if (isCloudflareModelId(input.model.trim())) {
+    const error = cloudflareBindingError(input.model, true);
+    if (error) throw new Error(error);
+    return;
+  }
   let models;
   try {
     models = await listAllModels();
@@ -260,6 +278,19 @@ async function validateKeyModelInput(input: KeyFormInput): Promise<void> {
     transcriptProcessorModel: input.params.transcriptProcessorModel ?? '',
     models,
   });
+  if (error) throw new Error(error);
+}
+
+/**
+ * D3: binding a key to a Workers AI model also needs the project's Cloudflare credential to be ready.
+ * A no-op, with no DB read, for every other model. Throws 'cloudflare_not_ready' (or the unsupported
+ * message), matching gateway_not_ready: thrown messages are masked in production, so the Keys page
+ * prevents this case up front, and the CLI maps the code (contract §4.3).
+ */
+async function assertCloudflareReady(projectId: string, model: string): Promise<void> {
+  if (!isCloudflareModelId(model.trim())) return;
+  const { isReady } = await getProjectCloudflareSummary(projectId);
+  const error = cloudflareBindingError(model, isReady);
   if (error) throw new Error(error);
 }
 
@@ -284,10 +315,12 @@ export async function createKey(
   input: KeyFormInput & { projectId: string },
 ): Promise<{ fullKey: string }> {
   const viewer = await requireProjectViewer(input.projectId);
+  // Key creation keeps the Vercel readiness gate first and unchanged, for every model (D3).
   const gateway = await getProjectGatewaySummary(input.projectId);
   if (!gateway.isReady) throw new Error('gateway_not_ready');
   validateKeyInput(input);
   await validateKeyModelInput(input);
+  await assertCloudflareReady(input.projectId, input.model);
   // Editors always own what they create; admins choose (defaults to unassigned).
   const ownerUserId =
     viewer.role === 'editor'
@@ -355,6 +388,11 @@ export async function updateKey(
     await assertCanManageKey(input.projectId, input.id);
   validateKeyInput(input);
   await validateKeyModelInput(input);
+  // Cloudflare readiness is a BIND-time rule. An edit that keeps the model (a rename, a budget
+  // change) must keep working while Cloudflare is down (contract §2.15).
+  if (input.model.trim() !== currentModel) {
+    await assertCloudflareReady(input.projectId, input.model);
+  }
 
   // Only admins may reassign ownership; editors' owner is left untouched.
   let newOwner = currentOwner;
@@ -754,13 +792,26 @@ export async function bulkUpdateKeyModel(input: {
   if (!model) throw new Error('Model is required');
   const ids = normalizeBulkIds(input.ids);
   const confirmedStops = new Set(input.stopEvalIds ?? []);
+  // Workers AI targets are checked once, before the loop (D3–D5). The registry check is pure and
+  // comes first. Readiness is project metadata, and this action otherwise authorizes per key inside
+  // the loop, so authenticate the caller before reading it.
+  const cloudflareEntry = getCloudflareModel(model);
+  if (isCloudflareModelId(model)) {
+    const registryError = cloudflareBindingError(model, true);
+    if (registryError) throw new Error(registryError);
+    await requireProjectViewer(input.projectId);
+    await assertCloudflareReady(input.projectId, model);
+  }
   let catalogModels: Awaited<ReturnType<typeof listAllModels>> = [];
   try {
     catalogModels = await listAllModels();
   } catch {
     // Preserve the existing custom/stale-model behavior during catalog outages.
   }
-  const targetModel = catalogModels.find((candidate) => candidate.id === model);
+  // A registry model is classified even when the catalog is unavailable.
+  const targetModel =
+    catalogModels.find((candidate) => candidate.id === model) ??
+    (cloudflareEntry ? cloudflareAvailableModel(cloudflareEntry) : undefined);
   if (targetModel && !isKeyBindableType(targetModel.type)) {
     throw new Error('This model type cannot be served by a Sophy key');
   }

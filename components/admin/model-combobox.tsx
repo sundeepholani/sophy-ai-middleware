@@ -2,6 +2,7 @@
 
 import { Combobox } from '@base-ui/react/combobox';
 import { Check, ChevronsUpDown } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 
 const inputClasses =
@@ -9,9 +10,10 @@ const inputClasses =
 
 /**
  * Type-to-filter model picker. Renders a base-ui Combobox over the gateway model
- * list (filters as you type, scroll-free). When the catalog is unavailable it
- * falls back to a free-text input. A saved-but-stale model (no longer in the live
- * catalog) stays listed and selectable.
+ * list, which also contains the registered Cloudflare Workers AI models (filters
+ * as you type, scroll-free). When the catalog is unavailable it falls back to a
+ * free-text input. A saved-but-stale model (no longer in the live catalog) stays
+ * listed and selectable.
  */
 export function ModelCombobox({
   id,
@@ -20,6 +22,7 @@ export function ModelCombobox({
   models,
   modelsUnavailable = false,
   placeholder = 'Select or type to filter…',
+  itemBadges,
 }: {
   id?: string;
   value: string;
@@ -27,6 +30,9 @@ export function ModelCombobox({
   models: string[];
   modelsUnavailable?: boolean;
   placeholder?: string;
+  /** Optional short labels after an item's id (e.g. ['Cloudflare', 'Preview']). Display only:
+   *  the combobox still filters on the id string. */
+  itemBadges?: (id: string) => readonly string[];
 }) {
   // No catalog → free-text (same behavior as before).
   if (models.length === 0) {
@@ -80,6 +86,15 @@ export function ModelCombobox({
                   className="relative flex w-full cursor-default items-center gap-2 rounded-md py-1 pr-2 pl-2.5 text-sm outline-hidden select-none data-highlighted:bg-accent data-highlighted:text-accent-foreground"
                 >
                   <span className="flex-1 truncate font-mono text-xs">{item}</span>
+                  {itemBadges?.(item).map((label) => (
+                    <Badge
+                      key={label}
+                      variant="outline"
+                      className="h-4 shrink-0 px-1.5 text-[10px] font-normal"
+                    >
+                      {label}
+                    </Badge>
+                  ))}
                   <Combobox.ItemIndicator>
                     <Check className="size-4" />
                   </Combobox.ItemIndicator>

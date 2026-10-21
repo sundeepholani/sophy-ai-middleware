@@ -25,8 +25,10 @@ export default async function ModelsPage({
       <div>
         <h1 className="text-2xl font-semibold">Models</h1>
         <p className="text-sm text-muted-foreground">
-          Explore every model Sophy can route through Vercel AI Gateway. Search, sort, and filter
-          by capability before choosing a model for a project key.
+          Explore every model in the Vercel AI Gateway catalog, plus the Cloudflare Workers AI models
+          Sophy serves: Clef for evaluation and Clairic for extraction (preview). Workers AI models run
+          on the project’s own Cloudflare credential, which a Project Admin connects in Settings.
+          Search, sort, and filter by capability before choosing a model for a project key.
         </p>
       </div>
       {unavailable ? (

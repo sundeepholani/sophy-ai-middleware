@@ -253,8 +253,11 @@ export interface EvaluationRequest {
   questions?: Record<string, AssessmentQuestion>;
   providerOptions?: Record<string, Record<string, unknown>>;
   /**
-   * Images the state or questions refer to by key (TypeSafe Jev keys only).
-   * A string in `state` equal to the key is replaced by the image upstream.
+   * Images by key. TypeSafe Jev: up to 8 png/jpg/jpeg, each key referenced in
+   * state or questions and swapped for its image upstream. Cloudflare Clef: up
+   * to 4 png/jpg/jpeg/webp (4 MiB each, 8 MiB total decoded), no reference
+   * needed, shown to the model before the state in key order, with no
+   * substitution.
    */
   assets?: Record<string, AssessmentAsset>;
 }
@@ -262,7 +265,8 @@ export interface EvaluationRequest {
 /** One base64 still image, in TypeSafe's asset shape. */
 export interface AssessmentAsset {
   type: 'image';
-  format: 'png' | 'jpg' | 'jpeg';
+  /** webp: Cloudflare Clef/Clairic keys only. */
+  format: 'png' | 'jpg' | 'jpeg' | 'webp';
   /** Standard, padded base64 — no `data:` prefix, no whitespace. */
   data_base64: string;
 }
@@ -270,8 +274,20 @@ export interface AssessmentAsset {
 /** One answer, discriminated by the question type that produced it. */
 export type AssessmentAnswer =
   | { type: 'boolean'; probability: number }
-  | { type: 'choice'; choice: string; probabilities: Record<string, number> }
-  | { type: 'score'; score: number; probabilities: Record<string, number> };
+  | {
+      type: 'choice';
+      choice: string;
+      probabilities: Record<string, number>;
+      /** 0–1, when upstream reports it (additive). */
+      confidence?: number;
+    }
+  | {
+      type: 'score';
+      score: number;
+      probabilities: Record<string, number>;
+      /** 0–1, when upstream reports it (additive). */
+      confidence?: number;
+    };
 
 /**
  * `providerMetadata` from upstream is deliberately not echoed — it carries
@@ -280,6 +296,101 @@ export type AssessmentAnswer =
 export interface EvaluationResponse {
   model: string;
   answers: Record<string, AssessmentAnswer>;
+  usage: { inputTokens: number; outputTokens: number; totalTokens: number };
+}
+
+// ---- Extraction (POST /v1/extract) ------------------------------------------
+
+/**
+ * Wire types for the native extraction surface (Cloudflare Workers AI Clairic,
+ * research preview). NOT OpenAI-compatible. Answers are passed through as Clairic
+ * returns them because the preview's output shape still drifts.
+ */
+
+export type ExtractionFieldType =
+  | 'text'
+  | 'number'
+  | 'date'
+  | 'time'
+  | 'datetime'
+  | 'duration'
+  | 'list'
+  | 'estimate'
+  | 'forecast';
+
+export type ExtractionForecastInterval =
+  | 'step'
+  | 'minute'
+  | 'hour'
+  | 'day'
+  | 'week'
+  | 'month'
+  | 'quarter'
+  | 'year';
+
+/** One field to extract. These 13 keys are the known ones; any other key is rejected (D9). */
+export interface ExtractionFieldSpec {
+  /** What kind of value the field holds. */
+  type: ExtractionFieldType;
+  /** What the field should contain. */
+  instructions?: string;
+  /** Unit label. Durations: seconds | minutes | hours | days | weeks | months | years (Cloudflare default: seconds). */
+  unit?: string;
+  /** Number and duration fields only. */
+  integer?: boolean;
+  /** Integer 0–6. Numbers, durations and number lists only. */
+  decimals?: number;
+  /** Item type. REQUIRED for list fields. */
+  items?: 'text' | 'number' | 'date';
+  /** REQUIRED for estimate and forecast. An ISO date string only for date estimates. */
+  min?: number | string;
+  /** REQUIRED for estimate and forecast. An ISO date string only for date estimates. */
+  max?: number | string;
+  /** Estimate grid: a positive number (days for date estimates), or 'month' / 'year'. */
+  step?: number | 'month' | 'year';
+  /** Estimates and forecasts: spread the distribution on a linear or log scale. */
+  scale?: 'linear' | 'log';
+  /** In (0, 1]: the null probability above which value is null (Cloudflare default 0.5). */
+  null_threshold?: number;
+  /** Forecast only: the number of steps, an integer 1–64. */
+  horizon?: number;
+  /** Forecast only: the length of one step. */
+  interval?: ExtractionForecastInterval;
+}
+
+export interface ExtractionRequest {
+  /** Accepted and ignored. The key owns the model. */
+  model?: string;
+  /** Text to read. May be '' (or omitted) only when assets are sent. */
+  state?: string;
+  fields?: Record<string, ExtractionFieldSpec>;
+  /** The same keyed shape and Cloudflare image rules as Clef (lib/gateway/image-assets.ts). */
+  assets?: Record<string, AssessmentAsset>;
+  /** ISO date (YYYY-MM-DD) that anchors dates written without a year. */
+  reference_date?: string;
+  options?: { include_quantiles?: boolean; return_state_text?: boolean };
+}
+
+/**
+ * Clairic's answer object, PASSED THROUGH (research preview; the shape drifts).
+ * Known keys: type, value, guess, p_null, confidence, span, spans, confidences,
+ * mean, median, p10, p90, p_below, p_above, quantiles, steps, unit.
+ *
+ * Caveats:
+ * - spans are END-EXCLUSIVE offsets counted in UNICODE CODE POINTS;
+ * - when value is null, ignore guess and span;
+ * - list answers carry per-item detail arrays: per-item `confidences` on number
+ *   and date lists, per-item `spans` on text lists.
+ */
+export type ExtractionAnswer = { type?: string; value?: unknown } & Record<string, unknown>;
+
+export interface ExtractionResponse {
+  /** The key's model id, never the upstream echo. */
+  model: string;
+  answers: Record<string, ExtractionAnswer>;
+  truncated: boolean;
+  /** Present only when options.return_state_text was true and upstream returned it. */
+  state_text?: string;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number };
 }
 

@@ -16,6 +16,9 @@ import {
   safeGatewayErrorMessage,
   upstreamErrorResponse,
 } from '@/lib/gateway/upstream-error';
+import { postCloudflareOnce } from '@/lib/gateway/cloudflare-call';
+import type { ProjectCloudflareSnapshot } from '@/lib/gateway/cloudflare-provider';
+import { ProjectCloudflareUnavailableError } from '@/lib/gateway/project-provider';
 
 const FALLBACK = 'Upstream model request failed.';
 
@@ -298,5 +301,117 @@ describe('Gateway v4 transcription errors', () => {
     const body = await response.json();
     expect(body.error.message).not.toContain('api_key_id_secret');
     expect(body.error.message).not.toContain('$91.50');
+  });
+});
+
+describe('Cloudflare Workers AI errors', () => {
+  const PROJECT = '00000000-0000-4000-8000-000000000001';
+  const ROW_A = '00000000-0000-4000-8000-000000000002';
+
+  /** A Cloudflare failure lifted by the real conversion, postCloudflareOnce. */
+  async function cloudflareError(
+    status: number,
+    code: number,
+    message: string,
+    headers?: Record<string, string>,
+  ): Promise<unknown> {
+    const snapshot: ProjectCloudflareSnapshot = {
+      projectId: PROJECT,
+      cloudflareCredentialId: ROW_A,
+      credentialRevision: 1,
+      accountId: '0123456789abcdef0123456789abcdef',
+      runner: {
+        run: async () =>
+          new Response(
+            JSON.stringify({ result: null, success: false, errors: [{ code, message }], messages: [] }),
+            { status, headers },
+          ),
+      },
+    };
+    return postCloudflareOnce(snapshot, '@cf/cloudflare/clef-flash', {}, new AbortController().signal).then(
+      () => {
+        throw new Error('expected a Cloudflare error');
+      },
+      (error: unknown) => error,
+    );
+  }
+
+  it("echoes a Cloudflare 422's cleaned message", async () => {
+    const error = await cloudflareError(
+      422,
+      3030,
+      'AiError: AiError: Request requires 51796 tokens; the maximum is 24576 (1e50b5c4-37d8-473a-b7a4-8afaf3423bf6)',
+    );
+    const response = upstreamErrorResponse(error, 'The evaluation request failed.');
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toMatchObject({
+      type: 'invalid_request_error',
+      code: 'upstream_invalid_request',
+      message: 'Request requires 51796 tokens; the maximum is 24576',
+    });
+    expect(safeGatewayErrorMessage(error)).toBe('upstream_http_422');
+  });
+
+  it('echoes a Cloudflare 413 context pre-check', async () => {
+    const error = await cloudflareError(
+      413,
+      5021,
+      'AiError: Ai: The estimated number of input and maximum output tokens (58171) exceeded this model context window limit (24576). (4331f49d-c7f7-45a6-b2a7-ebf0660854ef)',
+    );
+    const response = upstreamErrorResponse(error, FALLBACK);
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error.code).toBe('upstream_invalid_request');
+    expect(body.error.message.startsWith('The estimated number of input')).toBe(true);
+    expect(body.error.message).not.toContain('4331f49d');
+    expect(safeGatewayErrorMessage(error)).toBe('upstream_http_413');
+  });
+
+  it('keeps a Cloudflare 403 (code 1234) opaque', async () => {
+    const error = await cloudflareError(403, 1234, 'Forbidden: account settings detail');
+    const response = upstreamErrorResponse(error, FALLBACK);
+    expect(response.status).toBe(502);
+    const body = await response.json();
+    expect(body.error).toMatchObject({ type: 'api_error', code: 'upstream_error', message: FALLBACK });
+    expect(safeGatewayErrorMessage(error)).toBe('upstream_http_403');
+  });
+
+  it('answers 429/3036 generically and forwards Retry-After', async () => {
+    const error = await cloudflareError(
+      429,
+      3036,
+      "AiError: you have used up your daily free allocation of 10,000 neurons, please upgrade to Cloudflare's Workers Paid plan",
+      { 'retry-after': '30' },
+    );
+    const response = upstreamErrorResponse(error, FALLBACK);
+    expect(response.status).toBe(429);
+    expect(response.headers.get('retry-after')).toBe('30');
+    const body = await response.json();
+    expect(body.error).toMatchObject({
+      type: 'rate_limit_error',
+      code: 'rate_limit_exceeded',
+      message: 'The upstream provider rate limit or quota was exceeded. Please retry later.',
+    });
+    expect(body.error.message).not.toContain('neurons');
+    expect(safeGatewayErrorMessage(error)).toBe('upstream_http_429');
+  });
+
+  it('answers a Cloudflare credential 503 with the neutral text', async () => {
+    const error = new ProjectCloudflareUnavailableError(
+      PROJECT,
+      'credential_invalid',
+      ROW_A,
+      new Error('Authentication error'),
+    );
+    const response = upstreamErrorResponse(error, 'x');
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.error).toMatchObject({
+      code: 'project_gateway_unavailable',
+      message:
+        'This project is not ready to make AI requests. Ask a project admin to connect or check its AI provider credentials.',
+    });
+    expect(safeGatewayErrorMessage(error)).toBe('project_gateway_unavailable');
   });
 });

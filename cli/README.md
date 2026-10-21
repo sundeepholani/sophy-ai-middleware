@@ -1,6 +1,6 @@
 # Sophy CLI
 
-Manage Sophy projects, API keys, evaluations, knowledgebases, members, usage, logs, and settings from a terminal. The server applies the same project roles and ownership rules as the web console.
+Manage Sophy projects, provider credentials, API keys, evaluations, knowledgebases, members, usage, logs, and settings from a terminal. The server applies the same project roles and ownership rules as the web console.
 
 [Sophy](https://sophy.in) · [Documentation](https://sophy.in/docs#sophy-cli) · [npm package](https://www.npmjs.com/package/@sophyai/sophy-cli)
 
@@ -187,6 +187,7 @@ Each command accepts `--help` for its input fields. IDs shown as arguments can a
 | --- | --- |
 | Projects | `projects list`, `create`, `rename`, `default`, `recover`, `use` |
 | Gateway | `gateway status`, `connect`, `disconnect` |
+| Cloudflare Workers AI | `cloudflare status`, `connect`, `disconnect` |
 | API keys | `keys list`, `get`, `create`, `update`, `rotate`, `revoke`, `bulk-model` |
 | Evaluations | `evals list`, `get`, `start`, `bulk-start`, `cancel`, `refresh` |
 | Reporting | `overview`, `models`, `usage`, `logs list`, `logs get` |
@@ -202,6 +203,10 @@ sophy projects create --name "Customer Support"
 sophy projects rename --name "Support Production"
 sophy gateway status
 sophy gateway connect --data @gateway.json
+sophy cloudflare status
+sophy cloudflare connect --data @cloudflare.json
+sophy cloudflare connect --account-id <account-id> --data -
+sophy cloudflare disconnect
 sophy usage --since-days 30
 sophy usage --since-days 7 --key-id <key-id>
 sophy logs list --source proxy --limit 50
@@ -220,6 +225,12 @@ sophy settings update --judge-model openai/gpt-4.1 --notify-email alerts@example
 ```
 
 The gateway JSON file contains `{"apiKey":"<gateway-secret>"}`. The CLI accepts this secret only through `--data @file` or `--data -`. It rejects inline secrets and a `--api-key` flag.
+
+The Cloudflare JSON file contains `{"accountId":"<account-id>","apiToken":"<api-token>"}`. The account ID is the 32-character hexadecimal ID shown in the Cloudflare dashboard. Create the API token from Cloudflare's "Workers AI" token template, which grants Workers AI Read and Edit. You can supply the account ID with `--account-id` instead and keep only the token in the file. The CLI accepts the token only through `--data @file` or `--data -`. It rejects an inline token and an `--api-token` flag.
+
+Only project admins can connect, replace, or disconnect the Cloudflare credential. Sophy checks the account ID and token with one Cloudflare API call before it saves them. If the check fails, the current credential stays in place. Connecting again replaces the current credential. A failed connection returns `cloudflare_invalid_account_id`, `cloudflare_invalid`, `cloudflare_unreachable`, or `cloudflare_in_use`.
+
+`cloudflare status` shows an editor only the connection state and whether the credential is ready. An admin also sees the account ID, the token's last four characters, and its health. Keys that use Cloudflare Workers AI models (`@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash`, `@cf/cloudflare/clef-omni`, and the preview `@cf/cloudflare/clairic`) need a ready Cloudflare credential.
 
 Document uploads support text, Markdown, CSV, JSON, PDF, and Word (`.docx`). Each file must be nonempty and no larger than 4 MB.
 
@@ -293,7 +304,7 @@ npm test --prefix cli
 npm run check:package --prefix cli
 ```
 
-The tests use local fake HTTP servers and synthetic credentials. They cover authentication, access-error handling, origin isolation, redirect rejection, input mapping, uploads, confirmations, concurrent session updates, revocation retries, and logout.
+The tests use local fake HTTP servers and synthetic credentials. They cover authentication, access-error handling, origin isolation, redirect rejection, input mapping, secret-only credential input, uploads, confirmations, concurrent session updates, revocation retries, and logout.
 
 ## Publish a release
 

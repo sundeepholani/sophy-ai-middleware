@@ -36,6 +36,7 @@ import {
   normalizeProjectGatewayError,
   ProjectGatewayUnavailableError,
 } from '@/lib/gateway/project-provider';
+import { providerOf } from '@/lib/gateway/provider-of';
 import {
   buildResponseObject,
   mapResponsesUsage,
@@ -89,7 +90,7 @@ export async function handleResponsesNonStreaming(
   const start = Date.now();
   const id = respId();
   const created = Math.floor(start / 1000);
-  const provider = ctx.model.split('/')[0] ?? 'unknown';
+  const provider = providerOf(ctx.model);
   const eventId = randomUUID();
   const base = {
     id: eventId,
@@ -235,7 +236,7 @@ export function handleResponsesStreaming(ctx: CallContext, messages: ModelMessag
   const mid = msgId();
   const created = Math.floor(start / 1000);
   const model = ctx.model;
-  const provider = model.split('/')[0] ?? 'unknown';
+  const provider = providerOf(model);
   const eventId = randomUUID();
   const base = {
     id: eventId,

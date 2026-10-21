@@ -4,6 +4,7 @@ import { and, desc, eq, isNull, lt, sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import {
   apiKeys,
+  projectCloudflareCredentials,
   projectGatewayCredentials,
   projectInvitations,
   projectMemberships,
@@ -169,6 +170,118 @@ export async function getProjectGatewaySummary(
     verifiedAt: linked ? row.verifiedAt : null,
     lastCheckedAt: linked ? row.lastCheckedAt : null,
     lastFailureCode: linked ? row.lastFailureCode : null,
+  };
+}
+
+export type ProjectCloudflareState = 'not_connected' | 'ready' | 'attention';
+
+export interface ProjectCloudflareSummary {
+  projectId: string;
+  state: ProjectCloudflareState;
+  isReady: boolean;
+  credentialId: string | null;
+  /** Admin-only metadata. */
+  accountId: string | null;
+  lifecycle: GatewayCredentialLifecycle | null;
+  health: GatewayCredentialHealth | null;
+  lastFour: string | null;
+  connectedAt: Date | null;
+  verifiedAt: Date | null;
+  lastCheckedAt: Date | null;
+  lastFailureCode: string | null;
+}
+
+/**
+ * Safe Cloudflare credential metadata only; ciphertext and fingerprint never leave core.
+ * Mirrors getProjectGatewaySummary without the platform branch, and never reads the
+ * Vercel tables: Cloudflare readiness is independent of Vercel (D3). Throws
+ * Error('not_found').
+ */
+export async function getProjectCloudflareSummary(
+  projectId: string,
+): Promise<ProjectCloudflareSummary> {
+  const [row] = await getDb()
+    .select({
+      projectStatus: projects.status,
+      currentCredentialId: projects.currentCloudflareCredentialId,
+      credentialId: projectCloudflareCredentials.id,
+      credentialProjectId: projectCloudflareCredentials.projectId,
+      accountId: projectCloudflareCredentials.accountId,
+      lifecycle: projectCloudflareCredentials.lifecycle,
+      health: projectCloudflareCredentials.health,
+      lastFour: projectCloudflareCredentials.secretLastFour,
+      connectedAt: projectCloudflareCredentials.createdAt,
+      verifiedAt: projectCloudflareCredentials.verifiedAt,
+      lastCheckedAt: projectCloudflareCredentials.lastCheckedAt,
+      lastFailureCode: projectCloudflareCredentials.lastFailureCode,
+    })
+    .from(projects)
+    .leftJoin(
+      projectCloudflareCredentials,
+      and(
+        eq(projectCloudflareCredentials.id, projects.currentCloudflareCredentialId),
+        eq(projectCloudflareCredentials.projectId, projects.id),
+      ),
+    )
+    .where(eq(projects.id, projectId))
+    .limit(1);
+
+  if (!row) throw new Error('not_found');
+  const linked =
+    !!row.currentCredentialId &&
+    row.credentialId === row.currentCredentialId &&
+    row.credentialProjectId === projectId;
+  const isReady =
+    linked &&
+    row.projectStatus === 'active' &&
+    row.lifecycle === 'available' &&
+    row.health === 'healthy';
+  const state: ProjectCloudflareState = !linked
+    ? 'not_connected'
+    : isReady
+      ? 'ready'
+      : 'attention';
+
+  return {
+    projectId,
+    state,
+    isReady,
+    credentialId: linked ? row.credentialId : null,
+    accountId: linked ? row.accountId : null,
+    lifecycle: linked ? row.lifecycle : null,
+    health: linked ? row.health : null,
+    lastFour: linked ? row.lastFour : null,
+    connectedAt: linked ? row.connectedAt : null,
+    verifiedAt: linked ? row.verifiedAt : null,
+    lastCheckedAt: linked ? row.lastCheckedAt : null,
+    lastFailureCode: linked ? row.lastFailureCode : null,
+  };
+}
+
+/**
+ * Editors keep only projectId, state and isReady (docs/multi-tenancy-plan.md:469;
+ * the Overview pattern at app/admin/p/[projectId]/page.tsx:43-59). Admins get the
+ * summary unchanged. Built field by field rather than spread, so a field added
+ * later stays Admin-only by default.
+ */
+export function redactProjectCloudflareSummary(
+  summary: ProjectCloudflareSummary,
+  role: ProjectRole,
+): ProjectCloudflareSummary {
+  if (role === 'admin') return summary;
+  return {
+    projectId: summary.projectId,
+    state: summary.state,
+    isReady: summary.isReady,
+    credentialId: null,
+    accountId: null,
+    lifecycle: null,
+    health: null,
+    lastFour: null,
+    connectedAt: null,
+    verifiedAt: null,
+    lastCheckedAt: null,
+    lastFailureCode: null,
   };
 }
 
