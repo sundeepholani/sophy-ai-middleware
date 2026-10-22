@@ -235,7 +235,7 @@ describe('Cloudflare credential CLI operations', () => {
     const response = await post({ operation: 'cloudflare.status', projectId: PROJECT });
     expect(response.status).toBe(200);
     const text = await response.text();
-    expect(JSON.parse(text)).toEqual({ ok: true, data: { ...REDACTED, state: 'attention', isReady: false } });
+    expect(JSON.parse(text)).toEqual({ ok: true, data: { ...REDACTED, state: 'attention', isReady: false }, sessionExpiresAt: expect.any(String) });
     for (const hidden of [ACCOUNT, OTHER, 'wxyz', 'invalid', 'cloudflare_authentication_failed']) expect(text).not.toContain(hidden);
     mocks.viewer.mockResolvedValue(VIEWER);
     const admin = await (await post({ operation: 'cloudflare.status', projectId: PROJECT })).json();
@@ -328,11 +328,14 @@ describe('management HTTP contract', () => {
   });
 
   it('returns no-store JSON without issuing browser cookies', async () => {
+    const expiresAt = new Date(Date.now() + 30 * 86_400_000);
+    mocks.session.mockResolvedValue({ ...VIEWER, sessionId: KEY, expiresAt });
     const response = await POST(request(JSON.stringify({ operation: 'keys.list', projectId: PROJECT })));
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.has('set-cookie')).toBe(false);
-    expect(await response.json()).toEqual({ ok: true, data: [CURRENT_KEY] });
+    // The renewed session expiry rides along so the CLI can slide its local copy.
+    expect(await response.json()).toEqual({ ok: true, data: [CURRENT_KEY], sessionExpiresAt: expiresAt.toISOString() });
   });
 
   it('rejects oversized bodies without relying on Content-Length', async () => {

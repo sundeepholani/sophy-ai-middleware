@@ -358,6 +358,37 @@ test('a null result remains null rather than turning into a different success pa
   assert.equal(success(result), null);
 });
 
+test('a used session adopts the server-renewed expiry, which never moves backwards', async (t) => {
+  const renewed = new Date(Date.now() + 30 * 86_400_000).toISOString();
+  let reported = renewed;
+  const f = await fixture(t, () => ({ ok: true, data: [], sessionExpiresAt: reported }));
+  await f.session({ projectId: 'project-1' });
+  success(await cli(f, ['keys', 'list', '--json']));
+  assert.equal((await loadConfig(f.directory)).sessions[f.origin].expiresAt, renewed);
+  reported = future();
+  success(await cli(f, ['keys', 'list', '--json']));
+  assert.equal((await loadConfig(f.directory)).sessions[f.origin].expiresAt, renewed);
+});
+
+test('a slow command cannot restore a session through its renewed expiry after logout', async (t) => {
+  const reached = deferred();
+  const release = deferred();
+  const f = await fixture(t, async (call) => {
+    if (call.json?.operation === 'keys.list') {
+      reached.resolve();
+      await release.promise;
+      return { ok: true, data: [], sessionExpiresAt: new Date(Date.now() + 30 * 86_400_000).toISOString() };
+    }
+  });
+  await f.session({ projectId: 'project-1' });
+  const listing = cli(f, ['keys', 'list', '--json']);
+  await reached.promise;
+  success(await cli(f, ['logout']));
+  release.resolve();
+  success(await listing);
+  assert.equal((await loadConfig(f.directory)).sessions[f.origin], undefined);
+});
+
 test('HTTP is restricted to loopback and malformed origins are rejected', () => {
   assert.equal(normalizeOrigin('https://sophy.in/'), 'https://sophy.in');
   assert.equal(normalizeOrigin('http://localhost:3000'), 'http://localhost:3000');

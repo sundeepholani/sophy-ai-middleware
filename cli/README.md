@@ -53,6 +53,8 @@ sophy whoami
 sophy logout
 ```
 
+A session lasts 30 days from its last use. Each command that reaches the management API extends it to 30 days from that moment, so a CLI you use at least once every 30 days stays signed in. An idle session expires 30 days after its last use; sign in again with `sophy login`.
+
 `logout` revokes the session on the server before it removes the local token. If the server is unavailable, the command retains the token for another attempt.
 
 A new sign-in saves the replacement session before it revokes the previous session. If that revocation fails, the CLI retains it for a later `logout` attempt. The new session remains available.
