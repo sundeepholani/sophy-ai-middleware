@@ -254,6 +254,24 @@ async function authenticate(kind, options, config, directory, origin) {
   print({ user: result.user, expiresAt: result.expiresAt, origin }, options.json);
 }
 
+/**
+ * The server slides a session's expiry on each use and reports the new value.
+ * Mirror it locally so requireSession does not discard an active session at its
+ * original expiry. Best effort: the command already succeeded, and the server
+ * remains authoritative for expiry.
+ */
+async function slideSessionExpiry(directory, origin, session, expiresAt) {
+  if (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.parse(session.expiresAt)) return;
+  try {
+    await updateConfig(directory, (current) => {
+      const stored = current.sessions[origin];
+      // Never restore a session that logout or a new sign-in replaced meanwhile.
+      if (stored?.token !== session.token || Date.parse(expiresAt) <= Date.parse(stored.expiresAt)) return;
+      stored.expiresAt = expiresAt;
+    });
+  } catch {}
+}
+
 async function uploadBody(command, input, options, projectId) {
   if (!options.file) throw new Error('Upload requires --file <path>.');
   const fileStat = await stat(options.file);
@@ -304,6 +322,7 @@ export async function run(argv = process.argv.slice(2)) {
     if (positionals.length !== 3 || options.project || options.data) throw new Error('Usage: sophy projects use <project-id>');
     const projectId = positionals[2];
     const result = await request(origin, '/api/admin/cli', { token: session.token, body: { operation: 'projects.list', input: {} } });
+    await slideSessionExpiry(directory, origin, session, result.sessionExpiresAt);
     const projects = result.data;
     if (!Array.isArray(projects) || !projects.some((project) => project.id === projectId)) throw new Error('You do not have access to that project. Run sophy projects list.');
     await updateConfig(directory, (current) => {
@@ -321,6 +340,7 @@ export async function run(argv = process.argv.slice(2)) {
   await confirmAction(command, input, options, projectId);
   const body = command.upload ? await uploadBody(command, input, options, projectId) : { operation: command.operation, ...(command.project === false ? {} : { projectId }), input };
   const result = await request(origin, '/api/admin/cli', { token: session.token, body, multipart: command.upload });
+  await slideSessionExpiry(directory, origin, session, result.sessionExpiresAt);
   print(result.data, options.json);
   // Make incomplete bulk actions and evaluation-stop requirements visible to scripts.
   if (result.data?.requiresEvalStop || (Array.isArray(result.data?.skipped) && result.data.skipped.length)) process.exitCode = 2;

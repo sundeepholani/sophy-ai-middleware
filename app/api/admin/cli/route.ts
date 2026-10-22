@@ -31,7 +31,9 @@ export async function POST(req: Request): Promise<Response> {
       } else {
         throw new CliError('unsupported_media_type', 'Use application/json or multipart/form-data.', 415);
       }
-      return cliResponse({ ok: true, data: data ?? null });
+      // The CLI mirrors the sliding expiry locally so an active session isn't
+      // discarded on the client at its original expiry.
+      return cliResponse({ ok: true, data: data ?? null, sessionExpiresAt: identity.expiresAt.toISOString() });
     });
   } catch (error) {
     return cliErrorResponse(error);

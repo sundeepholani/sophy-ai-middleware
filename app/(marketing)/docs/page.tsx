@@ -2551,8 +2551,10 @@ with open("out.png", "wb") as f:
             <P>
               For <Code>web</Code>, verification sets the browser session cookie and returns the
               next local path. For <Code>cli</Code>, it returns <Code>token</Code>,{' '}
-              <Code>expiresAt</Code>, and <Code>user</Code>. A CLI session expires after five days.
-              Each request checks the current account, project membership, and project status.
+              <Code>expiresAt</Code>, and <Code>user</Code>. A CLI session expires 30 days after
+              its last use: each authenticated management request extends it to 30 days from that
+              request, so a CLI in regular use stays signed in. Each request checks the current
+              account, project membership, and project status.
             </P>
             <Method method="POST" path="/api/admin/cli/logout" />
             <P>
@@ -2801,11 +2803,20 @@ sophy logs get <log-id> --project <project-id> --json`}
               label="management request"
               code={'{ "operation": "keys.list", "projectId": "<project-id>", "input": {} }'}
             />
-            <CodeBlock label="success" code={'{ "ok": true, "data": [] }'} />
+            <CodeBlock
+              label="success"
+              code={'{ "ok": true, "data": [], "sessionExpiresAt": "2026-11-21T09:30:00.000Z" }'}
+            />
             <CodeBlock
               label="error"
               code={'{ "error": { "code": "forbidden", "message": "Your current project role or resource ownership does not allow this action." } }'}
             />
+            <P>
+              <Code>sessionExpiresAt</Code> is the session&apos;s current expiry after this
+              request&apos;s renewal. The server records renewals at most once a day, so it can
+              trail the request time plus 30 days by up to one day. Logout and revoked or expired
+              sessions are never renewed.
+            </P>
             <P>
               Management responses use <Code>Cache-Control: no-store</Code>. Access decisions
               happen on the server. A local project choice or a stale CLI session never grants

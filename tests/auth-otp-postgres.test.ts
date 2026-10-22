@@ -179,6 +179,38 @@ describe.skipIf(!url)('email OTP and CLI sessions on real PostgreSQL', () => {
     await db.update(schema.users).set({ status: 'inactive' }).where(eq(schema.users.id, user.id));
     expect(await resolveCliSession(`Bearer ${active.token}`)).toBeNull();
   });
+  it('slides CLI session expiry on use without reviving revoked or expired sessions', async () => {
+    const user = await seedUser();
+    const day = 86_400_000;
+    const stored = async (token: string) => (await db.select().from(schema.cliSessions).where(eq(schema.cliSessions.tokenHash, hashToken(token))))[0];
+    const setExpiry = (token: string, expiresAt: Date) => db.update(schema.cliSessions).set({ expiresAt }).where(eq(schema.cliSessions.tokenHash, hashToken(token)));
+
+    const credential = await createCliSession(user.id);
+    expect(Date.parse(credential.expiresAt) - Date.now()).toBeGreaterThan(29.9 * day);
+    const nearExpiry = new Date(Date.now() + 2 * day);
+    await setExpiry(credential.token, nearExpiry);
+    const renewed = await resolveCliSession(`Bearer ${credential.token}`);
+    expect(renewed!.expiresAt.getTime() - Date.now()).toBeGreaterThan(29.9 * day);
+    expect((await stored(credential.token)).expiresAt).toEqual(renewed!.expiresAt);
+    // Throttled: a second use within the day does not write again.
+    const recent = new Date(Date.now() + 29.5 * day);
+    await setExpiry(credential.token, recent);
+    expect((await resolveCliSession(`Bearer ${credential.token}`))!.expiresAt).toEqual(recent);
+    expect((await stored(credential.token)).expiresAt).toEqual(recent);
+
+    const revoked = await createCliSession(user.id);
+    await setExpiry(revoked.token, nearExpiry);
+    const revokedIdentity = await resolveCliSession(`Bearer ${revoked.token}`, { renew: false });
+    await revokeCliSession(revokedIdentity!.sessionId, user.id);
+    expect(await resolveCliSession(`Bearer ${revoked.token}`)).toBeNull();
+    expect((await stored(revoked.token)).expiresAt).toEqual(nearExpiry);
+
+    const expired = await createCliSession(user.id);
+    const lapsed = new Date(Date.now() - 1000);
+    await setExpiry(expired.token, lapsed);
+    expect(await resolveCliSession(`Bearer ${expired.token}`)).toBeNull();
+    expect((await stored(expired.token)).expiresAt).toEqual(lapsed);
+  });
   it('bounds retention cleanup while preserving recent rate history and active sessions', async () => {
     const user = await seedUser();
     const now = Date.now();
