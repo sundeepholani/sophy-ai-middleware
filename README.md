@@ -242,8 +242,24 @@ and iron-session.
      fingerprint key immutable after first use unless every active credential
      of both kinds is re-fingerprinted in one coordinated rotation
    - `AI_GATEWAY_API_KEY` only for the time-limited legacy migration bridge
-   - ZeptoMail variables for production sign-in codes and optional evaluation
-     summaries
+   - Amazon SES for sign-in codes, project invitations, and optional evaluation
+     summaries. Before deploying the SES cutover:
+
+     1. Verify the From address or domain in the target SES region, confirm DKIM
+        and production sending access, and choose the verified From address.
+     2. Configure [Vercel OIDC for AWS](https://vercel.com/docs/oidc/aws). Give a
+        dedicated role `ses:SendEmail` on that SES identity only, with
+        `ses:FromAddress` restricted to the chosen address. Scope the OIDC
+        audience and subject to the Sophy Vercel project and production
+        environment. Use a separate preview role if preview sending is needed.
+     3. Set Vercel production variables `SOPHY_SES_REGION`, `SOPHY_SES_FROM`,
+        and `SOPHY_SES_ROLE_ARN`. Test preview with its own SES variables and
+        `SOPHY_MAIL_TEST_TO` set to a controlled test inbox. For local tests,
+        the AWS SDK can use a local AWS profile in place of OIDC. Use the test
+        inbox address in preview and local sign-in or invitations.
+     4. After deploying, request a sign-in code for a controlled mailbox and
+        confirm that it arrives and signs in. Verify invitation and evaluation
+        email delivery to that mailbox before removing the old mail settings.
 
    Generate random secrets with `openssl rand -hex 32`.
 

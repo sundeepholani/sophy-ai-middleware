@@ -32,7 +32,8 @@ import { judge, JudgeError, type JudgeVerdict } from '@/lib/eval/judge';
 import { evalModel } from '@/lib/eval/model';
 import { summarize, type JudgedSample } from '@/lib/eval/aggregate';
 import { recordedEvalSpendUsd } from '@/lib/eval/spend';
-import { formatEvalEmail, sendEvalEmail } from '@/lib/eval/email';
+import { formatEvalEmail } from '@/lib/eval/email';
+import { sendEmail } from '@/lib/email/send';
 import {
   normalizeProjectGatewayError,
   ProjectGatewayUnavailableError,
@@ -490,13 +491,13 @@ async function finalizeRuns(): Promise<number> {
         .where(eq(projectSettings.projectId, run.projectId))
         .limit(1);
       if (settings?.notifyEmail) {
-        const { subject, html } = formatEvalEmail({
+        const message = formatEvalEmail({
           championModel: run.championModel,
           challengerModel: run.challengerModel,
           judgeModel: run.judgeModel,
           summary,
         });
-        const sent = await sendEvalEmail(settings.notifyEmail, subject, html);
+        const sent = await sendEmail(settings.notifyEmail, message);
         if (sent) {
           await db
             .update(evalRuns)
@@ -506,8 +507,8 @@ async function finalizeRuns(): Promise<number> {
             );
         }
       }
-    } catch (err) {
-      console.error('[eval] summary email failed', err);
+    } catch {
+      console.error('[eval] summary email failed');
     }
 
     // Privacy option A: purge the raw captured content (system prompt, inbound

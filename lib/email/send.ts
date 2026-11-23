@@ -1,50 +1,48 @@
-/**
- * Generic transactional email via ZeptoMail.
- *
- * Feature-gated: sending is a no-op (returns false) unless ZEPTOMAIL_TOKEN and
- * ZEPTOMAIL_FROM are set — so local dev and unconfigured environments degrade
- * gracefully. Authentication callers must never log codes or credentials.
- * Throws only on a hard send failure (non-2xx from the API).
- *
- * The API host is data-center specific (US api.zeptomail.com, India .in, EU .eu);
- * override via ZEPTOMAIL_ENDPOINT when the account isn't in the US DC.
- */
+import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
+import { awsCredentialsProvider } from '@vercel/oidc-aws-credentials-provider';
+import type { EmailMessage } from './frame';
 
-/** Returns true if the email was sent; false if email isn't configured. */
-export async function sendEmail(to: string, subject: string, html: string): Promise<boolean> {
-  const token = process.env.ZEPTOMAIL_TOKEN;
-  const from = process.env.ZEPTOMAIL_FROM;
-  if (!token || !from) {
-    console.warn('[email] not configured (ZEPTOMAIL_TOKEN/ZEPTOMAIL_FROM unset) — skipping send');
+/** Returns true when SES accepts the email and false when sending is disabled. */
+export async function sendEmail(to: string, message: EmailMessage): Promise<boolean> {
+  const region = process.env.SOPHY_SES_REGION?.trim();
+  const from = process.env.SOPHY_SES_FROM?.trim();
+  const roleArn = process.env.SOPHY_SES_ROLE_ARN?.trim();
+  const isVercel = Boolean(process.env.VERCEL_ENV);
+  const recipient = process.env.VERCEL_ENV === 'production'
+    ? to
+    : process.env.SOPHY_MAIL_TEST_TO?.trim();
+
+  if (!recipient) return false;
+  if (!region || !from || (isVercel && !roleArn)) {
+    console.warn('[email] SES configuration incomplete');
     return false;
   }
-  const endpoint = process.env.ZEPTOMAIL_ENDPOINT || 'https://api.zeptomail.com/v1.1/email';
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      accept: 'application/json',
-      authorization: `Zoho-enczapikey ${token}`,
-    },
-    body: JSON.stringify({
-      from: { address: from },
-      to: [{ email_address: { address: to } }],
-      subject,
-      htmlbody: html,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`ZeptoMail send failed: ${res.status} ${body.slice(0, 300)}`);
-  }
-  return true;
-}
 
-/** Minimal HTML escaping for interpolating user/content strings into email bodies. */
-export function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+  const client = new SESv2Client({
+    region,
+    credentials: roleArn ? awsCredentialsProvider({ roleArn, clientConfig: { region } }) : undefined,
+  });
+  try {
+    await client.send(new SendEmailCommand({
+      FromEmailAddress: from,
+      Destination: { ToAddresses: [recipient] },
+      Content: {
+        Simple: {
+          Subject: { Data: message.subject, Charset: 'UTF-8' },
+          Body: {
+            Html: { Data: message.html, Charset: 'UTF-8' },
+            Text: { Data: message.text, Charset: 'UTF-8' },
+          },
+        },
+      },
+    }));
+    return true;
+  } catch (error) {
+    // Provider responses can include addresses or message content.
+    const name = error instanceof Error && /^[a-zA-Z]+$/.test(error.name) ? error.name : 'Error';
+    console.error('[email] SES send failed', { name });
+    throw new Error('SES did not accept the email');
+  } finally {
+    client.destroy();
+  }
 }

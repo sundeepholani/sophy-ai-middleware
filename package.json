@@ -19,9 +19,11 @@
   },
   "dependencies": {
     "@ai-sdk/gateway": "^3.0.133",
+    "@aws-sdk/client-sesv2": "^3.1175.0",
     "@base-ui/react": "^1.5.0",
     "@vercel/blob": "^2.4.0",
     "@vercel/functions": "^3.7.1",
+    "@vercel/oidc-aws-credentials-provider": "^3.3.21",
     "ai": "^6.0.207",
     "ai-gateway-v4": "npm:@ai-sdk/gateway@4.0.31",
     "ai-v7": "npm:ai@7.0.41",
