@@ -25,3 +25,16 @@ Sophy has a public face: the marketing landing at `app/(marketing)/page.tsx` (se
 - **New product capability** (e.g. tool calling, knowledgebases, a new model capability) → add or adjust the landing feature list / copy so the site reflects what Sophy actually does.
 - **Purely internal change** (no client- or user-visible effect) → no docs change needed; say so explicitly rather than skipping silently.
 - Don't document behavior the proxy doesn't have. The site is light-themed and reuses `components/brand.tsx` + the existing `components/ui/*` primitives (base-ui `render` prop, not `asChild`).
+
+# Transactional email
+
+Use the 1Office Workflow / PACE format for new and changed mail. Reuse
+`lib/email/frame.ts` for the 600px Arial card, indigo header, greeting, concise
+intro, left-ruled label/value rows, and grey automated footer explaining why
+the recipient received the email. Use timestamps in IST, and show changes
+with `from → to`. Use names and employee codes when available. Add buttons
+only for a page the recipient can open. Keep the plain-text copy in sync.
+
+Send to real recipients only from production. Route local and preview mail to
+the configured test inbox. Render changed mail at desktop and phone widths in
+headless Chromium and share the previews with the PR.

@@ -1,14 +1,6 @@
-/**
- * Eval summary email: formats the run summary into HTML and sends via the shared
- * transactional sender (lib/email/send). Feature-gated at the sender — when email
- * isn't configured the send is a no-op and finalization still completes.
- */
 import type { EvalSummary } from '@/lib/eval/aggregate';
 import { deblindReason, shortModel } from '@/lib/eval/deblind';
-import { sendEmail, escapeHtml } from '@/lib/email/send';
-
-/** Back-compat alias — eval finalization sends through the shared sender. */
-export { sendEmail as sendEvalEmail };
+import { renderEmail, type EmailMessage } from '@/lib/email/frame';
 
 function fmtUsd(n: number | null): string {
   return n == null ? '—' : `$${n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '.0')}`;
@@ -25,7 +17,7 @@ export function formatEvalEmail(args: {
   challengerModel: string;
   judgeModel: string;
   summary: EvalSummary;
-}): { subject: string; html: string } {
+}): EmailMessage {
   const s = args.summary;
   const subject = `Eval: ${args.challengerModel} vs ${args.championModel} — ${
     s.recommendation === 'switch'
@@ -42,34 +34,33 @@ export function formatEvalEmail(args: {
       ? '—'
       : `${s.projectedMonthlyCostDeltaUsd < 0 ? '−' : '+'}$${Math.abs(s.projectedMonthlyCostDeltaUsd).toFixed(2)}/mo`;
 
-  const examples = s.examples
-    .map((e) => {
-      const winnerModel = shortModel(
-        e.winner === 'challenger' ? args.challengerModel : args.championModel,
-      );
-      const reason = deblindReason(e.reason, e.orderSwapped, args.championModel, args.challengerModel);
-      return `<li><b>${escapeHtml(winnerModel)} won</b>: ${escapeHtml(reason)}</li>`;
-    })
-    .join('');
+  const comparison = (champion: string, challenger: string) => `${champion} → ${challenger}`;
 
-  const html = `
-  <div style="font-family:system-ui,sans-serif;max-width:640px;color:#111">
-    <h2 style="margin:0 0 4px">Model eval complete</h2>
-    <p style="font-size:16px;margin:8px 0 16px"><b>${escapeHtml(s.headline)}</b></p>
-    <table style="border-collapse:collapse;font-size:14px;width:100%">
-      <tr><td style="padding:4px 8px;color:#666">Champion</td><td style="padding:4px 8px"><code>${escapeHtml(args.championModel)}</code></td></tr>
-      <tr><td style="padding:4px 8px;color:#666">Challenger</td><td style="padding:4px 8px"><code>${escapeHtml(args.challengerModel)}</code></td></tr>
-      <tr><td style="padding:4px 8px;color:#666">Judge</td><td style="padding:4px 8px"><code>${escapeHtml(args.judgeModel)}</code></td></tr>
-      <tr><td style="padding:4px 8px;color:#666">Samples</td><td style="padding:4px 8px">${s.total}</td></tr>
-      <tr><td style="padding:4px 8px;color:#666">Wins (challenger / champion / tie)</td><td style="padding:4px 8px">${s.winsChallenger} / ${s.winsChampion} / ${s.ties}</td></tr>
-      <tr><td style="padding:4px 8px;color:#666">Challenger win-rate (decided)</td><td style="padding:4px 8px">${pct(s.challengerWinRate)} ${s.ci ? `(95% CI ${pct(s.ci.low)}–${pct(s.ci.high)})` : ''}</td></tr>
-      <tr><td style="padding:4px 8px;color:#666">Avg cost per task (champion → challenger)</td><td style="padding:4px 8px">${fmtUsd(s.avgChampionCostUsd)} → ${fmtUsd(s.avgChallengerCostUsd)}</td></tr>
-      <tr><td style="padding:4px 8px;color:#666">Projected monthly cost impact</td><td style="padding:4px 8px">${costDelta}</td></tr>
-      <tr><td style="padding:4px 8px;color:#666">Avg latency (champion → challenger)</td><td style="padding:4px 8px">${fmtMs(s.avgChampionLatencyMs)} → ${fmtMs(s.avgChallengerLatencyMs)}</td></tr>
-    </table>
-    ${examples ? `<h3 style="margin:16px 0 4px">Example verdicts</h3><ul style="font-size:14px;padding-left:18px">${examples}</ul>` : ''}
-    <p style="font-size:12px;color:#888;margin-top:16px">Sophy · the model field is owned by the key; switch the key's model in the admin console if you agree.</p>
-  </div>`;
-
-  return { subject, html };
+  return renderEmail({
+    subject,
+    headline: 'Model evaluation complete',
+    intro: s.headline,
+    details: [
+      { label: 'Current model', value: args.championModel },
+      { label: 'Challenger', value: args.challengerModel },
+      { label: 'Judge', value: args.judgeModel },
+      { label: 'Samples', value: String(s.total) },
+      { label: 'Wins (challenger / current / tie)', value: `${s.winsChallenger} / ${s.winsChampion} / ${s.ties}` },
+      {
+        label: 'Challenger win rate (excluding ties)',
+        value: `${pct(s.challengerWinRate)}${s.ci ? ` (95% confidence interval ${pct(s.ci.low)}–${pct(s.ci.high)})` : ''}`,
+      },
+      { label: 'Average cost per task', value: comparison(fmtUsd(s.avgChampionCostUsd), fmtUsd(s.avgChallengerCostUsd)) },
+      { label: 'Projected monthly cost change', value: costDelta },
+      { label: 'Average latency', value: comparison(fmtMs(s.avgChampionLatencyMs), fmtMs(s.avgChallengerLatencyMs)) },
+    ],
+    notes: s.examples.map((example) => {
+      const winner = example.winner === 'challenger' ? args.challengerModel : args.championModel;
+      return {
+        label: `${shortModel(winner)} won`,
+        value: deblindReason(example.reason, example.orderSwapped, args.championModel, args.challengerModel),
+      };
+    }),
+    reason: 'This email address is listed for evaluation results in the project settings.',
+  });
 }

@@ -36,7 +36,8 @@ import {
   validateCloudflareCredential,
 } from '@/lib/gateway/cloudflare-provider';
 import { validateGatewayCredential } from '@/lib/gateway/project-provider';
-import { sendEmail, escapeHtml } from '@/lib/email/send';
+import { invitationEmail } from '@/lib/email/auth';
+import { sendEmail } from '@/lib/email/send';
 import { env } from '@/lib/env';
 import { LEGACY_PROJECT_ID } from '@/lib/projects/constants';
 import type { CloudflareCredentialActionResult } from '@/components/admin/project-types';
@@ -638,6 +639,10 @@ export async function disconnectProjectCloudflare(input: {
 }
 
 async function requestOrigin(): Promise<string | null> {
+  if (process.env.VERCEL_ENV === 'preview') {
+    const preview = process.env.VERCEL_URL;
+    return preview ? `https://${preview}` : null;
+  }
   const explicit = env.appOrigin();
   if (explicit) return explicit;
   if (env.isProd()) return null;
@@ -653,18 +658,9 @@ function invitationUrl(origin: string, rawToken: string): string {
   return url.toString();
 }
 
-function invitationHtml(projectName: string, role: ProjectRole, url: string): string {
-  return `
-    <div style="font-family:system-ui,sans-serif;max-width:520px;color:#111">
-      <h2 style="margin:0 0 8px">Join ${escapeHtml(projectName)} in Sophy</h2>
-      <p style="font-size:14px;margin:0 0 16px">You were invited as ${role === 'admin' ? 'a Project Admin' : 'an Editor'}.</p>
-      <p><a href="${url}" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:10px 16px;border-radius:8px;font-size:14px">Review invitation</a></p>
-      <p style="font-size:12px;color:#777;margin-top:16px">This link expires in 7 days. Joining is explicit; opening the email does not accept it.</p>
-    </div>`;
-}
-
 async function deliverInvitation(input: {
   email: string;
+  inviterEmail: string;
   projectName: string;
   role: ProjectRole;
   rawToken: string;
@@ -673,18 +669,10 @@ async function deliverInvitation(input: {
   if (!origin) return;
   const url = invitationUrl(origin, input.rawToken);
   try {
-    const sent = await sendEmail(
-      input.email,
-      `Join ${input.projectName} in Sophy`,
-      invitationHtml(input.projectName, input.role, url),
-    );
-    if (!sent && !env.isProd()) console.info(`[invite] DEV link for ${input.email}: ${url}`);
-  } catch (error) {
-    console.error('[invite] email delivery failed', {
-      projectName: input.projectName,
-      email: input.email,
-      error,
-    });
+    await sendEmail(input.email, invitationEmail({ ...input, url }));
+  } catch {
+    // The invitation is still valid if email delivery fails.
+    console.error('[invite] email delivery failed');
   }
 }
 
@@ -780,6 +768,7 @@ export async function inviteProjectMember(input: {
 
   await deliverInvitation({
     email,
+    inviterEmail: viewer.email,
     projectName: viewer.projectName,
     role,
     rawToken: token.raw,
@@ -1012,6 +1001,7 @@ export async function resendProjectInvitation(input: {
   });
   await deliverInvitation({
     email: invitation.email,
+    inviterEmail: viewer.email,
     projectName: viewer.projectName,
     role: invitation.role,
     rawToken: token.raw,
